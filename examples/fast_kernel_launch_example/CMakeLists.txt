@@ -37,6 +37,9 @@ set(INCLUDE_DIRECTORIES
     ${Python3_INCLUDE_DIRS}
     ${TORCH_INCLUDE_DIRS}
     ${TORCH_NPU_INCLUDE_PATH}
+    # Keep torch_npu's bundled ACL headers on one version. Some torch_npu
+    # headers include third_party/acl directly and then include acl/*.
+    ${TORCH_NPU_INCLUDE_PATH}/third_party/acl/inc
     ${ASCEND_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
     ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include

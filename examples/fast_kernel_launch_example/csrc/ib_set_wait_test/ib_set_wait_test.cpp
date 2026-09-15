@@ -8,7 +8,6 @@
 #include <torch/library.h>
 
 #include "kernel_operator.h"
-#include "platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
 
@@ -18,6 +17,7 @@ namespace IBSetWaitTest {
 constexpr int64_t SYNC_WORKSPACE_ELEMENTS = 8;
 constexpr int64_t SYNC_WORKSPACE_BYTES = SYNC_WORKSPACE_ELEMENTS * sizeof(int32_t);
 constexpr int64_t LOGICAL_BLOCK_NUM = 2;
+constexpr int64_t MAX_MATRIX_ELEMENTS = 8192;
 
 TORCH_LIBRARY_FRAGMENT(EXTENSION_MODULE_NAME, m)
 {
@@ -31,6 +31,7 @@ void CheckArguments(const torch::Tensor &workspace, int64_t matrixElements)
     TORCH_CHECK(workspace.is_contiguous(), "workspace must be contiguous.");
     TORCH_CHECK(matrixElements > 0, "matrix_elements must be positive.");
     TORCH_CHECK(matrixElements % 8 == 0, "matrix_elements must be a multiple of 8 (32-byte aligned).");
+    TORCH_CHECK(matrixElements <= MAX_MATRIX_ELEMENTS, "matrix_elements exceeds the test kernel's UB limit.");
     TORCH_CHECK(
         workspace.numel() == SYNC_WORKSPACE_ELEMENTS + 2 * matrixElements,
         "workspace must contain 8 synchronization elements followed by matrices A and B.");
@@ -113,13 +114,6 @@ torch::Tensor ib_set_wait_test_npu(const torch::Tensor &workspace, int64_t matri
 {
     CheckArguments(workspace, matrixElements);
     TORCH_CHECK(workspace.device().type() == c10::DeviceType::PrivateUse1, "workspace must be on an NPU device.");
-
-    auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
-    TORCH_CHECK(ascendcPlatform->GetCoreNumAiv() >= LOGICAL_BLOCK_NUM, "at least two AIV cores are required.");
-    uint64_t ubSize = 0;
-    ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
-    const uint64_t requiredUb = SYNC_WORKSPACE_BYTES + 3ULL * matrixElements * sizeof(int32_t);
-    TORCH_CHECK(requiredUb <= ubSize, "matrix is too large for the kernel's UB queues.");
 
     const c10::OptionalDeviceGuard guard(workspace.device());
     auto stream = c10_npu::getCurrentNPUStream().stream(false);
