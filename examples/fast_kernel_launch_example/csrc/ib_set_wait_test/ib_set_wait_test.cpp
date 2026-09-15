@@ -3,6 +3,7 @@
  * Licensed under CANN Open Software License Agreement Version 2.0.
  */
 
+#include "acl/acl.h"
 #include <ATen/Operators.h>
 #include <torch/all.h>
 #include <torch/library.h>
@@ -117,7 +118,7 @@ torch::Tensor ib_set_wait_test_npu(const torch::Tensor &workspace, int64_t matri
 
     const c10::OptionalDeviceGuard guard(workspace.device());
     auto stream = c10_npu::getCurrentNPUStream().stream(false);
-    auto workspacePtr = reinterpret_cast<GM_ADDR>(workspace.data_ptr());
+    auto workspacePtr = (GM_ADDR)workspace.data_ptr();
     const uint32_t matrixElementsU32 = static_cast<uint32_t>(matrixElements);
     auto aclCall = [=]() -> int {
         ib_set_wait_test_kernel<<<LOGICAL_BLOCK_NUM, nullptr, stream>>>(workspacePtr, matrixElementsU32);
