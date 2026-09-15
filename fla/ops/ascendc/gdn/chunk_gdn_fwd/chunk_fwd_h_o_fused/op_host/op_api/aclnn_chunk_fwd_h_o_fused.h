@@ -28,10 +28,8 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
     bool useExp2,
     bool stateVFirst,
     const char *outputLayout,
-    const aclTensor *hOut,
-    const aclTensor *vNewOut,
-    const aclTensor *finalStateOut,
     const aclTensor *oOut,
+    const aclTensor *finalStateOut,
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 

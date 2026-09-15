@@ -48,11 +48,9 @@ public:
         this->Input("chunk_indices").ParamType(OPTIONAL).ValueDepend(OPTIONAL)
             .DataType(indexTypes).Format(formats).UnknownShapeFormat(formats).AutoContiguous();
 
-        this->Output("h").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
-        this->Output("v_new").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
+        this->Output("o").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
         this->Output("final_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats)
             .UnknownShapeFormat(formats);
-        this->Output("o").ParamType(REQUIRED).DataType(dataTypes).Format(formats).UnknownShapeFormat(formats);
 
         this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
         this->Attr("chunk_size").AttrType(REQUIRED).Int(64);

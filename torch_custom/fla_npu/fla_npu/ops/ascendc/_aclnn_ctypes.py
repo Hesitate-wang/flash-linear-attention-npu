@@ -84,6 +84,27 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
         ctypes.POINTER(ctypes.c_void_p),  # executor
     ],
+    "aclnnChunkFwdHOFused": [
+        ctypes.c_void_p,  # k
+        ctypes.c_void_p,  # w
+        ctypes.c_void_p,  # u
+        ctypes.c_void_p,  # g
+        ctypes.c_void_p,  # gkOptional
+        ctypes.c_void_p,  # initialStateOptional
+        ctypes.c_void_p,  # q
+        ctypes.c_void_p,  # cuSeqlensOptional
+        ctypes.c_void_p,  # chunkIndicesOptional
+        ctypes.c_bool,  # outputFinalState
+        ctypes.c_int64,  # chunkSize
+        ctypes.c_double,  # scale
+        ctypes.c_bool,  # useExp2
+        ctypes.c_bool,  # stateVFirst
+        ctypes.c_char_p,  # outputLayout
+        ctypes.c_void_p,  # oOut
+        ctypes.c_void_p,  # finalStateOut
+        ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
+        ctypes.POINTER(ctypes.c_void_p),  # executor
+    ],
     "aclnnChunkGatedDeltaRuleBwdFinalize": [
         *([ctypes.c_void_p] * 14),  # required and optional tensor descriptors
         ctypes.c_void_p,  # cu_seqlens optional
@@ -1282,6 +1303,176 @@ def npu_chunk_fwd_o(
             ctx.tensor(out, "out"),
         ],
         out,
+    )
+
+
+def npu_chunk_fwd_h_o_fused(
+    k,
+    w,
+    u,
+    g,
+    q,
+    *,
+    gk=None,
+    initial_state=None,
+    output_final_state=False,
+    chunk_size=64,
+    cu_seqlens=None,
+    chunk_indices=None,
+    scale=1.0,
+    use_exp2=False,
+    state_v_first=False,
+    output_layout="BNSD",
+):
+    import torch
+
+    op_name = "npu_chunk_fwd_h_o_fused"
+    output_final_state = _optional_bool(output_final_state, False)
+    chunk_size = _optional_int(chunk_size, 64)
+    use_exp2 = _optional_bool(use_exp2, False)
+    state_v_first = _optional_bool(state_v_first, False)
+    output_layout = str(output_layout)
+
+    if chunk_size not in (64, 128):
+        raise RuntimeError(f"{op_name}: chunk_size must be 64 or 128.")
+    if len(_shape(k)) != 4 or len(_shape(w)) != 4 or len(_shape(u)) != 4:
+        raise RuntimeError(f"{op_name}: k, w and u must be rank-4 BNSD tensors.")
+    if len(_shape(q)) != 4 or len(_shape(g)) != 3:
+        raise RuntimeError(f"{op_name}: q must be rank 4 and g must be rank 3.")
+
+    batch, k_heads, seqlen, k_dim = _shape(k)
+    _, v_heads, _, v_dim = _shape(u)
+    if min(batch, k_heads, v_heads, seqlen, k_dim, v_dim) <= 0:
+        raise RuntimeError(f"{op_name}: tensor dimensions must be positive.")
+    if k_dim != 128 or v_dim not in (128, 256):
+        raise RuntimeError(f"{op_name}: K must be 128 and V must be 128 or 256.")
+    if _shape(q) != _shape(k):
+        raise RuntimeError(f"{op_name}: q and k must have the same shape.")
+    if _shape(w) != (batch, v_heads, seqlen, k_dim):
+        raise RuntimeError(f"{op_name}: w must be [B, HV, T, K].")
+    if _shape(u) != (batch, v_heads, seqlen, v_dim):
+        raise RuntimeError(f"{op_name}: u must be [B, HV, T, V].")
+    if v_heads < k_heads or v_heads % k_heads != 0:
+        raise RuntimeError(f"{op_name}: HV must be divisible by HK.")
+    if _shape(g) != (batch, v_heads, seqlen):
+        raise RuntimeError(f"{op_name}: g must be [B, HV, T].")
+    if k.dtype not in {torch.float16, torch.bfloat16}:
+        raise RuntimeError(f"{op_name}: q/k/w/u must use float16 or bfloat16.")
+    if q.dtype != k.dtype or w.dtype != k.dtype or u.dtype != k.dtype:
+        raise RuntimeError(f"{op_name}: q, k, w and u must have the same dtype.")
+    if g.dtype not in {torch.float32, k.dtype}:
+        raise RuntimeError(f"{op_name}: g must use float32 or the q/k/w/u dtype.")
+    if gk is not None:
+        if _shape(gk) != (batch, v_heads, seqlen, k_dim):
+            raise RuntimeError(f"{op_name}: gk must be [B, HV, T, K].")
+        if gk.dtype != g.dtype:
+            raise RuntimeError(f"{op_name}: gk and g must have the same dtype.")
+
+    if (cu_seqlens is None) != (chunk_indices is None):
+        raise RuntimeError(f"{op_name}: cu_seqlens and chunk_indices must be both present or both absent.")
+    cu = None if cu_seqlens is None else tuple(int(value) for value in cu_seqlens)
+    indices = None if chunk_indices is None else tuple(int(value) for value in chunk_indices)
+    if cu is not None:
+        if batch != 1:
+            raise RuntimeError(f"{op_name}: variable-length BNSD input requires B=1.")
+        if len(cu) < 2 or cu[0] != 0 or cu[-1] != seqlen or any(a >= b for a, b in zip(cu, cu[1:])):
+            raise RuntimeError(
+                f"{op_name}: cu_seqlens must be strictly increasing, start at 0 and end at T."
+            )
+        if len(indices) % 2 != 0:
+            raise RuntimeError(f"{op_name}: chunk_indices must contain flattened (sequence, chunk) pairs.")
+        canonical_indices = []
+        for sequence, (begin, end) in enumerate(zip(cu, cu[1:])):
+            for chunk in range((end - begin + chunk_size - 1) // chunk_size):
+                canonical_indices.extend((sequence, chunk))
+        if indices != tuple(canonical_indices):
+            raise RuntimeError(f"{op_name}: chunk_indices must use canonical sequence-major order.")
+
+    sequences = len(cu) - 1 if cu is not None else batch
+    state_tail = (v_dim, k_dim) if state_v_first else (k_dim, v_dim)
+    if initial_state is not None:
+        if _shape(initial_state) != (sequences, v_heads, *state_tail):
+            raise RuntimeError(f"{op_name}: initial_state shape does not match state_v_first.")
+        if initial_state.dtype not in {k.dtype, torch.float32}:
+            raise RuntimeError(f"{op_name}: initial_state must use the input dtype or float32.")
+
+    if output_layout == "BNSD":
+        o_shape = (batch, v_heads, seqlen, v_dim)
+    elif output_layout == "BSND":
+        o_shape = (batch, seqlen, v_heads, v_dim)
+    elif output_layout == "TND" and batch == 1:
+        o_shape = (seqlen, v_heads, v_dim)
+    elif output_layout == "NTD" and batch == 1:
+        o_shape = (v_heads, seqlen, v_dim)
+    else:
+        raise RuntimeError(f"{op_name}: invalid output_layout for the current batch.")
+    if use_exp2 and output_layout not in {"BSND", "TND"}:
+        raise RuntimeError(f"{op_name}: use_exp2=True requires BSND or TND output_layout.")
+    if not use_exp2 and output_layout not in {"BNSD", "NTD"}:
+        raise RuntimeError(f"{op_name}: use_exp2=False requires BNSD or NTD output_layout.")
+
+    o_out = _empty(o_shape, u)
+    if output_final_state:
+        state_template = initial_state if initial_state is not None else k
+        state_dtype = initial_state.dtype if initial_state is not None else torch.float32
+        final_state_out = _empty(
+            (sequences, v_heads, *state_tail), state_template, dtype=state_dtype
+        )
+    else:
+        final_state_out = None
+    outputs = (o_out, final_state_out)
+    layout_buffer = ctypes.create_string_buffer(output_layout.encode("utf-8"))
+
+    def nd_tensor(ctx, tensor, name):
+        if tensor is None:
+            return ctx.tensor(None, name)
+        loaded_torch_npu = sys.modules.get("torch_npu")
+        if loaded_torch_npu is not None:
+            try:
+                actual_format = int(loaded_torch_npu.get_npu_format(tensor))
+            except Exception as exc:
+                raise RuntimeError(f"{op_name}: cannot determine the real NPU format of {name}.") from exc
+        else:
+            actual_format = _acl_format(tensor)
+        if actual_format not in {ACL_FORMAT_NCHW, ACL_FORMAT_ND, ACL_FORMAT_NCDHW, ACL_FORMAT_NCL}:
+            raise RuntimeError(
+                f"{op_name}: {name} must use a standard contiguous-compatible layout; "
+                f"private NPU format {actual_format} is not supported."
+            )
+        storage_shape = (
+            _shape(tensor)
+            if tensor.is_contiguous() and int(tensor.storage_offset()) == 0
+            else None
+        )
+        return ctx.tensor(
+            tensor,
+            name,
+            acl_format_override=ACL_FORMAT_ND,
+            storage_shape_override=storage_shape,
+        )
+
+    return _call_aclnn(
+        "aclnnChunkFwdHOFused",
+        lambda ctx: [
+            nd_tensor(ctx, k, "k"),
+            nd_tensor(ctx, w, "w"),
+            nd_tensor(ctx, u, "u"),
+            nd_tensor(ctx, g, "g"),
+            nd_tensor(ctx, gk, "gk"),
+            nd_tensor(ctx, initial_state, "initial_state"),
+            nd_tensor(ctx, q, "q"),
+            ctx.int_array(cu),
+            ctx.int_array(indices),
+            ctypes.c_bool(output_final_state),
+            ctypes.c_int64(chunk_size),
+            ctypes.c_double(float(scale)),
+            ctypes.c_bool(use_exp2),
+            ctypes.c_bool(state_v_first),
+            ctypes.cast(layout_buffer, ctypes.c_char_p),
+            nd_tensor(ctx, o_out, "o"),
+            nd_tensor(ctx, final_state_out, "final_state"),
+        ],
+        outputs,
     )
 
 

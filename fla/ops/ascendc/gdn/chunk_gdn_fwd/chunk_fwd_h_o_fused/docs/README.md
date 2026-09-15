@@ -8,5 +8,5 @@ This directory contains:
 - `validation.md`: temporary development-time experiments and results; remove it
   after final conclusions have been moved to the operator and ATK READMEs.
 
-The current interface preserves `h` and `v_new` as outputs while removing them
-from the O-stage input list. They are passed directly between the two phases.
+The public interface exposes only `o` and the optional `final_state`; `h` and
+`v_new` remain internal values passed directly between the two phases.

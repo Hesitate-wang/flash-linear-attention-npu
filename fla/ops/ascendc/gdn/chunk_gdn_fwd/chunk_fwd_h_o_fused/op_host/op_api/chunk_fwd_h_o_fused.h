@@ -8,7 +8,7 @@
 #include "opdev/op_executor.h"
 
 namespace l0op {
-const std::array<const aclTensor *, 4> ChunkFwdHOFused(
+const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const aclTensor *k,
     const aclTensor *w,
     const aclTensor *u,
@@ -23,10 +23,8 @@ const std::array<const aclTensor *, 4> ChunkFwdHOFused(
     double scale,
     bool useExp2,
     const char *outputLayout,
-    const aclTensor *hOut,
-    const aclTensor *vNewOut,
-    const aclTensor *finalStateOut,
     const aclTensor *oOut,
+    const aclTensor *finalStateOut,
     aclOpExecutor *executor);
 } // namespace l0op
 #endif

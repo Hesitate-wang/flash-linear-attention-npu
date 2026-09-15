@@ -7,6 +7,7 @@
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
 #include "opdev/op_log.h"
+#include <initializer_list>
 #include <string>
 
 using namespace op;
@@ -15,6 +16,15 @@ namespace l0op {
 OP_TYPE_REGISTER(ChunkFwdHOFused);
 
 namespace {
+op::Shape MakeShape(std::initializer_list<int64_t> dims)
+{
+    op::Shape shape;
+    for (int64_t dim : dims) {
+        shape.AppendDim(dim);
+    }
+    return shape;
+}
+
 const aclTensor *ConvertIntArray(const aclIntArray *value, aclOpExecutor *executor)
 {
     if (value == nullptr) {
@@ -31,7 +41,7 @@ const aclTensor *ConvertIntArray(const aclIntArray *value, aclOpExecutor *execut
 }
 } // namespace
 
-const std::array<const aclTensor *, 4> ChunkFwdHOFused(
+const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const aclTensor *k,
     const aclTensor *w,
     const aclTensor *u,
@@ -46,20 +56,18 @@ const std::array<const aclTensor *, 4> ChunkFwdHOFused(
     double scale,
     bool useExp2,
     const char *outputLayout,
-    const aclTensor *hOut,
-    const aclTensor *vNewOut,
-    const aclTensor *finalStateOut,
     const aclTensor *oOut,
+    const aclTensor *finalStateOut,
     aclOpExecutor *executor)
 {
     L0_DFX(ChunkFwdHOFused, k, w, u, g, gkOptional, initialStateOptional, q,
            cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, scale,
-           useExp2, outputLayout, hOut, vNewOut, finalStateOut, oOut);
+           useExp2, outputLayout, oOut, finalStateOut);
     const aclTensor *actualCuSeqlens = ConvertIntArray(cuSeqlensOptional, executor);
     const aclTensor *actualChunkIndices = ConvertIntArray(chunkIndicesOptional, executor);
     if ((cuSeqlensOptional != nullptr && actualCuSeqlens == nullptr) ||
         (chunkIndicesOptional != nullptr && actualChunkIndices == nullptr)) {
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
 
     const auto &kShape = k->GetViewShape();
@@ -71,19 +79,30 @@ const std::array<const aclTensor *, 4> ChunkFwdHOFused(
     const int64_t logicalVHeads = uShape.GetDim(1);
     const int64_t logicalVDim = uShape.GetDim(3);
     const std::string outputLayoutStr(outputLayout == nullptr ? "BNSD" : outputLayout);
+    const aclTensor *finalStateOutKernel = finalStateOut;
+    if (finalStateOutKernel == nullptr) {
+        const DataType stateType = initialStateOptional == nullptr
+                                       ? DataType::DT_FLOAT
+                                       : initialStateOptional->GetDataType();
+        finalStateOutKernel = executor->AllocTensor(MakeShape({0}), stateType, Format::FORMAT_ND);
+        if (finalStateOutKernel == nullptr) {
+            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Alloc finalStateOut placeholder failed.");
+            return {nullptr, nullptr};
+        }
+    }
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkFwdHOFused,
         OP_INPUT(k, w, u, g, gkOptional, initialStateOptional, q,
                  actualCuSeqlens, actualChunkIndices),
-        OP_OUTPUT(hOut, vNewOut, finalStateOut, oOut),
+        OP_OUTPUT(oOut, finalStateOutKernel),
         OP_ATTR(outputFinalState, chunkSize, scale, useExp2, outputLayoutStr,
                 logicalBatch, logicalSeqlen, logicalKHeads, logicalVHeads,
                 logicalKDim, logicalVDim));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
-        return {nullptr, nullptr, nullptr, nullptr};
+        return {nullptr, nullptr};
     }
-    return {hOut, vNewOut, finalStateOut, oOut};
+    return {oOut, finalStateOut};
 }
 } // namespace l0op

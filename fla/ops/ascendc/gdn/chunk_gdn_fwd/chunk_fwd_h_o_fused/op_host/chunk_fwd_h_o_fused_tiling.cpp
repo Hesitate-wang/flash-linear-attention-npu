@@ -24,10 +24,8 @@ constexpr size_t INPUT_Q = 6;
 constexpr size_t INPUT_CU_SEQLENS = 7;
 constexpr size_t INPUT_CHUNK_INDICES = 8;
 
-constexpr size_t OUTPUT_H = 0;
-constexpr size_t OUTPUT_V_NEW = 1;
-constexpr size_t OUTPUT_FINAL_STATE = 2;
-constexpr size_t OUTPUT_O = 3;
+constexpr size_t OUTPUT_O = 0;
+constexpr size_t OUTPUT_FINAL_STATE = 1;
 
 constexpr size_t ATTR_OUTPUT_FINAL_STATE = 0;
 constexpr size_t ATTR_CHUNK_SIZE = 1;
@@ -45,8 +43,6 @@ constexpr int64_t DIM_B = 0;
 constexpr int64_t DIM_H = 1;
 constexpr int64_t DIM_T = 2;
 constexpr int64_t DIM_D = 3;
-constexpr int64_t DIM_STATE_K = 3;
-constexpr int64_t DIM_STATE_V = 4;
 constexpr int64_t SUPPORTED_K = 128;
 constexpr int64_t SUPPORTED_V128 = 128;
 constexpr int64_t SUPPORTED_V256 = 256;
@@ -126,20 +122,16 @@ int64_t DtypeToEnum(ge::DataType dtype)
 
 ge::graphStatus ValidateTensorContracts(gert::TilingContext *context, int64_t batch,
                                         int64_t seqlen, int64_t kHeads, int64_t vHeads,
-                                        int64_t kDim, int64_t vDim, int64_t chunkSize,
-                                        bool isVarlen, int64_t chunkNum, int64_t outputLayout)
+                                        int64_t kDim, int64_t vDim, int64_t outputLayout)
 {
     const auto *kShapePtr = context->GetOptionalInputShape(INPUT_K);
     const auto *wShapePtr = context->GetOptionalInputShape(INPUT_W);
     const auto *uShapePtr = context->GetOptionalInputShape(INPUT_U);
     const auto *gShapePtr = context->GetOptionalInputShape(INPUT_G);
     const auto *qShapePtr = context->GetOptionalInputShape(INPUT_Q);
-    const auto *hShapePtr = context->GetOutputShape(OUTPUT_H);
-    const auto *vNewShapePtr = context->GetOutputShape(OUTPUT_V_NEW);
     const auto *oShapePtr = context->GetOutputShape(OUTPUT_O);
     OP_CHECK_IF(!IsRank(kShapePtr, 4) || !IsRank(wShapePtr, 4) || !IsRank(uShapePtr, 4) ||
-                    !IsRank(gShapePtr, 3) || !IsRank(qShapePtr, 4) || !IsRank(hShapePtr, 5) ||
-                    !IsRank(vNewShapePtr, 4) || oShapePtr == nullptr,
+                    !IsRank(gShapePtr, 3) || !IsRank(qShapePtr, 4) || oShapePtr == nullptr,
                 OP_LOGE(context->GetNodeName(), "Invalid required input/output rank."),
                 return ge::GRAPH_FAILED);
 
@@ -173,18 +165,6 @@ ge::graphStatus ValidateTensorContracts(gert::TilingContext *context, int64_t ba
                     OP_LOGE(context->GetNodeName(), "gk must have shape [B,HV,T,K]."),
                     return ge::GRAPH_FAILED);
     }
-
-    const gert::Shape h = hShapePtr->GetStorageShape();
-    const gert::Shape vNew = vNewShapePtr->GetStorageShape();
-    const int64_t expectedHChunks = isVarlen ? chunkNum : (seqlen + chunkSize - 1) / chunkSize;
-    OP_CHECK_IF(h.GetDim(0) != batch || h.GetDim(1) != vHeads || h.GetDim(2) != expectedHChunks ||
-                    h.GetDim(DIM_STATE_K) != kDim || h.GetDim(DIM_STATE_V) != vDim,
-                OP_LOGE(context->GetNodeName(), "Internal h output must be [B,HV,chunks,K,V]."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(vNew.GetDim(DIM_B) != batch || vNew.GetDim(DIM_H) != vHeads ||
-                    vNew.GetDim(DIM_T) != seqlen || vNew.GetDim(DIM_D) != vDim,
-                OP_LOGE(context->GetNodeName(), "v_new output must be [B,HV,T,V]."),
-                return ge::GRAPH_FAILED);
 
     const gert::Shape o = oShapePtr->GetStorageShape();
     bool validO = false;
@@ -392,15 +372,10 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                 OP_LOGE(context->GetNodeName(), "gk dtype must match g dtype."),
                 return ge::GRAPH_FAILED);
     const auto *initialStateDesc = context->GetOptionalInputDesc(INPUT_INITIAL_STATE);
-    const auto *hDesc = context->GetOutputDesc(OUTPUT_H);
-    const auto *vNewDesc = context->GetOutputDesc(OUTPUT_V_NEW);
     const auto *oDesc = context->GetOutputDesc(OUTPUT_O);
-    OP_CHECK_NULL_WITH_CONTEXT(context, hDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, vNewDesc);
     OP_CHECK_NULL_WITH_CONTEXT(context, oDesc);
-    OP_CHECK_IF(hDesc->GetDataType() != inputType || vNewDesc->GetDataType() != inputType ||
-                    oDesc->GetDataType() != inputType,
-                OP_LOGE(context->GetNodeName(), "h/v_new/o dtype must match q/k/w/u."),
+    OP_CHECK_IF(oDesc->GetDataType() != inputType,
+                OP_LOGE(context->GetNodeName(), "o dtype must match q/k/w/u."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(initialStateDesc != nullptr && initialStateDesc->GetDataType() != inputType &&
                     initialStateDesc->GetDataType() != ge::DT_FLOAT,
@@ -450,7 +425,7 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(ValidateTensorContracts(context, batch, seqlen, kHeads, vHeads, kDim, vDim,
-                                        chunkSize, isVarlen, chunkNum, outputLayout) != ge::GRAPH_SUCCESS,
+                                        outputLayout) != ge::GRAPH_SUCCESS,
                 , return ge::GRAPH_FAILED);
 
     tiling->set_batch(isVarlen ? tokenBatch : batch);

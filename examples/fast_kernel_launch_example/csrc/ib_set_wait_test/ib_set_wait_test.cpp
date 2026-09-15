@@ -49,7 +49,7 @@ TORCH_LIBRARY_IMPL(EXTENSION_MODULE_NAME, Meta, m)
     m.impl("ib_set_wait_test", ib_set_wait_test_meta);
 }
 
-__global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace, uint32_t matrixElements)
+extern "C" __global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace, uint32_t matrixElements)
 {
     AscendC::TPipe pipe;
     AscendC::TQue<AscendC::QuePosition::VECIN, 1> syncQueue;

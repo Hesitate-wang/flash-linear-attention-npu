@@ -16,9 +16,10 @@ API are implemented. The device kernel and tests are still pending.
 - `../chunk_fwd_o`: inter/intra-chunk output calculation, output layouts, GEMM
   scheduling, and output epilogue.
 
-The current contract preserves the three H-stage outputs (`h`, `v_new`, and the
-optional `final_state`) and appends `o`. The O stage consumes the same `h` and
-`v_new` buffers directly; they are not separate operator inputs.
+The public contract exposes only the final `o` and, when requested,
+`final_state`. The H-stage `h` and `v_new` values are transient fused-kernel
+intermediates: the O stage consumes them directly and they are not materialized
+as operator outputs.
 
 ## Planned layout
 

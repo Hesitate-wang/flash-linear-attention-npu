@@ -4,8 +4,8 @@
 
 `ChunkFwdHOFused` executes the state recurrence of
 `ChunkGatedDeltaRuleFwdH`, then passes the resulting `h` and `v_new` directly
-to the `ChunkFwdO` calculation. The intermediate tensors are outputs of the
-fused operator but are not duplicated as O-stage inputs.
+to the `ChunkFwdO` calculation. These intermediate values are internal to the
+fused execution and are not operator outputs.
 
 ## Inputs
 
@@ -39,12 +39,12 @@ The tensor inputs retain the FwdH order, with `q` added for the O stage:
 
 ## Outputs
 
-1. `h`: `[B, HV, num_chunks, K, V]`, with the last dimensions swapped when
-   `state_v_first=true`.
-2. `v_new`: `[B, HV, T, V]`.
-3. `final_state`: optional `[N, HV, K, V]`, with the last dimensions swapped
-   when `state_v_first=true`.
-4. `o`: shape selected by `output_layout`, matching `ChunkFwdO`.
+1. `o`: required; shape selected by `output_layout`, matching `ChunkFwdO`.
+2. `final_state`: optional `[N, HV, K, V]`, with the last dimensions swapped
+   when `state_v_first=true`. It is present only when
+   `output_final_state=true`.
 
-The L0 implementation always presents `[K,V]` state layout to the fused kernel;
-the aclnn layer performs the required input/output transposes.
+The Python adapter returns `(o, final_state)`, where `final_state` is `None`
+when it is not requested. The L0 implementation always presents `[K,V]` state
+layout to the fused kernel; the aclnn layer performs the required state
+input/output transposes.

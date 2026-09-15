@@ -43,6 +43,7 @@ _ASCENDC_OPS = (
     "npu_prepare_wy_repr_bwd_da",
     "npu_chunk_bwd_dqkwg",
     "npu_chunk_fwd_o",
+    "npu_chunk_fwd_h_o_fused",
     "npu_chunk_gated_delta_rule_fwd_h",
     "npu_chunk_fwd_h",
     "npu_recompute_w_u_fwd",
@@ -62,7 +63,9 @@ _ASCENDC_OPS = (
 # ChunkFwdH 仅提供解耦 ctypes 稳定入口，不注册 torch.ops.npu，也不挂到
 # torch_npu.ops 的可选兼容命名空间。
 _TORCH_NPU_COMPAT_OPS = tuple(
-    name for name in _ASCENDC_OPS if name != "npu_chunk_fwd_h"
+    name
+    for name in _ASCENDC_OPS
+    if name not in {"npu_chunk_fwd_h", "npu_chunk_fwd_h_o_fused"}
 )
 
 BACKWARD_OPS = {

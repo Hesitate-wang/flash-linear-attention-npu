@@ -56,6 +56,9 @@ class FakeTensor:
     def is_contiguous(self):
         return self._contiguous
 
+    def storage_offset(self):
+        return 0
+
 
 class FakeCallContext:
     def __init__(self):
@@ -83,6 +86,71 @@ class FakeCallContext:
 
 
 class AclnnCtypesAbiTest(unittest.TestCase):
+    def test_chunk_fwd_h_o_fused_signature_and_output_contract(self):
+        expected_argtypes = [
+            *([ctypes.c_void_p] * 9),
+            ctypes.c_bool,
+            ctypes.c_int64,
+            ctypes.c_double,
+            ctypes.c_bool,
+            ctypes.c_bool,
+            ctypes.c_char_p,
+            *([ctypes.c_void_p] * 2),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self.assertEqual(
+            ACLNN_CTYPES._GET_WORKSPACE_ARGTYPES["aclnnChunkFwdHOFused"],
+            expected_argtypes,
+        )
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.float16 = object()
+        fake_torch.bfloat16 = object()
+        fake_torch.float32 = object()
+        dtype = fake_torch.bfloat16
+        k = FakeTensor((1, 2, 129, 128), dtype)
+        q = FakeTensor(k.shape, dtype)
+        w = FakeTensor((1, 4, 129, 128), dtype)
+        u = FakeTensor((1, 4, 129, 256), dtype)
+        g = FakeTensor((1, 4, 129), fake_torch.float32)
+        captured = {}
+
+        def fake_empty(shape, like, **kwargs):
+            return FakeTensor(shape, kwargs.get("dtype", like.dtype))
+
+        def fake_call_aclnn(name, build_args, outputs):
+            context = FakeCallContext()
+            captured["name"] = name
+            captured["args"] = build_args(context)
+            captured["descriptors"] = context.descriptor_names
+            return outputs
+
+        with mock.patch.dict(sys.modules, {"torch": fake_torch, "torch_npu": None}), \
+                mock.patch.object(ACLNN_CTYPES, "_empty", side_effect=fake_empty), \
+                mock.patch.object(ACLNN_CTYPES, "_acl_format", return_value=ACLNN_CTYPES.ACL_FORMAT_ND), \
+                mock.patch.object(ACLNN_CTYPES, "_call_aclnn", side_effect=fake_call_aclnn):
+            outputs = ACLNN_CTYPES.npu_chunk_fwd_h_o_fused(
+                k,
+                w,
+                u,
+                g,
+                q,
+                output_final_state=True,
+                chunk_size=64,
+                scale=0.125,
+            )
+
+        self.assertEqual(captured["name"], "aclnnChunkFwdHOFused")
+        self.assertEqual(len(captured["args"]), 17)
+        self.assertEqual(captured["descriptors"][:7], ["k", "w", "u", "g", "gk", "initial_state", "q"])
+        self.assertEqual(captured["descriptors"][-2:], ["o", "final_state"])
+        self.assertEqual([output.shape for output in outputs], [
+            (1, 4, 129, 256),
+            (1, 4, 128, 256),
+        ])
+        self.assertIs(outputs[1].dtype, fake_torch.float32)
+
     def test_gdn_training_and_inference_output_contract(self):
         import inspect
 

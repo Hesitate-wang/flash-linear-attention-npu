@@ -38,20 +38,9 @@ struct ChunkFwdHOFusedParams {
     bool useExp2;
     bool stateVFirst;
     const char *outputLayout;
-    const aclTensor *hOut;
-    const aclTensor *vNewOut;
-    const aclTensor *finalStateOut;
     const aclTensor *oOut;
+    const aclTensor *finalStateOut;
 };
-
-op::Shape MakeShape(std::initializer_list<int64_t> dims)
-{
-    op::Shape shape;
-    for (int64_t dim : dims) {
-        shape.AppendDim(dim);
-    }
-    return shape;
-}
 
 op::Shape SwapLastTwo(const op::Shape &input)
 {
@@ -97,8 +86,6 @@ aclnnStatus CheckRequired(const ChunkFwdHOFusedParams &params)
     CHECK_COND(params.g != nullptr, ACLNN_ERR_PARAM_NULLPTR,
                "g must not be nullptr because the fused O stage consumes it.");
     CHECK_COND(params.q != nullptr, ACLNN_ERR_PARAM_NULLPTR, "q must not be nullptr.");
-    CHECK_COND(params.hOut != nullptr, ACLNN_ERR_PARAM_NULLPTR, "hOut must not be nullptr.");
-    CHECK_COND(params.vNewOut != nullptr, ACLNN_ERR_PARAM_NULLPTR, "vNewOut must not be nullptr.");
     CHECK_COND(params.oOut != nullptr, ACLNN_ERR_PARAM_NULLPTR, "oOut must not be nullptr.");
     CHECK_COND(!params.outputFinalState || params.finalStateOut != nullptr,
                ACLNN_ERR_PARAM_NULLPTR,
@@ -149,23 +136,8 @@ aclnnStatus CheckShapes(const ChunkFwdHOFusedParams &params)
     const int64_t sequences = params.cuSeqlensOptional == nullptr
                                   ? batch
                                   : static_cast<int64_t>(params.cuSeqlensOptional->Size()) - 1;
-    const int64_t chunks = params.chunkIndicesOptional == nullptr
-                               ? (tokens + params.chunkSize - 1) / params.chunkSize
-                               : static_cast<int64_t>(params.chunkIndicesOptional->Size()) / 2;
     CHECK_COND(params.chunkIndicesOptional == nullptr || params.chunkIndicesOptional->Size() % 2 == 0,
                ACLNN_ERR_PARAM_INVALID, "chunkIndicesOptional must contain flattened pairs.");
-
-    const auto &h = params.hOut->GetViewShape();
-    CHECK_COND(h.GetDimNum() == 5 && h.GetDim(0) == batch && h.GetDim(1) == hv && h.GetDim(2) == chunks,
-               ACLNN_ERR_PARAM_INVALID, "hOut must have shape [B, HV, chunks, K, V].");
-    const int64_t hK = params.stateVFirst ? h.GetDim(4) : h.GetDim(3);
-    const int64_t hV = params.stateVFirst ? h.GetDim(3) : h.GetDim(4);
-    CHECK_COND(hK == kDim && hV == vDim, ACLNN_ERR_PARAM_INVALID,
-               "hOut state dimensions do not match K/V.");
-    const auto &vNew = params.vNewOut->GetViewShape();
-    CHECK_COND(vNew.GetDimNum() == 4 && vNew.GetDim(0) == batch && vNew.GetDim(1) == hv &&
-                   vNew.GetDim(2) == tokens && vNew.GetDim(3) == vDim,
-               ACLNN_ERR_PARAM_INVALID, "vNewOut must have shape [B, HV, T, V].");
 
     const aclTensor *states[] = {params.initialStateOptional, params.finalStateOut};
     for (const aclTensor *stateTensor : states) {
@@ -208,9 +180,8 @@ aclnnStatus CheckDtypes(const ChunkFwdHOFusedParams &params)
     CHECK_COND(inputType == DataType::DT_FLOAT16 || inputType == DataType::DT_BF16,
                ACLNN_ERR_PARAM_INVALID, "input dtype must be float16 or bfloat16.");
     CHECK_COND(params.q->GetDataType() == inputType && params.w->GetDataType() == inputType &&
-                   params.u->GetDataType() == inputType && params.hOut->GetDataType() == inputType &&
-                   params.vNewOut->GetDataType() == inputType && params.oOut->GetDataType() == inputType,
-               ACLNN_ERR_PARAM_INVALID, "q/k/w/u/h/vNew/o must have the same dtype.");
+                   params.u->GetDataType() == inputType && params.oOut->GetDataType() == inputType,
+               ACLNN_ERR_PARAM_INVALID, "q/k/w/u/o must have the same dtype.");
     const DataType gateType = params.g->GetDataType();
     CHECK_COND(gateType == DataType::DT_FLOAT || gateType == inputType,
                ACLNN_ERR_PARAM_INVALID, "g dtype must be float32 or match input dtype.");
@@ -253,19 +224,19 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
     const aclTensor *gkOptional, const aclTensor *initialStateOptional, const aclTensor *q,
     const aclIntArray *cuSeqlensOptional, const aclIntArray *chunkIndicesOptional,
     bool outputFinalState, int64_t chunkSize, double scale, bool useExp2, bool stateVFirst,
-    const char *outputLayout, const aclTensor *hOut, const aclTensor *vNewOut,
-    const aclTensor *finalStateOut, const aclTensor *oOut, uint64_t *workspaceSize,
+    const char *outputLayout, const aclTensor *oOut, const aclTensor *finalStateOut,
+    uint64_t *workspaceSize,
     aclOpExecutor **executor)
 {
     ChunkFwdHOFusedParams params{k, w, u, g, gkOptional, initialStateOptional, q,
                                   cuSeqlensOptional, chunkIndicesOptional, outputFinalState,
                                   chunkSize, scale, useExp2, stateVFirst, outputLayout,
-                                  hOut, vNewOut, finalStateOut, oOut};
+                                  oOut, finalStateOut};
     L2_DFX_PHASE_1(aclnnChunkFwdHOFused,
                    DFX_IN(k, w, u, g, gkOptional, initialStateOptional, q, cuSeqlensOptional,
                           chunkIndicesOptional, outputFinalState, chunkSize, scale, useExp2,
                           stateVFirst, outputLayout),
-                   DFX_OUT(hOut, vNewOut, finalStateOut, oOut));
+                   DFX_OUT(oOut, finalStateOut));
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     aclOpExecutor *executorPtr = uniqueExecutor.get();
@@ -274,53 +245,27 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
     CHECK_RET(CheckDtypes(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(MakeInputsContiguous(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
-    const auto &kShape = params.k->GetViewShape();
-    const auto &uShape = params.u->GetViewShape();
-    const int64_t sequences = params.cuSeqlensOptional == nullptr
-                                  ? kShape.GetDim(0)
-                                  : static_cast<int64_t>(params.cuSeqlensOptional->Size()) - 1;
     const aclTensor *initialStateCompute = params.initialStateOptional;
-    const aclTensor *hCompute = params.hOut;
-    const aclTensor *finalStateCompute = params.finalStateOut;
+    const aclTensor *finalStateCompute = params.outputFinalState ? params.finalStateOut : nullptr;
     if (params.stateVFirst && initialStateCompute != nullptr) {
         initialStateCompute = TransposeLastTwo(initialStateCompute, executorPtr);
         CHECK_RET(initialStateCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
-    if (params.stateVFirst) {
-        hCompute = executorPtr->AllocTensor(SwapLastTwo(params.hOut->GetViewShape()),
-                                            params.hOut->GetDataType(), Format::FORMAT_ND);
-        CHECK_RET(hCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    }
-    if (!params.outputFinalState) {
-        const DataType stateType = initialStateCompute == nullptr
-                                       ? DataType::DT_FLOAT
-                                       : initialStateCompute->GetDataType();
-        finalStateCompute = executorPtr->AllocTensor(
-            MakeShape({sequences, uShape.GetDim(1), kShape.GetDim(3), uShape.GetDim(3)}),
-            stateType, Format::FORMAT_ND);
-    } else if (params.stateVFirst) {
+    if (params.outputFinalState && params.stateVFirst) {
         finalStateCompute = executorPtr->AllocTensor(SwapLastTwo(params.finalStateOut->GetViewShape()),
                                                      params.finalStateOut->GetDataType(), Format::FORMAT_ND);
+        CHECK_RET(finalStateCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
-    CHECK_RET(finalStateCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     auto result = l0op::ChunkFwdHOFused(
         params.k, params.w, params.u, params.g, params.gkOptional, initialStateCompute, params.q,
         params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState,
         params.chunkSize, params.scale, params.useExp2, params.outputLayout,
-        hCompute, params.vNewOut, finalStateCompute, params.oOut, executorPtr);
-    CHECK_RET(result[0] != nullptr && result[1] != nullptr && result[3] != nullptr,
-              ACLNN_ERR_PARAM_NULLPTR);
-
-    const aclTensor *hResult = result[0];
-    if (params.stateVFirst) {
-        hResult = TransposeLastTwo(hResult, executorPtr);
-        CHECK_RET(hResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    }
-    CHECK_RET(l0op::ViewCopy(hResult, params.hOut, executorPtr) != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    CHECK_RET(l0op::ViewCopy(result[1], params.vNewOut, executorPtr) != nullptr, ACLNN_ERR_INNER_NULLPTR);
+        params.oOut, finalStateCompute, executorPtr);
+    CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    CHECK_RET(l0op::ViewCopy(result[0], params.oOut, executorPtr) != nullptr, ACLNN_ERR_INNER_NULLPTR);
     if (params.outputFinalState) {
-        const aclTensor *finalResult = result[2];
+        const aclTensor *finalResult = result[1];
         CHECK_RET(finalResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
         if (params.stateVFirst) {
             finalResult = TransposeLastTwo(finalResult, executorPtr);
@@ -329,8 +274,6 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
         CHECK_RET(l0op::ViewCopy(finalResult, params.finalStateOut, executorPtr) != nullptr,
                   ACLNN_ERR_INNER_NULLPTR);
     }
-    CHECK_RET(l0op::ViewCopy(result[3], params.oOut, executorPtr) != nullptr, ACLNN_ERR_INNER_NULLPTR);
-
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
     uniqueExecutor.ReleaseTo(executor);
     return ACLNN_SUCCESS;

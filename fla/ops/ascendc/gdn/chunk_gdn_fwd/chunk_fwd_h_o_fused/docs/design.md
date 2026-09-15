@@ -12,14 +12,15 @@ device implementation is added.
 
 The fused launch retains the FwdH tensor order and adds `q`. Duplicate FwdO
 inputs (`k`, `g`, `cu_seqlens`, and `chunk_indices`) and the FwdO `v/h` inputs
-are removed. FwdO consumes the `v_new/h` buffers produced by FwdH.
+are removed. FwdO consumes the transient `v_new/h` values produced by FwdH;
+neither value is exposed or saved as a fused-operator output.
 
 The L0 layer derives logical B/H/T/K/V attributes from the tensor descriptors.
-For `state_v_first=true`, aclnn transposes initial state into `[K,V]`, allocates
-an internal `[K,V]` `h`, and transposes state outputs back after execution. This
-keeps the kernel-side H-to-O handoff in one canonical state layout. As in the
-reference FwdH operator, `state_v_first` is an aclnn adapter argument rather than
-an L0/kernel attribute.
+For `state_v_first=true`, aclnn transposes initial state into `[K,V]` and
+transposes the optional final state back after execution. The internal H-to-O
+handoff remains in the canonical `[K,V]` layout without creating an external
+`h` tensor. `state_v_first` is an aclnn adapter argument rather than an
+L0/kernel attribute.
 
 ## Tiling layout
 

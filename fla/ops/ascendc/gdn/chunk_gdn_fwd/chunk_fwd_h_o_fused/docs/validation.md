@@ -4,7 +4,7 @@
 
 | Area | Reference role | Locally owned behavior |
 | --- | --- | --- |
-| H API and state layout | `chunk_gated_delta_rule_fwd_h/op_host` | Input/output order, shape and dtype checks, optional final state, aclnn transposes |
+| H API and state layout | Existing state-update behavior | Input order, shape and dtype checks, optional final state, aclnn transposes |
 | H tiling | Existing state-update behavior | Logical shape, gate modes, workspace and block dimension implemented locally |
 | O API and layout | `chunk_fwd_o/op_host` | `q`, scale, `use_exp2`, output layouts and output validation |
 | O tiling | Existing output behavior | Shape validation, workspace and architecture-specific path implemented locally |
@@ -14,6 +14,8 @@
 
 - Repository-local whitespace and required-file checks: passed.
 - OpDef, L0, aclnn, and tiling parameter order inspected for consistency.
+- Public output order is consistently `o`, optional `final_state`; no `h` or
+  `v_new` output descriptor/allocation remains in the fused host or adapter.
 - Cross-operator source include scan: passed; no sibling operator header,
   processor, internal directory, CMake dependency, or private include remains.
 - Host/kernel tiling mirror check: all 35 fields have identical order.
