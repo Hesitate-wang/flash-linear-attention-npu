@@ -9,8 +9,10 @@ import torch_npu
 import ascend_ops
 
 
-SYNC_WORKSPACE_ELEMENTS = 8  # 32 bytes, required by IBSet/IBWait.
-MATRIX_SHAPE = (64, 64)
+LOGICAL_BLOCK_NUM = 2
+SYNC_WORDS_PER_BLOCK = 8  # One 32-byte IB slot per logical block.
+SYNC_WORKSPACE_ELEMENTS = LOGICAL_BLOCK_NUM * SYNC_WORDS_PER_BLOCK
+MATRIX_SHAPE = (8, 8)
 
 
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU device not found")

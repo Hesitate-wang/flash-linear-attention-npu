@@ -15,9 +15,10 @@
 namespace ascend_ops {
 namespace IBSetWaitTest {
 
-constexpr int64_t SYNC_WORKSPACE_ELEMENTS = 8;
-constexpr int64_t SYNC_WORKSPACE_BYTES = SYNC_WORKSPACE_ELEMENTS * sizeof(int32_t);
 constexpr int64_t LOGICAL_BLOCK_NUM = 2;
+constexpr int64_t SYNC_WORDS_PER_BLOCK = 8;
+constexpr int64_t SYNC_WORKSPACE_ELEMENTS = LOGICAL_BLOCK_NUM * SYNC_WORDS_PER_BLOCK;
+constexpr int64_t SYNC_LOCAL_BYTES = SYNC_WORDS_PER_BLOCK * sizeof(int32_t);
 constexpr int64_t MAX_PAYLOAD_ELEMENTS = 8192;
 
 TORCH_LIBRARY_FRAGMENT(EXTENSION_MODULE_NAME, m)
@@ -35,7 +36,7 @@ void CheckArguments(const torch::Tensor &workspace, int64_t matrixElements)
     TORCH_CHECK(matrixElements <= MAX_PAYLOAD_ELEMENTS, "matrix_elements exceeds the test payload limit.");
     TORCH_CHECK(
         workspace.numel() == SYNC_WORKSPACE_ELEMENTS + 2 * matrixElements,
-        "workspace must contain 8 synchronization elements followed by matrices A and B.");
+        "workspace must contain one 32-byte synchronization slot per logical block, followed by matrices A and B.");
 }
 
 torch::Tensor ib_set_wait_test_meta(const torch::Tensor &workspace, int64_t matrixElements)
@@ -54,11 +55,11 @@ extern "C" __global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace,
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
     AscendC::TPipe pipe;
-    // IBSet/IBWait require a 32-byte local tensor in a Vector position even
-    // though this experiment launches AICs only. Whether this is accepted and
-    // operational is exactly what the test is intended to determine.
-    AscendC::TBuf<AscendC::TPosition::VECCALC> syncBuffer;
-    pipe.InitBuffer(syncBuffer, SYNC_WORKSPACE_BYTES);
+    // Keep the synchronization operand in AIC-accessible L1. If IBSet/IBWait
+    // reject A1, the API cannot be used as a pure AIC-to-AIC primitive; using
+    // VECCALC here would silently turn this into a Vector-local experiment.
+    AscendC::TBuf<AscendC::TPosition::A1> syncBuffer;
+    pipe.InitBuffer(syncBuffer, SYNC_LOCAL_BYTES);
     auto syncLocal = syncBuffer.Get<int32_t>();
 
     auto *workspacePtr = reinterpret_cast<__gm__ int32_t *>(workspace);
@@ -76,6 +77,10 @@ extern "C" __global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace,
         for (uint32_t index = 0; index < matrixElements; ++index) {
             matrixAGm.SetValue(index, static_cast<int32_t>(1));
         }
+        // IBSet orders cores, but it does not replace the producer's local
+        // pipeline completion fence. Publish only after all AIC GM writes have
+        // drained; otherwise the consumer can observe an unwritten tail.
+        AscendC::PipeBarrier<PIPE_ALL>();
         AscendC::IBSet<false>(syncGm, syncLocal, 0, 0);
         return;
     }
@@ -85,10 +90,11 @@ extern "C" __global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace,
         for (uint32_t index = 0; index < matrixElements; ++index) {
             matrixBGm.SetValue(index, matrixAGm.GetValue(index));
         }
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
 }
 
-torch::Tensor ib_set_wait_test_npu(const torch::Tensor &workspace, int64_t matrixElements)
+void ib_set_wait_test_npu(const torch::Tensor &workspace, int64_t matrixElements)
 {
     CheckArguments(workspace, matrixElements);
     TORCH_CHECK(workspace.device().type() == c10::DeviceType::PrivateUse1, "workspace must be on an NPU device.");
@@ -102,7 +108,6 @@ torch::Tensor ib_set_wait_test_npu(const torch::Tensor &workspace, int64_t matri
         return 0;
     };
     at_npu::native::OpCommand::RunOpApi("IBSetWaitTest", aclCall);
-    return workspace;
 }
 
 TORCH_LIBRARY_IMPL(EXTENSION_MODULE_NAME, PrivateUse1, m)
