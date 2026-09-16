@@ -10,20 +10,21 @@ import ascend_ops
 
 
 SYNC_WORKSPACE_ELEMENTS = 8  # 32 bytes, required by IBSet/IBWait.
-MATRIX_SHAPE = (8, 8)
+MATRIX_SHAPE = (64, 64)
 
 
 @pytest.mark.skipif(not torch.npu.is_available(), reason="NPU device not found")
-def test_ib_set_wait_copies_matrix_between_two_logical_cores():
+def test_ib_set_wait_synchronizes_two_aic_cores():
     matrix_elements = MATRIX_SHAPE[0] * MATRIX_SHAPE[1]
 
-    # One zero-initialized GM workspace: [IB sync area | matrix A | matrix B].
+    # Zeroed GM workspace: [IB sync area | producer matrix A | consumer matrix B].
+    # AIC core 0 writes A to one, signals, and AIC core 1 copies A to B after
+    # waiting. Keeping both matrices initially zero prevents a false positive.
     workspace = torch.zeros(
         SYNC_WORKSPACE_ELEMENTS + 2 * matrix_elements,
         dtype=torch.int32,
         device="npu",
     )
-
     torch.ops.ascend_ops.ib_set_wait_test(workspace, matrix_elements)
     torch.npu.synchronize()
 
@@ -35,5 +36,5 @@ def test_ib_set_wait_copies_matrix_between_two_logical_cores():
         SYNC_WORKSPACE_ELEMENTS + matrix_elements :
     ].reshape(MATRIX_SHAPE)
 
-    assert torch.equal(matrix_a, torch.ones_like(matrix_a)), "logical core 0 did not write A to ones"
-    assert torch.equal(matrix_b, matrix_a), "logical core 1 did not copy A to B after IBWait"
+    assert torch.equal(matrix_a, torch.ones_like(matrix_a)), "AIC core 0 corrupted matrix A"
+    assert torch.equal(matrix_b, matrix_a), "AIC core 1 did not copy A to B after IBWait"

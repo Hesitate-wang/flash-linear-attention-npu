@@ -6,8 +6,9 @@ performed by `ChunkGatedDeltaRuleFwdH` with the output calculation performed by
 
 ## Status
 
-The host-side operator definition, combined tiling, L0 API, and two-stage aclnn
-API are implemented. The device kernel and tests are still pending.
+The host-side operator definition, combined tiling, L0/aclnn APIs, and the
+fixed-length Atlas A2 producer/consumer kernel are implemented. Device build,
+accuracy, execution-trace and profiling evidence are still pending.
 
 ## Reference projects
 
@@ -21,7 +22,7 @@ The public contract exposes only the final `o` and, when requested,
 intermediates: the O stage consumes them directly and they are not materialized
 as operator outputs.
 
-## Planned layout
+## Layout
 
 ```text
 chunk_fwd_h_o_fused/
@@ -29,12 +30,11 @@ chunk_fwd_h_o_fused/
 |-- op_host/
 |   `-- op_api/            # OpDef, tiling, L0, and aclnn implementation
 |-- op_kernel/
-|   |-- arch35/            # Ascend 950 implementation
-|   |-- epilogue/          # shared epilogue policies
-|   `-- gemm/              # shared GEMM schedulers and kernels
+|   |-- epilogue/          # operator-local H/O epilogues
+|   `-- gemm/              # operator-local H/O schedulers and kernels
 `-- tests/
     `-- pta/               # CPU reference and PTA comparison cases
 ```
 
-The project is registered for host compilation. A runnable build additionally
-requires the pending `op_kernel/chunk_fwd_h_o_fused.cpp` entry.
+The first kernel uses full-chunk `h`/`v_new` workspace and per-chunk IB
+synchronization. See `docs/design.md` for its current support boundary.

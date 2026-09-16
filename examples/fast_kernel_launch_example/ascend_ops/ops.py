@@ -18,7 +18,7 @@ __all__ = ["groupedmatmul", "ib_set_wait_test"]
 
 
 def ib_set_wait_test(workspace: Tensor, matrix_elements: int) -> Tensor:
-    """Run the two-logical-core IBSet/IBWait interface test in-place."""
+    """Run the two-AIC-core IBSet/IBWait interface test in-place."""
     return torch.ops.ascend_ops.ib_set_wait_test(workspace, matrix_elements)
 
 def groupedmatmul(

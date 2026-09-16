@@ -1,9 +1,14 @@
-# Kernel implementation staging
+# Kernel implementation
 
-The fused kernel will combine the state recurrence from
-`chunk_gated_delta_rule_fwd_h` and the output calculation from `chunk_fwd_o`.
+The fused entry is `chunk_fwd_h_o_fused.cpp`. Its supporting H/O kernels,
+schedulers and epilogues are operator-local copies adapted to the fused
+producer/consumer schedule; they do not include sibling operator or private
+`internal` paths.
 
-The implementation must define the producer/consumer synchronization before
-code is added. `h` and `v_new` must remain transient internal values and be
-passed directly to the O phase without writing public output tensors. Shared
-and Ascend 950 specializations belong in the prepared subdirectories.
+The initial implementation supports fixed-length Atlas A2 exp mode. It uses
+`B * HV` H producers followed by `B * HV` O consumers, full-chunk handoff
+workspace, and per-chunk `IBSet<false>`/`IBWait<false>` synchronization.
+In MIX mode the IB calls execute on the AIV lanes and use the logical AIV index
+space required by the API. Each O AIV acknowledges its completed wait through
+the reverse generation of the current `cube1Done` flag; the O AIC aggregates
+both acknowledgements before reading the complete H/V tiles.

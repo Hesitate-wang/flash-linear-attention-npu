@@ -93,6 +93,11 @@ aclnnStatus CheckRequired(const ChunkFwdHOFusedParams &params)
     CHECK_COND((params.cuSeqlensOptional == nullptr) == (params.chunkIndicesOptional == nullptr),
                ACLNN_ERR_PARAM_INVALID,
                "cuSeqlensOptional and chunkIndicesOptional must be both present or both absent.");
+    CHECK_COND(params.cuSeqlensOptional == nullptr,
+               ACLNN_ERR_PARAM_INVALID,
+               "The first H/O core-pipeline implementation supports fixed-length input only.");
+    CHECK_COND(!params.useExp2, ACLNN_ERR_PARAM_INVALID,
+               "The first H/O core-pipeline implementation supports exp mode only.");
     CHECK_COND(params.chunkSize == 64 || params.chunkSize == 128,
                ACLNN_ERR_PARAM_INVALID, "chunkSize must be 64 or 128.");
     return ACLNN_SUCCESS;
@@ -160,12 +165,6 @@ aclnnStatus CheckShapes(const ChunkFwdHOFusedParams &params)
     if (std::strcmp(layout, "BNSD") == 0) {
         validO = o.GetDimNum() == 4 && o.GetDim(0) == batch && o.GetDim(1) == hv &&
                  o.GetDim(2) == tokens && o.GetDim(3) == vDim;
-    } else if (std::strcmp(layout, "BSND") == 0) {
-        validO = o.GetDimNum() == 4 && o.GetDim(0) == batch && o.GetDim(1) == tokens &&
-                 o.GetDim(2) == hv && o.GetDim(3) == vDim;
-    } else if (std::strcmp(layout, "TND") == 0) {
-        validO = batch == 1 && o.GetDimNum() == 3 && o.GetDim(0) == tokens &&
-                 o.GetDim(1) == hv && o.GetDim(2) == vDim;
     } else if (std::strcmp(layout, "NTD") == 0) {
         validO = batch == 1 && o.GetDimNum() == 3 && o.GetDim(0) == hv &&
                  o.GetDim(1) == tokens && o.GetDim(2) == vDim;
@@ -187,6 +186,11 @@ aclnnStatus CheckDtypes(const ChunkFwdHOFusedParams &params)
                ACLNN_ERR_PARAM_INVALID, "g dtype must be float32 or match input dtype.");
     CHECK_COND(params.gkOptional == nullptr || params.gkOptional->GetDataType() == gateType,
                ACLNN_ERR_PARAM_INVALID, "gk dtype must match g dtype.");
+    CHECK_COND(params.initialStateOptional == nullptr ||
+                   params.initialStateOptional->GetDataType() == inputType ||
+                   params.initialStateOptional->GetDataType() == DataType::DT_FLOAT,
+               ACLNN_ERR_PARAM_INVALID,
+               "initialStateOptional dtype must match inputs or be float32.");
     if (params.outputFinalState) {
         const DataType stateType = params.initialStateOptional == nullptr
                                        ? DataType::DT_FLOAT

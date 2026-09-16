@@ -18,7 +18,7 @@ namespace IBSetWaitTest {
 constexpr int64_t SYNC_WORKSPACE_ELEMENTS = 8;
 constexpr int64_t SYNC_WORKSPACE_BYTES = SYNC_WORKSPACE_ELEMENTS * sizeof(int32_t);
 constexpr int64_t LOGICAL_BLOCK_NUM = 2;
-constexpr int64_t MAX_MATRIX_ELEMENTS = 8192;
+constexpr int64_t MAX_PAYLOAD_ELEMENTS = 8192;
 
 TORCH_LIBRARY_FRAGMENT(EXTENSION_MODULE_NAME, m)
 {
@@ -32,7 +32,7 @@ void CheckArguments(const torch::Tensor &workspace, int64_t matrixElements)
     TORCH_CHECK(workspace.is_contiguous(), "workspace must be contiguous.");
     TORCH_CHECK(matrixElements > 0, "matrix_elements must be positive.");
     TORCH_CHECK(matrixElements % 8 == 0, "matrix_elements must be a multiple of 8 (32-byte aligned).");
-    TORCH_CHECK(matrixElements <= MAX_MATRIX_ELEMENTS, "matrix_elements exceeds the test kernel's UB limit.");
+    TORCH_CHECK(matrixElements <= MAX_PAYLOAD_ELEMENTS, "matrix_elements exceeds the test payload limit.");
     TORCH_CHECK(
         workspace.numel() == SYNC_WORKSPACE_ELEMENTS + 2 * matrixElements,
         "workspace must contain 8 synchronization elements followed by matrices A and B.");
@@ -51,16 +51,15 @@ TORCH_LIBRARY_IMPL(EXTENSION_MODULE_NAME, Meta, m)
 
 extern "C" __global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace, uint32_t matrixElements)
 {
-    AscendC::TPipe pipe;
-    AscendC::TQue<AscendC::QuePosition::VECIN, 1> syncQueue;
-    AscendC::TQue<AscendC::QuePosition::VECIN, 1> inputQueueA;
-    AscendC::TQue<AscendC::QuePosition::VECIN, 1> inputQueueB;
-    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> outputQueue;
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
 
-    pipe.InitBuffer(syncQueue, 1, SYNC_WORKSPACE_BYTES);
-    pipe.InitBuffer(inputQueueA, 1, matrixElements * sizeof(int32_t));
-    pipe.InitBuffer(inputQueueB, 1, matrixElements * sizeof(int32_t));
-    pipe.InitBuffer(outputQueue, 1, matrixElements * sizeof(int32_t));
+    AscendC::TPipe pipe;
+    // IBSet/IBWait require a 32-byte local tensor in a Vector position even
+    // though this experiment launches AICs only. Whether this is accepted and
+    // operational is exactly what the test is intended to determine.
+    AscendC::TBuf<AscendC::TPosition::VECCALC> syncBuffer;
+    pipe.InitBuffer(syncBuffer, SYNC_WORKSPACE_BYTES);
+    auto syncLocal = syncBuffer.Get<int32_t>();
 
     auto *workspacePtr = reinterpret_cast<__gm__ int32_t *>(workspace);
     AscendC::GlobalTensor<int32_t> syncGm;
@@ -72,42 +71,20 @@ extern "C" __global__ __aicore__ void ib_set_wait_test_kernel(GM_ADDR workspace,
 
     const uint32_t blockIdx = AscendC::GetBlockIdx();
     if (blockIdx == 0) {
-        auto matrixA = outputQueue.AllocTensor<int32_t>();
-        AscendC::Duplicate(matrixA, static_cast<int32_t>(1), matrixElements);
-        outputQueue.EnQue(matrixA);
-        matrixA = outputQueue.DeQue<int32_t>();
-        AscendC::DataCopy(matrixAGm, matrixA, matrixElements);
-        outputQueue.FreeTensor(matrixA);
-
-        auto syncLocal = syncQueue.AllocTensor<int32_t>();
-        AscendC::IBSet(syncGm, syncLocal, 0, 0);
-        syncQueue.FreeTensor(syncLocal);
+        // Produce the payload entirely on AIC so a successful consumer result
+        // depends on the AIC-to-AIC synchronization rather than host ordering.
+        for (uint32_t index = 0; index < matrixElements; ++index) {
+            matrixAGm.SetValue(index, static_cast<int32_t>(1));
+        }
+        AscendC::IBSet<false>(syncGm, syncLocal, 0, 0);
         return;
     }
 
     if (blockIdx == 1) {
-        auto syncLocal = syncQueue.AllocTensor<int32_t>();
-        AscendC::IBWait(syncGm, syncLocal, 0, 0);
-        syncQueue.FreeTensor(syncLocal);
-
-        auto matrixA = inputQueueA.AllocTensor<int32_t>();
-        auto matrixB = inputQueueB.AllocTensor<int32_t>();
-        AscendC::DataCopy(matrixA, matrixAGm, matrixElements);
-        AscendC::DataCopy(matrixB, matrixBGm, matrixElements);
-        inputQueueA.EnQue(matrixA);
-        inputQueueB.EnQue(matrixB);
-
-        matrixA = inputQueueA.DeQue<int32_t>();
-        matrixB = inputQueueB.DeQue<int32_t>();
-        auto result = outputQueue.AllocTensor<int32_t>();
-        AscendC::Add(result, matrixA, matrixB, matrixElements);
-        outputQueue.EnQue(result);
-        inputQueueA.FreeTensor(matrixA);
-        inputQueueB.FreeTensor(matrixB);
-
-        result = outputQueue.DeQue<int32_t>();
-        AscendC::DataCopy(matrixBGm, result, matrixElements);
-        outputQueue.FreeTensor(result);
+        AscendC::IBWait<false>(syncGm, syncLocal, 0, 0);
+        for (uint32_t index = 0; index < matrixElements; ++index) {
+            matrixBGm.SetValue(index, matrixAGm.GetValue(index));
+        }
     }
 }
 

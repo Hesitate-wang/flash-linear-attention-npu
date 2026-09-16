@@ -25,17 +25,20 @@ The tensor inputs retain the FwdH order, with `q` added for the O stage:
 
 `cu_seqlens` and `chunk_indices` must be both present or both absent.
 
+The current device implementation accepts fixed-length input only, so both
+optional index inputs must currently be absent.
+
 ## Attributes
 
 - `output_final_state: bool`
 - `chunk_size: int64`, currently 64 or 128
 - `scale: double`
-- `use_exp2: bool`, used by the O stage
+- `use_exp2: bool`; the current Atlas A2 implementation requires `false`
 - `state_v_first: bool`
 - `output_layout: string`, one of `BNSD`, `BSND`, `TND`, or `NTD`
 
-`TND` and `NTD` require physical `B=1`. The current exp2 path accepts
-`BSND/TND`; the exp path accepts `BNSD/NTD`.
+The current exp path accepts `BNSD/NTD`; `NTD` requires physical `B=1`.
+`BSND/TND` remain reserved for the future exp2 implementation.
 
 ## Outputs
 
@@ -48,3 +51,10 @@ The Python adapter returns `(o, final_state)`, where `final_state` is `None`
 when it is not requested. The L0 implementation always presents `[K,V]` state
 layout to the fused kernel; the aclnn layer performs the required state
 input/output transposes.
+
+## Current execution constraints
+
+The first kernel is registered for Atlas A2 (`ascend910b` and
+`ascend910_93`). Let `P = B * HV`; tiling requires `2 * P` to be strictly less
+than the available AIC core count. Shapes outside that condition currently
+fail rather than falling back to a sequential fused schedule.
