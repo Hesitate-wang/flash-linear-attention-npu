@@ -58,8 +58,12 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const char *outputLayout,
     const aclTensor *oOut,
     const aclTensor *finalStateOut,
+    aclnnStatus *status,
     aclOpExecutor *executor)
 {
+    if (status != nullptr) {
+        *status = ACLNN_SUCCESS;
+    }
     L0_DFX(ChunkFwdHOFused, k, w, u, g, gkOptional, initialStateOptional, q,
            cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, scale,
            useExp2, outputLayout, oOut, finalStateOut);
@@ -67,6 +71,9 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const aclTensor *actualChunkIndices = ConvertIntArray(chunkIndicesOptional, executor);
     if ((cuSeqlensOptional != nullptr && actualCuSeqlens == nullptr) ||
         (chunkIndicesOptional != nullptr && actualChunkIndices == nullptr)) {
+        if (status != nullptr) {
+            *status = ACLNN_ERR_INNER_NULLPTR;
+        }
         return {nullptr, nullptr};
     }
 
@@ -87,6 +94,9 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
         finalStateOutKernel = executor->AllocTensor(MakeShape({0}), stateType, Format::FORMAT_ND);
         if (finalStateOutKernel == nullptr) {
             OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Alloc finalStateOut placeholder failed.");
+            if (status != nullptr) {
+                *status = ACLNN_ERR_INNER_NULLPTR;
+            }
             return {nullptr, nullptr};
         }
     }
@@ -100,7 +110,11 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
                 logicalBatch, logicalSeqlen, logicalKHeads, logicalVHeads,
                 logicalKDim, logicalVDim));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE(static_cast<aclnnStatus>(ret),
+                "ADD_TO_LAUNCHER_LIST_AICORE failed with status %d.", ret);
+        if (status != nullptr) {
+            *status = static_cast<aclnnStatus>(ret);
+        }
         return {nullptr, nullptr};
     }
     return {oOut, finalStateOut};

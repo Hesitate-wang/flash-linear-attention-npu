@@ -25,6 +25,7 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const char *outputLayout,
     const aclTensor *oOut,
     const aclTensor *finalStateOut,
+    aclnnStatus *status,
     aclOpExecutor *executor);
 } // namespace l0op
 #endif

@@ -34,6 +34,9 @@
   projection and the complete `ChunkFwdOTilingData` projection consumed by the
   copied Ascend 950 O implementation. `FillOTiling` initializes every field in
   the Ascend 950 projection before dispatch.
+- The aclnn preflight accepts exp/BNSD-or-NTD on Atlas A2 and
+  exp2/BSND-or-TND on Ascend 950. L0 launcher failures preserve their original
+  status instead of being rewritten as `ACLNN_ERR_PARAM_NULLPTR` (161001).
 - The IB local tensor remains on the SIMD side as required by the API. In MIX
   mode the IB index space is `2 * blockDim`; paired AIV waits are aggregated by
   the reverse `cube1Done` generation before the AIC reads complete H/V tiles.

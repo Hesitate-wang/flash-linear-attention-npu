@@ -22,6 +22,12 @@ using namespace op;
 
 namespace {
 
+bool IsAscend950()
+{
+    const char *socName = aclrtGetSocName();
+    return socName != nullptr && std::strstr(socName, "Ascend950") != nullptr;
+}
+
 struct ChunkFwdHOFusedParams {
     const aclTensor *k;
     const aclTensor *w;
@@ -96,8 +102,9 @@ aclnnStatus CheckRequired(const ChunkFwdHOFusedParams &params)
     CHECK_COND(params.cuSeqlensOptional == nullptr,
                ACLNN_ERR_PARAM_INVALID,
                "The first H/O core-pipeline implementation supports fixed-length input only.");
-    CHECK_COND(!params.useExp2, ACLNN_ERR_PARAM_INVALID,
-               "The first H/O core-pipeline implementation supports exp mode only.");
+    CHECK_COND((IsAscend950() && params.useExp2) || (!IsAscend950() && !params.useExp2),
+               ACLNN_ERR_PARAM_INVALID,
+               "Ascend950 requires useExp2=true; Atlas A2 requires useExp2=false.");
     CHECK_COND(params.chunkSize == 64 || params.chunkSize == 128,
                ACLNN_ERR_PARAM_INVALID, "chunkSize must be 64 or 128.");
     return ACLNN_SUCCESS;
@@ -168,6 +175,12 @@ aclnnStatus CheckShapes(const ChunkFwdHOFusedParams &params)
     } else if (std::strcmp(layout, "NTD") == 0) {
         validO = batch == 1 && o.GetDimNum() == 3 && o.GetDim(0) == hv &&
                  o.GetDim(1) == tokens && o.GetDim(2) == vDim;
+    } else if (std::strcmp(layout, "BSND") == 0) {
+        validO = o.GetDimNum() == 4 && o.GetDim(0) == batch && o.GetDim(1) == tokens &&
+                 o.GetDim(2) == hv && o.GetDim(3) == vDim;
+    } else if (std::strcmp(layout, "TND") == 0) {
+        validO = batch == 1 && o.GetDimNum() == 3 && o.GetDim(0) == tokens &&
+                 o.GetDim(1) == hv && o.GetDim(2) == vDim;
     }
     CHECK_COND(validO, ACLNN_ERR_PARAM_INVALID, "oOut shape does not match outputLayout.");
     return ACLNN_SUCCESS;
@@ -261,11 +274,13 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
         CHECK_RET(finalStateCompute != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
 
+    aclnnStatus launchStatus = ACLNN_SUCCESS;
     auto result = l0op::ChunkFwdHOFused(
         params.k, params.w, params.u, params.g, params.gkOptional, initialStateCompute, params.q,
         params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState,
         params.chunkSize, params.scale, params.useExp2, params.outputLayout,
-        params.oOut, finalStateCompute, executorPtr);
+        params.oOut, finalStateCompute, &launchStatus, executorPtr);
+    CHECK_RET(launchStatus == ACLNN_SUCCESS, launchStatus);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
     CHECK_RET(l0op::ViewCopy(result[0], params.oOut, executorPtr) != nullptr, ACLNN_ERR_INNER_NULLPTR);
     if (params.outputFinalState) {
