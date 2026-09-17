@@ -267,6 +267,13 @@ ge::graphStatus FillWorkspace(ChunkFwdHOFusedTilingData &tiling, size_t systemWo
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus TilingForA5Skeleton(gert::TilingContext *context)
+{
+    OP_LOGE(context->GetNodeName(),
+            "Ascend 950 registration and kernel skeleton are available, but the A5 computation is not implemented.");
+    return ge::GRAPH_FAILED;
+}
+
 } // namespace
 
 ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
@@ -421,7 +428,14 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                                   : DtypeToEnum(initialStateDesc->GetDataType());
 
     const auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    OP_CHECK_IF(platform.GetCurNpuArch() != NpuArch::DAV_2201 || useExp2,
+    const NpuArch npuArch = platform.GetCurNpuArch();
+    OP_CHECK_IF(npuArch != NpuArch::DAV_2201 && npuArch != NpuArch::DAV_3510,
+                OP_LOGE(context->GetNodeName(), "ChunkFwdHOFused supports Atlas A2 and the A5 skeleton only."),
+                return ge::GRAPH_FAILED);
+    if (npuArch == NpuArch::DAV_3510) {
+        return TilingForA5Skeleton(context);
+    }
+    OP_CHECK_IF(useExp2,
                 OP_LOGE(context->GetNodeName(),
                         "The first H/O core-pipeline implementation supports Atlas A2 exp mode only."),
                 return ge::GRAPH_FAILED);

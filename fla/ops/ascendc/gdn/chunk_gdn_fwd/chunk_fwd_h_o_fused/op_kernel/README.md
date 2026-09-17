@@ -12,3 +12,7 @@ In MIX mode the IB calls execute on the AIV lanes and use the logical AIV index
 space required by the API. Each O AIV acknowledges its completed wait through
 the reverse generation of the current `cube1Done` flag; the O AIC aggregates
 both acknowledgements before reading the complete H/V tiles.
+
+For Ascend 950, the entry selects an architecture-isolated no-op skeleton at
+compile time. The host rejects A5 execution during tiling, so this branch is
+only for build and registration bring-up until the arch35 computation exists.

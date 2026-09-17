@@ -1,5 +1,7 @@
-# Test staging
+# Tests
 
-Add formal operator tests here after the CPU reference and supported input
-domain have been confirmed. Coverage must include precision, performance,
-memory safety, and determinism as required by the repository test workflow.
+The PTA test in `pta/test_fwd_h_o_fused.py` covers the supported fixed-length
+fused path against a CPU reference. Its `--compare-composed` switch additionally
+compares the fused result with the public H-then-O operator composition.
+
+See `pta/README.md` for commands and supported parameters.

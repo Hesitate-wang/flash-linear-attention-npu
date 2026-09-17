@@ -54,7 +54,12 @@ input/output transposes.
 
 ## Current execution constraints
 
-The first kernel is registered for Atlas A2 (`ascend910b` and
+The functional kernel is registered for Atlas A2 (`ascend910b` and
 `ascend910_93`). Let `P = B * HV`; tiling requires `2 * P` to be strictly less
 than the available AIC core count. Shapes outside that condition currently
 fail rather than falling back to a sequential fused schedule.
+
+Ascend 950 is registered as a compilation skeleton. Its host and kernel entry
+points build as part of the operator package, but A5 tiling deliberately fails
+with a not-implemented error; A5 is not yet part of the executable API support
+domain.

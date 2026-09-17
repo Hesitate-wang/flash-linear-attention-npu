@@ -7,8 +7,10 @@ performed by `ChunkGatedDeltaRuleFwdH` with the output calculation performed by
 ## Status
 
 The host-side operator definition, combined tiling, L0/aclnn APIs, and the
-fixed-length Atlas A2 producer/consumer kernel are implemented. Device build,
-accuracy, execution-trace and profiling evidence are still pending.
+fixed-length Atlas A2 producer/consumer kernel are implemented. Ascend 950 has
+a registration and compilation skeleton only; its tiling route rejects runtime
+execution until the A5 computation is implemented. Device build, accuracy,
+execution-trace and profiling evidence are still pending.
 
 ## Reference projects
 

@@ -13,3 +13,11 @@ add_ops_compile_options(
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
 )
+
+if("${ASCEND_COMPUTE_UNIT}" STREQUAL "ascend950")
+    add_ops_compile_options(
+        OP_NAME ChunkFwdHOFused
+        COMPUTE_UNIT Ascend950PR_9599
+        OPTIONS -mllvm -cce-aicore-dcci-before-kernel-end=false
+    )
+endif()

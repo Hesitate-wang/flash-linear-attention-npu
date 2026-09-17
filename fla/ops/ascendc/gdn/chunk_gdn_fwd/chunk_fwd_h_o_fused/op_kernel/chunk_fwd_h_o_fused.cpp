@@ -4,13 +4,17 @@
  */
 
 #include "chunk_fwd_h_o_fused_struct.h"
+#include "kernel_operator.h"
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "arch35/chunk_fwd_h_o_fused_skeleton.hpp"
+#else
 #include "chunk_gated_delta_rule_fwd_h_struct.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #undef CATLASS_ARCH
 #include "chunk_fwd_o_struct.h"
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
 
-#include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include <cstddef>
 
@@ -199,6 +203,7 @@ __aicore__ inline void RunPipeline(
 
 } // namespace
 } // namespace GDN
+#endif
 
 extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
@@ -207,6 +212,10 @@ extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
 {
     REGISTER_TILING_DEFAULT(GDN::ChunkFwdHOFusedTilingData);
     GET_TILING_DATA_WITH_STRUCT(GDN::ChunkFwdHOFusedTilingData, tilingData, tiling);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    GDN::Arch35::RunChunkFwdHOFusedSkeleton(tilingData);
+#else
     if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPipeline<DTYPE_K, Catlass::Gemm::Kernel::GDNFwdHTileShapes128>(
@@ -218,4 +227,5 @@ extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
             k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
             o, final_state, workspace, tiling, tilingData);
     }
+#endif
 }

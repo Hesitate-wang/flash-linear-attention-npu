@@ -28,6 +28,10 @@
 - Static task-map simulation for `(B,HV,NC)=(1,8,3)` and `(2,4,3)` confirms
   that producer `p` and consumer `P+p` enumerate identical `(b,hv,chunk)`
   tuples and use 16 of 24 mixed cores.
+- Ascend 950 is present in the OpDef registration and selects the
+  `__CCE_AICORE__ == 310` skeleton entry. That branch does not include the A2
+  Catlass implementation, and A5 tiling fails explicitly before launch while
+  computation remains unimplemented.
 - `git diff --check` passes (line-ending conversion warnings only).
 
 ## Environment limitation and pending device evidence
@@ -36,7 +40,8 @@ This Windows workspace exposes no configured CANN environment, NPU device or
 usable Python runtime, so an operator build and runtime accuracy test cannot be
 completed here. The following remain mandatory on the target environment:
 
-1. build and install the single-operator package for `ascend910b`;
+1. build and install the single-operator package for `ascend910b` and
+   `ascend950`; for A5, verify registration and the expected tiling rejection;
 2. run a minimum fixed-length case with at least three chunks, V=128, with and
    without initial/final state and `gk`;
 3. run V=256 and tail-chunk cases;

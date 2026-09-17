@@ -6,8 +6,14 @@ Rules version: `V2`
 
 The first device implementation targets the fixed-length Atlas A2 exp path.
 It fuses the state recurrence and output calculation in one kernel launch while
-keeping `h` and `v_new` internal. Varlen, Ascend 950 and exp2 are rejected by
-tiling until they have their own reviewed scheduling and synchronization path.
+keeping `h` and `v_new` internal. Varlen and exp2 are rejected by tiling until
+they have their own reviewed scheduling and synchronization path.
+
+Ascend 950 has a registration-only arch35 skeleton. Compile-time architecture
+selection prevents the A5 compiler from including the A2 Catlass implementation.
+The A5 kernel entry is intentionally empty and its host tiling route returns an
+explicit not-implemented error, so no invocation can report success with
+uninitialized outputs.
 
 ## 2. Core mapping and execution order
 
