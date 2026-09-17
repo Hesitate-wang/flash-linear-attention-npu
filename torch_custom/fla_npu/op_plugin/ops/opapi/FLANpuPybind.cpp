@@ -115,6 +115,23 @@ at::Tensor npu_chunk_fwd_o(
     c10::optional<bool> use_exp2,
     c10::string_view output_layout);
 
+std::tuple<at::Tensor, at::Tensor> npu_chunk_fwd_h_o_fused(
+    const at::Tensor &k,
+    const at::Tensor &w,
+    const at::Tensor &u,
+    const at::Tensor &g,
+    const at::Tensor &q,
+    const c10::optional<at::Tensor> &gk,
+    const c10::optional<at::Tensor> &initial_state,
+    c10::optional<bool> output_final_state,
+    c10::optional<int64_t> chunk_size,
+    at::OptionalIntArrayRef cu_seqlens,
+    at::OptionalIntArrayRef chunk_indices,
+    double scale,
+    c10::optional<bool> use_exp2,
+    c10::optional<bool> state_v_first,
+    c10::string_view output_layout);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_chunk_gated_delta_rule_fwd_h(
     const at::Tensor &k,
     const at::Tensor &w,
@@ -371,6 +388,39 @@ at::Tensor py_npu_chunk_fwd_o(
         c10::string_view(output_layout.data(), output_layout.size()));
 }
 
+std::tuple<at::Tensor, at::Tensor> py_npu_chunk_fwd_h_o_fused(
+    const at::Tensor &k,
+    const at::Tensor &w,
+    const at::Tensor &u,
+    const at::Tensor &g,
+    const at::Tensor &q,
+    const py::object &gk,
+    const py::object &initial_state,
+    const py::object &output_final_state,
+    const py::object &chunk_size,
+    const py::object &cu_seqlens,
+    const py::object &chunk_indices,
+    double scale,
+    const py::object &use_exp2,
+    const py::object &state_v_first,
+    const std::string &output_layout)
+{
+    const auto cu_seqlens_vec = optional_int_array(cu_seqlens);
+    const auto chunk_indices_vec = optional_int_array(chunk_indices);
+    return op_api::npu_chunk_fwd_h_o_fused(
+        k, w, u, g, q,
+        optional_tensor(gk),
+        optional_tensor(initial_state),
+        optional_value<bool>(output_final_state),
+        optional_value<int64_t>(chunk_size),
+        optional_int_array_ref(cu_seqlens_vec),
+        optional_int_array_ref(chunk_indices_vec),
+        scale,
+        optional_value<bool>(use_exp2),
+        optional_value<bool>(state_v_first),
+        c10::string_view(output_layout.data(), output_layout.size()));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> py_npu_chunk_gated_delta_rule_fwd_h(
     const at::Tensor &k,
     const at::Tensor &w,
@@ -622,6 +672,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         py::arg("chunk_size") = py::none(),
         py::arg("transpose_state_layout") = false,
         py::arg("use_exp2") = false,
+        py::arg("output_layout") = "BNSD");
+    m.def(
+        "npu_chunk_fwd_h_o_fused",
+        &py_npu_chunk_fwd_h_o_fused,
+        py::arg("k"),
+        py::arg("w"),
+        py::arg("u"),
+        py::arg("g"),
+        py::arg("q"),
+        py::kw_only(),
+        py::arg("gk") = py::none(),
+        py::arg("initial_state") = py::none(),
+        py::arg("output_final_state") = false,
+        py::arg("chunk_size") = 64,
+        py::arg("cu_seqlens") = py::none(),
+        py::arg("chunk_indices") = py::none(),
+        py::arg("scale") = 1.0,
+        py::arg("use_exp2") = false,
+        py::arg("state_v_first") = false,
         py::arg("output_layout") = "BNSD");
     m.def(
         "npu_chunk_gated_delta_rule_fwd_h",

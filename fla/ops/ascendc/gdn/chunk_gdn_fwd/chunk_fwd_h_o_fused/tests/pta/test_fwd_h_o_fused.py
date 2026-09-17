@@ -29,6 +29,12 @@ def parse_args() -> argparse.Namespace:
         description="Validate ChunkFwdHOFused and optionally compare it with H -> O."
     )
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument(
+        "--runtime",
+        choices=("direct", "legacy"),
+        default="direct",
+        help="Use the decoupled ctypes path or the opt-in torch.ops.npu extension.",
+    )
     parser.add_argument("--seed", type=int, default=20260917)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--tokens", type=int, default=192)
@@ -219,7 +225,15 @@ def main() -> None:
     )
     npu_case = to_npu(cpu_case, args.device)
 
-    fused_o, fused_final = ascendc.chunk_fwd_h_o_fused(
+    if args.runtime == "legacy":
+        import fla_npu
+
+        fla_npu.load_legacy_torch_ops()
+        fused_op = torch.ops.npu.npu_chunk_fwd_h_o_fused
+    else:
+        fused_op = ascendc.chunk_fwd_h_o_fused
+
+    fused_o, fused_final = fused_op(
         npu_case.k,
         npu_case.w,
         npu_case.u,

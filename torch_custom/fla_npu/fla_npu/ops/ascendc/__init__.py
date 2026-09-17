@@ -65,7 +65,7 @@ _ASCENDC_OPS = (
 _TORCH_NPU_COMPAT_OPS = tuple(
     name
     for name in _ASCENDC_OPS
-    if name not in {"npu_chunk_fwd_h", "npu_chunk_fwd_h_o_fused"}
+    if name != "npu_chunk_fwd_h"
 )
 
 BACKWARD_OPS = {

@@ -70,11 +70,16 @@ def smoke_chunk_scaled_dot_kkt() -> None:
     torch.testing.assert_close(out, expected, rtol=5e-3, atol=5e-3)
 
 
+def smoke_chunk_fwd_h_o_fused_registration() -> None:
+    _legacy_op("npu_chunk_fwd_h_o_fused")
+
+
 def main() -> int:
     _setup_npu()
     try:
         smoke_chunk_local_cumsum()
         smoke_chunk_scaled_dot_kkt()
+        smoke_chunk_fwd_h_o_fused_registration()
     except SkipLegacySmoke as exc:
         print(f"[SKIP] legacy torch.ops.npu smoke: {exc}")
         return 0

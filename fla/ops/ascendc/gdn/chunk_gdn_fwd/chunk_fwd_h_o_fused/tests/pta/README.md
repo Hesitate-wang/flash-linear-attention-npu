@@ -1,6 +1,6 @@
 # PTA test
 
-`test_fwd_h_o_fused.py` uses the direct, decoupled Python interface:
+`test_fwd_h_o_fused.py` uses the direct, decoupled Python interface by default:
 
 ```python
 from fla_npu.ops import ascendc
@@ -13,6 +13,17 @@ is exercised.
 ```bash
 python test_fwd_h_o_fused.py
 ```
+
+To validate the optional legacy PTA dispatcher registration, first build the
+wheel with `FLA_NPU_BUILD_LEGACY_EXTENSION=1`, then run:
+
+```bash
+python test_fwd_h_o_fused.py --runtime legacy
+```
+
+This path loads the extension with `fla_npu.load_legacy_torch_ops()` and calls
+`torch.ops.npu.npu_chunk_fwd_h_o_fused`. The default path remains decoupled
+from the PyTorch/torch_npu C++ ABI.
 
 Add `--compare-composed` to also run
 `ascendc.chunk_gated_delta_rule_fwd_h` followed by

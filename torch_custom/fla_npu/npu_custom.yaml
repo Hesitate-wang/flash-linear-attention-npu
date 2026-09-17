@@ -37,6 +37,8 @@ custom:
     op_api: all_version
   - func: npu_chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False, bool? use_exp2=False, str output_layout="BNSD") -> Tensor
     op_api: all_version
+  - func: npu_chunk_fwd_h_o_fused(Tensor k, Tensor w, Tensor u, Tensor g, Tensor q, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=64, int[]? cu_seqlens=None, int[]? chunk_indices=None, float scale=1.0, bool? use_exp2=False, bool? state_v_first=False, str output_layout="BNSD") -> (Tensor, Tensor)
+    op_api: all_version
   - func: npu_chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? state_v_first=False) -> (Tensor, Tensor, Tensor)
     op_api: all_version
   - func: npu_recompute_w_u_fwd(Tensor k, Tensor v, Tensor beta, Tensor A, int chunk_size, *, Tensor? g=None, Tensor? gk=None, int[]? cu_seqlens=None, int[]? chunk_indices=None) -> (Tensor, Tensor)

@@ -426,6 +426,95 @@ at::Tensor npu_chunk_fwd_o(
     return o;
 }
 
+::std::tuple<at::Tensor, at::Tensor> npu_chunk_fwd_h_o_fused(
+    const at::Tensor &k,
+    const at::Tensor &w,
+    const at::Tensor &u,
+    const at::Tensor &g,
+    const at::Tensor &q,
+    const c10::optional<at::Tensor> &gk,
+    const c10::optional<at::Tensor> &initial_state,
+    c10::optional<bool> output_final_state,
+    c10::optional<int64_t> chunk_size,
+    at::OptionalIntArrayRef cu_seqlens,
+    at::OptionalIntArrayRef chunk_indices,
+    double scale,
+    c10::optional<bool> use_exp2,
+    c10::optional<bool> state_v_first,
+    c10::string_view output_layout)
+{
+    TORCH_CHECK(k.dim() == 4 && w.dim() == 4 && u.dim() == 4 && q.dim() == 4 && g.dim() == 3,
+                "npu_chunk_fwd_h_o_fused: k, w, u and q must be rank 4 and g must be rank 3.");
+    const int64_t batch = k.size(0);
+    const int64_t key_heads = k.size(1);
+    const int64_t seqlen = k.size(2);
+    const int64_t key_dim = k.size(3);
+    const int64_t value_heads = u.size(1);
+    const int64_t value_dim = u.size(3);
+    TORCH_CHECK(q.sizes() == k.sizes(), "npu_chunk_fwd_h_o_fused: q and k must have the same shape.");
+    TORCH_CHECK(w.sizes() == at::IntArrayRef({batch, value_heads, seqlen, key_dim}),
+                "npu_chunk_fwd_h_o_fused: w must be [B, HV, T, K].");
+    TORCH_CHECK(u.size(0) == batch && u.size(2) == seqlen,
+                "npu_chunk_fwd_h_o_fused: u must be [B, HV, T, V].");
+    TORCH_CHECK(g.sizes() == at::IntArrayRef({batch, value_heads, seqlen}),
+                "npu_chunk_fwd_h_o_fused: g must be [B, HV, T].");
+    TORCH_CHECK(key_heads > 0 && value_heads >= key_heads && value_heads % key_heads == 0,
+                "npu_chunk_fwd_h_o_fused: HV must be divisible by HK.");
+
+    const bool output_final_state_ = output_final_state.value_or(false);
+    const int64_t chunk_size_ = chunk_size.value_or(64);
+    const bool use_exp2_ = use_exp2.value_or(false);
+    const bool state_v_first_ = state_v_first.value_or(false);
+    const std::string output_layout_(output_layout.data(), output_layout.size());
+    TORCH_CHECK(chunk_size_ == 64 || chunk_size_ == 128,
+                "npu_chunk_fwd_h_o_fused: chunk_size must be 64 or 128.");
+    TORCH_CHECK((cu_seqlens.has_value() && chunk_indices.has_value()) ||
+                    (!cu_seqlens.has_value() && !chunk_indices.has_value()),
+                "npu_chunk_fwd_h_o_fused: cu_seqlens and chunk_indices must be both present or both absent.");
+
+    std::vector<int64_t> output_shape;
+    if (output_layout_ == "BNSD") {
+        output_shape = {batch, value_heads, seqlen, value_dim};
+    } else if (output_layout_ == "BSND") {
+        output_shape = {batch, seqlen, value_heads, value_dim};
+    } else if (output_layout_ == "TND" && batch == 1) {
+        output_shape = {seqlen, value_heads, value_dim};
+    } else if (output_layout_ == "NTD" && batch == 1) {
+        output_shape = {value_heads, seqlen, value_dim};
+    } else {
+        TORCH_CHECK(false, "npu_chunk_fwd_h_o_fused: invalid output_layout for the current batch.");
+    }
+    TORCH_CHECK((use_exp2_ && (output_layout_ == "BSND" || output_layout_ == "TND")) ||
+                    (!use_exp2_ && (output_layout_ == "BNSD" || output_layout_ == "NTD")),
+                "npu_chunk_fwd_h_o_fused: output_layout does not match use_exp2.");
+
+    const int64_t seq_num = GetKdaSeqNum(batch, cu_seqlens);
+    const std::vector<int64_t> state_tail = state_v_first_
+                                                ? std::vector<int64_t>{value_dim, key_dim}
+                                                : std::vector<int64_t>{key_dim, value_dim};
+    at::Tensor o_out = at::empty(output_shape, u.options());
+    at::Tensor final_state_out;
+    if (output_final_state_) {
+        auto state_options = initial_state.has_value() && initial_state->defined()
+                                 ? initial_state->options()
+                                 : k.options().dtype(at::kFloat);
+        final_state_out = at::empty(
+            {seq_num, value_heads, state_tail[0], state_tail[1]}, state_options);
+    }
+
+    const at::Tensor &gk_ = c10::value_or_else(gk, [] { return at::Tensor(); });
+    const at::Tensor &initial_state_ = c10::value_or_else(initial_state, [] { return at::Tensor(); });
+    const char *output_layout_cstr = output_layout_.c_str();
+    EXEC_NPU_CMD_EXT(
+        aclnnChunkFwdHOFused,
+        k, w, u, g, gk_, initial_state_, q,
+        cu_seqlens, chunk_indices,
+        output_final_state_, chunk_size_, scale, use_exp2_, state_v_first_, output_layout_cstr,
+        o_out, final_state_out
+    );
+    return std::make_tuple(o_out, output_final_state_ ? final_state_out : at::Tensor());
+}
+
 ::std::tuple<at::Tensor,at::Tensor,at::Tensor> npu_chunk_gated_delta_rule_fwd_h(
     const at::Tensor & k, 
     const at::Tensor & w, 

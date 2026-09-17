@@ -26,6 +26,7 @@ ASCENDC_NAMES = (
     "causal_conv1d_update",
     "chunk_bwd_dqkwg",
     "chunk_bwd_dv_local",
+    "chunk_fwd_h_o_fused",
     "chunk_fwd_o",
     "chunk_gated_delta_rule_bwd_dhu",
     "chunk_gated_delta_rule_fwd_prepare",

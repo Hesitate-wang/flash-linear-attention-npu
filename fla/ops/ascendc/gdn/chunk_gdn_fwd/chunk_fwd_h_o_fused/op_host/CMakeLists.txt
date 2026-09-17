@@ -3,12 +3,6 @@
 
 add_op_to_compiled_list()
 
-get_filename_component(_chunk_fwd_h_o_fused_op_dir "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
-set(chunk_fwd_h_o_fused_dir "${_chunk_fwd_h_o_fused_op_dir}" CACHE INTERNAL
-    "Source directory for the public ChunkFwdHOFused opFile")
-set(chunk_fwd_ho_fused_dir "${_chunk_fwd_h_o_fused_op_dir}" CACHE INTERNAL
-    "Source directory alias for the CANN-collapsed ChunkFwdHOFused opFile")
-
 if(BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE chunk_fwd_ho_fused_def.cpp)
 endif()
