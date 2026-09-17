@@ -31,8 +31,16 @@ python test_fwd_h_o_fused.py \
   --output-final-state
 ```
 
+On Ascend 950, enable the exp2/BSND path and optionally compare it with the
+standalone arch35 H then O composition:
+
+```bash
+python test_fwd_h_o_fused.py --use-exp2 --compare-composed
+```
+
 Useful shape and dtype switches include `--tokens`, `--chunk-size`,
 `--value-dim`, `--dtype`, `--gate-dtype`, `--batch`, `--k-heads`, and
-`--v-heads`. The fused implementation currently accepts fixed-length Atlas A2
-exp mode only, with `K=128`, `V=128/256`, and chunk size `64/128`. The target
-must also satisfy `2 * batch * v_heads < physical AIC core count`.
+`--v-heads`. Atlas A2 accepts exp mode with `K=128`, `V=128/256`, chunk size
+`64/128`, and requires `2 * batch * v_heads < physical AIC core count`.
+Ascend 950 uses `--use-exp2` and requires BF16 data, BF16/FP32 gates,
+`K=V=128`, chunk size 64, and `v_heads/k_heads` in `[1,4]`.

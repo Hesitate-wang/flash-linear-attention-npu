@@ -7,7 +7,7 @@
 #include "kernel_operator.h"
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-#include "arch35/chunk_fwd_h_o_fused_skeleton.hpp"
+#include "arch35/chunk_fwd_h_o_fused_a5.hpp"
 #else
 #include "chunk_gated_delta_rule_fwd_h_struct.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
@@ -214,7 +214,9 @@ extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
     GET_TILING_DATA_WITH_STRUCT(GDN::ChunkFwdHOFusedTilingData, tilingData, tiling);
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
-    GDN::Arch35::RunChunkFwdHOFusedSkeleton(tilingData);
+    GDN::Arch35::RunChunkFwdHOFusedA5(
+        k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
+        o, final_state, workspace, tiling, tilingData);
 #else
     if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);

@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-state", action="store_true")
     parser.add_argument("--output-final-state", action="store_true")
     parser.add_argument(
+        "--use-exp2",
+        action="store_true",
+        help="Use the A5 exp2/BSND path instead of the A2 exp/BNSD path.",
+    )
+    parser.add_argument(
         "--compare-composed",
         action="store_true",
         help="Also run chunk_gated_delta_rule_fwd_h followed by chunk_fwd_o.",
@@ -56,6 +61,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("batch, tokens and head counts must be positive")
     if args.v_heads < args.k_heads or args.v_heads % args.k_heads != 0:
         raise ValueError("v-heads must be divisible by k-heads")
+    if args.use_exp2:
+        if args.dtype != "bfloat16":
+            raise ValueError("the A5 exp2 path requires --dtype bfloat16")
+        if args.value_dim != 128 or args.chunk_size != 64:
+            raise ValueError("the A5 exp2 path requires --value-dim 128 --chunk-size 64")
+        if args.v_heads // args.k_heads > 4:
+            raise ValueError("the A5 exp2 path requires v-heads/k-heads <= 4")
 
 
 def make_case(args: argparse.Namespace) -> Case:
@@ -97,7 +109,7 @@ def make_case(args: argparse.Namespace) -> Case:
 
 
 def cpu_reference(
-    case: Case, chunk_size: int, scale: float
+    case: Case, chunk_size: int, scale: float, use_exp2: bool
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     q = case.q.float()
     k = case.k.float()
@@ -148,14 +160,17 @@ def cpu_reference(
                 v_chunk = v_new[batch_idx, v_head, begin:end].float()
                 gate = g[batch_idx, v_head, begin:end]
                 attention = q_chunk @ k_chunk.transpose(0, 1)
-                attention *= torch.exp(gate[:, None] - gate[None, :])
+                gate_fn = torch.exp2 if use_exp2 else torch.exp
+                attention *= gate_fn(gate[:, None] - gate[None, :])
                 attention = torch.tril(attention)
                 state_term = (
-                    q_chunk * torch.exp(gate).unsqueeze(-1)
+                    q_chunk * gate_fn(gate).unsqueeze(-1)
                 ) @ h[batch_idx, v_head, chunk_idx].float()
                 output[batch_idx, v_head, begin:end] = (
                     (state_term + attention @ v_chunk) * scale
                 ).to(input_dtype)
+    if use_exp2:
+        output = output.permute(0, 2, 1, 3).contiguous()
     return output, final_state
 
 
@@ -199,7 +214,9 @@ def main() -> None:
     scale = args.scale if args.scale is not None else 1.0 / math.sqrt(128)
 
     cpu_case = make_case(args)
-    expected_o, expected_final = cpu_reference(cpu_case, args.chunk_size, scale)
+    expected_o, expected_final = cpu_reference(
+        cpu_case, args.chunk_size, scale, args.use_exp2
+    )
     npu_case = to_npu(cpu_case, args.device)
 
     fused_o, fused_final = ascendc.chunk_fwd_h_o_fused(
@@ -212,9 +229,9 @@ def main() -> None:
         output_final_state=args.output_final_state,
         chunk_size=args.chunk_size,
         scale=scale,
-        use_exp2=False,
+        use_exp2=args.use_exp2,
         state_v_first=False,
-        output_layout="BNSD",
+        output_layout="BSND" if args.use_exp2 else "BNSD",
     )
     torch.npu.synchronize()
     assert_close("fused.o vs cpu", fused_o, expected_o, args.rtol, args.atol)
@@ -248,8 +265,8 @@ def main() -> None:
             g=npu_case.g,
             chunk_size=args.chunk_size,
             transpose_state_layout=False,
-            use_exp2=False,
-            output_layout="BNSD",
+            use_exp2=args.use_exp2,
+            output_layout="BSND" if args.use_exp2 else "BNSD",
         )
         torch.npu.synchronize()
         assert_close("fused.o vs composed.o", fused_o, composed_o, args.rtol, args.atol)

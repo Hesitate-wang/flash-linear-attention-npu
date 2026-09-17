@@ -1,3 +1,3 @@
-# Ascend 950 epilogue staging
+# Ascend 950 epilogue
 
-Reserved for arch35-specific fused epilogue policies.
+Contains the operator-local arch35 FwdH epilogue policy.

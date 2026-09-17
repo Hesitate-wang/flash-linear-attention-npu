@@ -6,10 +6,9 @@ performed by `ChunkGatedDeltaRuleFwdH` with the output calculation performed by
 
 ## Status
 
-The host-side operator definition, combined tiling, L0/aclnn APIs, and the
-fixed-length Atlas A2 producer/consumer kernel are implemented. Ascend 950 has
-a registration and compilation skeleton only; its tiling route rejects runtime
-execution until the A5 computation is implemented. Device build, accuracy,
+The host-side operator definition, combined tiling, L0/aclnn APIs, the
+fixed-length Atlas A2 producer/consumer kernel, and the fixed-length Ascend 950
+sequential H-to-O megakernel are implemented. Device build, accuracy,
 execution-trace and profiling evidence are still pending.
 
 ## Reference projects
@@ -38,5 +37,7 @@ chunk_fwd_h_o_fused/
     `-- pta/               # CPU reference and PTA comparison cases
 ```
 
-The first kernel uses full-chunk `h`/`v_new` workspace and per-chunk IB
-synchronization. See `docs/design.md` for its current support boundary.
+The A2 kernel uses per-chunk IB synchronization. The A5 kernel uses an
+all-core stage boundary between its arch35 H and O implementations. Both use
+workspace-backed internal `h`/`v_new`. See `docs/design.md` for the support
+boundaries.

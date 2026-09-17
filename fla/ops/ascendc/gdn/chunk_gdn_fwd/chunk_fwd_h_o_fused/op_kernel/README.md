@@ -13,6 +13,9 @@ space required by the API. Each O AIV acknowledges its completed wait through
 the reverse generation of the current `cube1Done` flag; the O AIC aggregates
 both acknowledgements before reading the complete H/V tiles.
 
-For Ascend 950, the entry selects an architecture-isolated no-op skeleton at
-compile time. The host rejects A5 execution during tiling, so this branch is
-only for build and registration bring-up until the arch35 computation exists.
+For Ascend 950, the entry selects architecture-local copies of the established
+arch35 H and O implementations. Every mixed core first participates in H; an
+all-core `SyncAll<false>()` stage boundary makes the workspace-backed `h` and
+`v_new` visible before all cores enter O. The A5 path supports BF16 data,
+BF16/FP32 gates, `chunk=64`, `K=V=128`, `HV/HK` in `[1,4]`, and exp2 O output
+in BSND/TND layout.

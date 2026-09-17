@@ -1,3 +1,3 @@
-# Ascend 950 GEMM kernel staging
+# Ascend 950 GEMM kernel
 
-Reserved for arch35 fused GEMM kernel composition.
+Contains the arch35 FwdH kernel used before the fused H-to-O stage boundary.

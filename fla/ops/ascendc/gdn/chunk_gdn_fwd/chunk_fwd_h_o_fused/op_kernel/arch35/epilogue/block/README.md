@@ -1,3 +1,3 @@
-# Ascend 950 block epilogue staging
+# Ascend 950 block epilogue
 
-Reserved for arch35 block-level fused epilogue implementations.
+Contains the arch35 FwdH update and v-new epilogues.

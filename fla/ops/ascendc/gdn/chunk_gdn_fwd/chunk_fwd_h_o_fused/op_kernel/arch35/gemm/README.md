@@ -1,3 +1,3 @@
-# Ascend 950 GEMM staging
+# Ascend 950 GEMM
 
-Reserved for arch35-specific fused GEMM scheduling and kernel composition.
+Contains the operator-local arch35 H scheduler and kernel used by the fused A5 path.

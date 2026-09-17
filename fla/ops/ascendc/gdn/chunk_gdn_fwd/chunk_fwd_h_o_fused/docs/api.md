@@ -33,12 +33,12 @@ optional index inputs must currently be absent.
 - `output_final_state: bool`
 - `chunk_size: int64`, currently 64 or 128
 - `scale: double`
-- `use_exp2: bool`; the current Atlas A2 implementation requires `false`
+- `use_exp2: bool`; Atlas A2 requires `false`, while Ascend 950 requires `true`
 - `state_v_first: bool`
 - `output_layout: string`, one of `BNSD`, `BSND`, `TND`, or `NTD`
 
-The current exp path accepts `BNSD/NTD`; `NTD` requires physical `B=1`.
-`BSND/TND` remain reserved for the future exp2 implementation.
+The exp path accepts `BNSD/NTD`; `NTD` requires physical `B=1`. The Ascend 950
+exp2 path accepts `BSND/TND`.
 
 ## Outputs
 
@@ -55,11 +55,11 @@ input/output transposes.
 ## Current execution constraints
 
 The functional kernel is registered for Atlas A2 (`ascend910b` and
-`ascend910_93`). Let `P = B * HV`; tiling requires `2 * P` to be strictly less
-than the available AIC core count. Shapes outside that condition currently
-fail rather than falling back to a sequential fused schedule.
+`ascend910_93`) and Ascend 950. On A2, let `P = B * HV`; tiling requires
+`2 * P` to be strictly less than the available AIC core count. Shapes outside
+that condition fail rather than falling back to a sequential fused schedule.
 
-Ascend 950 is registered as a compilation skeleton. Its host and kernel entry
-points build as part of the operator package, but A5 tiling deliberately fails
-with a not-implemented error; A5 is not yet part of the executable API support
-domain.
+Ascend 950 supports the fixed-length exp2 path for BF16 q/k/w/u, BF16 or FP32
+gates, `chunk_size=64`, `K=V=128`, and `HV/HK` in `[1,4]`. Its output layout is
+BSND or TND. The H stage retains standalone FwdH natural-exponent semantics;
+`use_exp2` selects the FwdO exponent and layout path.

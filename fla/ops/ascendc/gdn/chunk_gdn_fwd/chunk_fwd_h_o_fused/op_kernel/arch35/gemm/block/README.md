@@ -1,3 +1,3 @@
-# Ascend 950 block scheduler staging
+# Ascend 950 block scheduler
 
-Reserved for arch35 block schedulers coordinating the H and O stages.
+Contains the arch35 FwdH block scheduler.

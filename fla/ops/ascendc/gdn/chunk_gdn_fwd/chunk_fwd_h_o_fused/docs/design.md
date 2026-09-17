@@ -4,16 +4,15 @@ Rules version: `V2`
 
 ## 1. Scope
 
-The first device implementation targets the fixed-length Atlas A2 exp path.
-It fuses the state recurrence and output calculation in one kernel launch while
-keeping `h` and `v_new` internal. Varlen and exp2 are rejected by tiling until
-they have their own reviewed scheduling and synchronization path.
+The device implementations target fixed-length Atlas A2 exp and Ascend 950
+exp2 output paths. Both fuse the state recurrence and output calculation in one
+kernel launch while keeping `h` and `v_new` internal. Varlen remains rejected.
 
-Ascend 950 has a registration-only arch35 skeleton. Compile-time architecture
-selection prevents the A5 compiler from including the A2 Catlass implementation.
-The A5 kernel entry is intentionally empty and its host tiling route returns an
-explicit not-implemented error, so no invocation can report success with
-uninitialized outputs.
+Ascend 950 uses architecture-local copies of the established arch35 H and O
+implementations. Compile-time architecture selection prevents the A5 compiler
+from including the A2 producer/consumer implementation. A5 runs H and O
+sequentially and preserves the standalone composition's natural-exponent H
+plus exp2 O semantics.
 
 ## 2. Core mapping and execution order
 
@@ -67,6 +66,14 @@ layout. Full-chunk handoff storage is intentional for the first profiling
 version. A two-slot handoff buffer is considered only if device profiling
 shows poor L2 hit rate.
 
+For A5, all physical mixed cores participate in both stages. Its workspace
+contains the full H/v_new handoff, per-core H ping/pong scratch, optional
+k-decay scratch, per-core H update scratch, sequence metadata, and one
+`CHUNK_FWD_O_APRIME_WORKSPACE_BYTES` region per physical AIC. The regions are
+512-byte aligned and non-overlapping. The H kernel drains its local events
+before returning; AIC and AIV then execute `SyncAll<false>()` before O reads
+the handoff tensors. A5 uses `blockDim=physical_aic_core_count`.
+
 ## 4. ABI and implementation ownership
 
 The host macro type and kernel-side plain mirror have identical field order and
@@ -75,8 +82,8 @@ also compile-time checked with `offsetof`. H/O schedulers, epilogues and kernels
 needed by this operator are owned under this operator's `op_kernel` tree. No
 sibling operator or `internal` private header is included or linked.
 
-The supported tiling keys are `1` for V=128 and `2` for V=256. Both use exp
-mode and the same producer/consumer protocol.
+The supported tiling keys are `1` for V=128 and `2` for V=256 on A2. A5 uses
+key `1` because its reviewed domain is V=128.
 
 ## 5. Correctness and performance gates
 

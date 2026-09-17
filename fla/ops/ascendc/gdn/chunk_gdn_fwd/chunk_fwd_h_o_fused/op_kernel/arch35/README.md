@@ -1,7 +1,7 @@
-# Ascend 950 skeleton
+# Ascend 950 implementation
 
-`chunk_fwd_h_o_fused_skeleton.hpp` provides the architecture-isolated A5
-kernel entry required for compilation and operator packaging. It intentionally
-contains no computation. The A5 host tiling route rejects execution until the
-architecture-specific scheduling, synchronization, and numerical path are
-implemented and reviewed.
+`chunk_fwd_h_o_fused_a5.hpp` composes operator-local copies of the established
+arch35 FwdH and FwdO paths in one kernel launch. FwdH writes internal `h` and
+`v_new` tensors to user workspace. After an all-core stage boundary, FwdO
+consumes those tensors and writes the public output. H scratch, handoff tensors,
+and O A-prime scratch have disjoint host-generated offsets.
