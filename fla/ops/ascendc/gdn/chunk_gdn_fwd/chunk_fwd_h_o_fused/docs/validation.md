@@ -30,6 +30,10 @@
   `block_epilogue_gdn_fwdh_regbase.hpp` is now operator-local and matches the
   standalone FwdH implementation; CMake fails during configuration if either
   it or the kernel entry source is absent.
+- The operator-local O-stage structure header contains both the compact A2
+  projection and the complete `ChunkFwdOTilingData` projection consumed by the
+  copied Ascend 950 O implementation. `FillOTiling` initializes every field in
+  the Ascend 950 projection before dispatch.
 - The IB local tensor remains on the SIMD side as required by the API. In MIX
   mode the IB index space is `2 * blockDim`; paired AIV waits are aggregated by
   the reverse `cube1Done` generation before the AIC reads complete H/V tiles.

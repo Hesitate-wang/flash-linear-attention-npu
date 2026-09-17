@@ -11,6 +11,7 @@ add_op_to_compiled_list()
 get_filename_component(_chunk_fwd_h_o_fused_op_dir "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
 set(_chunk_fwd_h_o_fused_required_kernel_files
     op_kernel/chunk_fwd_h_o_fused.cpp
+    op_kernel/chunk_fwd_o_struct.h
     op_kernel/arch35/epilogue/block/block_epilogue_gdn_fwdh_regbase.hpp
 )
 foreach(_required_kernel_file IN LISTS _chunk_fwd_h_o_fused_required_kernel_files)
