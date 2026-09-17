@@ -13,7 +13,7 @@
 #include "tiling_base/data_copy_transpose_tiling.h"
 #include "tiling_base/tiling_templates_registry.h"
 #include <register/op_impl_registry.h>
-
+#include <register/register.h>
 namespace optiling {
 namespace {
 
