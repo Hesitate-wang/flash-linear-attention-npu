@@ -25,6 +25,11 @@
   continues to fail during tiling.
 - Cross-operator include scan is empty: the fused tree does not reference a
   sibling operator path or an `internal` implementation path.
+- The complete local quoted-include scan resolves against the including file,
+  `op_kernel`, or `op_kernel/arch35`. The previously omitted arch35
+  `block_epilogue_gdn_fwdh_regbase.hpp` is now operator-local and matches the
+  standalone FwdH implementation; CMake fails during configuration if either
+  it or the kernel entry source is absent.
 - The IB local tensor remains on the SIMD side as required by the API. In MIX
   mode the IB index space is `2 * blockDim`; paired AIV waits are aggregated by
   the reverse `cube1Done` generation before the AIC reads complete H/V tiles.
