@@ -68,6 +68,8 @@ public:
         config.DynamicCompileStaticFlag(true).DynamicFormatFlag(true)
             .DynamicRankSupportFlag(true).DynamicShapeSupportFlag(true)
             .NeedCheckSupportFlag(false).PrecisionReduceFlag(true)
+            .ExtendCfgInfo("opFile.value", "chunk_fwd_h_o_fused")
+            .ExtendCfgInfo("opInterface.value", "chunk_fwd_h_o_fused")
             .ExtendCfgInfo("prebuildPattern.value", "Opaque")
             .ExtendCfgInfo("coreType.value", "AiCore")
             .ExtendCfgInfo("jitCompile.flag", "static_false,dynamic_false");
