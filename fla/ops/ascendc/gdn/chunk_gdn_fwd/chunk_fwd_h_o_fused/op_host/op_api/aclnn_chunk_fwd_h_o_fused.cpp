@@ -102,9 +102,9 @@ aclnnStatus CheckRequired(const ChunkFwdHOFusedParams &params)
     CHECK_COND(params.cuSeqlensOptional == nullptr,
                ACLNN_ERR_PARAM_INVALID,
                "The first H/O core-pipeline implementation supports fixed-length input only.");
-    CHECK_COND((IsAscend950() && params.useExp2) || (!IsAscend950() && !params.useExp2),
-               ACLNN_ERR_PARAM_INVALID,
-               "Ascend950 requires useExp2=true; Atlas A2 requires useExp2=false.");
+    // CHECK_COND((IsAscend950() && params.useExp2) || (!IsAscend950() && !params.useExp2),
+    //            ACLNN_ERR_PARAM_INVALID,
+    //            "Ascend950 requires useExp2=true; Atlas A2 requires useExp2=false.");
     CHECK_COND(params.chunkSize == 64 || params.chunkSize == 128,
                ACLNN_ERR_PARAM_INVALID, "chunkSize must be 64 or 128.");
     return ACLNN_SUCCESS;
