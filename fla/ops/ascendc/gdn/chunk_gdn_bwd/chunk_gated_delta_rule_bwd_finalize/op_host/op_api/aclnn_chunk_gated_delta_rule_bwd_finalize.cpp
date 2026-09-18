@@ -60,7 +60,6 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdFinalizeGetWorkspaceSize(
     CHECK_COND(chunkSize == 64, ACLNN_ERR_PARAM_INVALID, "chunkSize only supports 64.");
     CHECK_COND(!useGateInKernel, ACLNN_ERR_PARAM_INVALID,
                "useGateInKernel only supports false.");
-    CHECK_COND(useExp2, ACLNN_ERR_PARAM_INVALID, "useExp2 only supports true.");
     CHECK_COND((cuSeqlensOptional == nullptr) == (chunkIndicesOptional == nullptr),
                ACLNN_ERR_PARAM_INVALID,
                "cuSeqlensOptional and chunkIndicesOptional must be both present or absent.");

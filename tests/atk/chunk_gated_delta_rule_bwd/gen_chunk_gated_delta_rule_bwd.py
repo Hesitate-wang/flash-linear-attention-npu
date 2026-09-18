@@ -98,7 +98,7 @@ def _spec(index: int) -> dict:
             "K": 128,
             "V": 128,
             "chunk_size": 64,
-            "use_exp2": True,
+            "use_exp2": index % 2 == 0,
         }
     )
     return profile

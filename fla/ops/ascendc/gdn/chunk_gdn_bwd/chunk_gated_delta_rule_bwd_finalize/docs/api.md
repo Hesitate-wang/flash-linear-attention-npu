@@ -99,7 +99,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdFinalize(
 | `use_beta_sigmoid_in_kernel` | `false` | `true` 时必须提供 `beta_raw` |
 | `use_gate_in_kernel` | `false` | 只支持 `false` |
 | `state_v_first` | `false` | 支持 `false/true`，控制 `h/dh` 末两维的存储顺序 |
-| `use_exp2` | `true` | 只支持 `true` |
+| `use_exp2` | `true` | 支持 `true` 和 `false` |
 
 两个可选反向开关相互独立，四种组合均由 TilingKey 模板支持。关闭某个开关时，
 对应可选输入允许为空，kernel 不读取该地址。

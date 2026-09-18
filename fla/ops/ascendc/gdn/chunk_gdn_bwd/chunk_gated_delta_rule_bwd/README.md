@@ -82,7 +82,7 @@ dO 固定为 BSND，可选的 betaRaw 固定为 BSN，与 q/k/v 的 `layout` 无
 | `layout` | `BNSD/BSND/NTD/TND` | 仅控制 q/k/v 及 dq/dk/dv 的公开布局 |
 | `scale` | 有限浮点数 | Query 缩放因子，通常为 `K**-0.5` |
 | `chunkSize` | `64` | 分块大小 |
-| `useExp2` | 仅 `true` | gate 使用以 2 为底的指数语义 |
+| `useExp2` | `true/false` | gate 分别使用以 2 为底或自然指数语义 |
 | `useGateInKernel` | 仅 `false` | 当前要求传入前向已处理的门控值 |
 | `useQkL2normInKernel` | `true/false` | 为 true 时必须提供 q/k rstd |
 | `useBetaSigmoidInKernel` | `true/false` | 为 true 时必须提供 beta raw 输入 |

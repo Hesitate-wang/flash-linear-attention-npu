@@ -42,7 +42,7 @@ tensor 必须位于 CPU。
 - `K=V=128`，`chunk_size=64`，支持定长和变长序列。
 - `use_qk_l2_norm_in_kernel` 和 `use_beta_sigmoid_in_kernel` 为两个独立
   TilingKey 模板参数，默认值均为 `false`，支持 `false/true`。
-- `use_gate_in_kernel` 只支持 `false`，`use_exp2` 只支持 `true`；ATK executor
+- `use_gate_in_kernel` 只支持 `false`，`use_exp2` 支持 `true` 和 `false`；ATK executor
   显式传入这两个固定属性。
 - `q/k` 由 ATK 生成，数据范围为 `[-0.2, 0.2]`，`v` 数据范围为
   `[-0.5, 0.5]`；`v_new/do/du/h/dh/a`

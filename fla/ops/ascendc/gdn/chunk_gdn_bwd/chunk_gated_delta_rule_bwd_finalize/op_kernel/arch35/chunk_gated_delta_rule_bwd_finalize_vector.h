@@ -26,7 +26,7 @@ constexpr CastTrait FP32_TO_B16_PACK = {
 
 // Stage 0 每次 VF 只处理一个 HV。当前 VF 计算时，MTE2 使用另一物理
 // slot 搬入本 AIV 承包的下一个 HV，形成双缓冲流水。
-template <typename DT, typename GT, typename BT>
+template <typename DT, typename GT, typename BT, bool USE_EXP2>
 __simd_vf__ inline void Stage0VF(
     __ubuf__ DT *gateDA, __ubuf__ DT *kbg, __ubuf__ DT *vb,
     __ubuf__ float *gExp, __ubuf__ float *gLast, __ubuf__ float *decay,
@@ -104,14 +104,20 @@ __simd_vf__ inline void Stage0VF(
     }
 
     // gLastReg 直接从已经转换好的 gReg Gather 最后一个有效元素，
-    // 先供 decay 使用，再原位转换为 exp2(g[M-1])。gLast 按完整
+    // 先供 decay 使用，再按 use_exp2 转换为对应指数值。gLast 按完整
     // FP32[BT] 广播保存，避免后续 VF 特判 scalar。
-    Muls(gExpReg, gReg, LN2, validMask);
+    if constexpr (USE_EXP2) {
+        Muls(gExpReg, gReg, LN2, validMask);
+    } else {
+        Adds(gExpReg, gReg, 0.0f, validMask);
+    }
     Duplicate(indexReg0, static_cast<uint32_t>(validRows - 1), floatMask);
     Gather(gLastReg, gReg, indexReg0);
     Sub(decayReg, gLastReg, gReg, validMask);
-    Muls(decayReg, decayReg, LN2, validMask);
-    Muls(gLastReg, gLastReg, LN2, floatMask);
+    if constexpr (USE_EXP2) {
+        Muls(decayReg, decayReg, LN2, validMask);
+        Muls(gLastReg, gLastReg, LN2, floatMask);
+    }
     Exp(gExpReg, gExpReg, validMask);
     Exp(decayReg, decayReg, validMask);
     Exp(gLastReg, gLastReg, floatMask);
@@ -223,10 +229,12 @@ __simd_vf__ inline void Stage0VF(
         Sub(resultReg1, rowReg1, gReg, validMask);
         Sub(resultReg2, rowReg2, gReg, validMask);
         Sub(resultReg3, rowReg3, gReg, validMask);
-        Muls(resultReg0, resultReg0, LN2, validMask);
-        Muls(resultReg1, resultReg1, LN2, validMask);
-        Muls(resultReg2, resultReg2, LN2, validMask);
-        Muls(resultReg3, resultReg3, LN2, validMask);
+        if constexpr (USE_EXP2) {
+            Muls(resultReg0, resultReg0, LN2, validMask);
+            Muls(resultReg1, resultReg1, LN2, validMask);
+            Muls(resultReg2, resultReg2, LN2, validMask);
+            Muls(resultReg3, resultReg3, LN2, validMask);
+        }
         Exp(resultReg0, resultReg0, validMask);
         Exp(resultReg1, resultReg1, validMask);
         Exp(resultReg2, resultReg2, validMask);
@@ -249,7 +257,9 @@ __simd_vf__ inline void Stage0VF(
         Duplicate(indexReg0, static_cast<uint32_t>(rowBase), floatMask);
         Gather(rowReg0, gReg, indexReg0);
         Sub(resultReg0, rowReg0, gReg, validMask);
-        Muls(resultReg0, resultReg0, LN2, validMask);
+        if constexpr (USE_EXP2) {
+            Muls(resultReg0, resultReg0, LN2, validMask);
+        }
         Exp(resultReg0, resultReg0, validMask);
         Cast<DT, float, FP32_TO_B16_PACK>(dataReg0, resultReg0, floatMask);
         StoreAlign<DT, StoreDist::DIST_PACK_B32>(
@@ -1416,7 +1426,8 @@ __simd_vf__ inline void Stage15NormVF(
     }
 }
 
-template <typename DT, typename GT, typename BT, bool USE_QK_L2NORM, bool USE_BETA_SIGMOID>
+template <typename DT, typename GT, typename BT, bool USE_QK_L2NORM, bool USE_BETA_SIGMOID,
+          bool USE_EXP2>
 class ChunkGatedDeltaRuleBwdFinalizeVector {
 public:
     __aicore__ inline void Init(
@@ -1724,7 +1735,7 @@ public:
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_[streamSlot_]);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_[streamSlot_]);
 
-                    Stage0VF<DT, GT, BT>(
+                    Stage0VF<DT, GT, BT, USE_EXP2>(
                         reinterpret_cast<__ubuf__ DT *>(gateDA_[streamSlot_].GetPhyAddr()),
                         reinterpret_cast<__ubuf__ DT *>(kbg_[streamSlot_].GetPhyAddr()),
                         reinterpret_cast<__ubuf__ DT *>(vb_[streamSlot_].GetPhyAddr()),

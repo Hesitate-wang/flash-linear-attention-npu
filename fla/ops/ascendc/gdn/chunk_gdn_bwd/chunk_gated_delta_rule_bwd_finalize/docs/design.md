@@ -165,7 +165,7 @@ Python：           fla_npu.ops.ascendc.chunk_gated_delta_rule_bwd_finalize
 - `use_beta_sigmoid_in_kernel=True` 时 `beta_raw` 必须非空；
 - 对应开关为 `False` 时，可选输入允许为空且 kernel 不绑定、不搬运该 GM 地址；
 - `use_gate_in_kernel` 当前只接受 `False`，输入 `g` 必须是核外已经准备好的 chunk gate；
-- `use_exp2` 当前只接受 `True`，所有 gate 指数项均按 `exp2` 计算；
+- `use_exp2=True` 时 gate 指数项按 `exp2` 计算，`False` 时按 `exp` 计算；
 - `state_v_first=False` 时 `h/dh` 末两维按 `[K,V]` 存储，`True` 时按 `[V,K]` 存储；
 - `cu_seqlens/chunk_indices` 必须同时为 `None` 或同时非空；
 - 当前实现返回顺序固定为 `(dq, dk, dv, dbeta, dg)`。
@@ -173,7 +173,7 @@ Python：           fla_npu.ops.ascendc.chunk_gated_delta_rule_bwd_finalize
 ### 3.2 TilingKey 模板
 
 `D_T_Q` 固定为 BF16，`D_T_G` 同时表示 `g/beta` 的共同 BF16 或 FP32 dtype；
-`USE_QK_L2NORM` 和 `USE_BETA_SIGMOID` 是两个独立 bool 模板参数：
+`USE_QK_L2NORM`、`USE_BETA_SIGMOID` 和 `USE_EXP2` 是三个独立 bool 模板参数：
 
 | `D_T_G` | `USE_QK_L2NORM` | `USE_BETA_SIGMOID` | kernel 行为 |
 |---|---:|---:|---|
@@ -182,14 +182,14 @@ Python：           fla_npu.ops.ascendc.chunk_gated_delta_rule_bwd_finalize
 | BF16 或 FP32 | 1 | 0 | 只融合 Q/K L2Norm backward |
 | BF16 或 FP32 | 1 | 1 | 同时融合两条 backward |
 
-因此总计生成 `2 * 2 * 2 = 8` 个模板实例。Host 使用属性值调用
+`USE_EXP2=1` 选择 `exp2` 语义，`USE_EXP2=0` 选择 `exp` 语义。因此总计生成
+`2 * 2 * 2 * 2 = 16` 个模板实例。Host 使用属性值调用
 `GET_TPL_TILING_KEY`，kernel 通过 `if constexpr` 裁掉关闭路径的输入搬运和 VF
 公式；这两个开关不再存入 `ChunkGatedDeltaRuleBwdFinalizeTilingData`。定长/变长、shape、
 任务组、workspace 调度和 `state_v_first` 仍是运行时 tiling 数据。
 
-`use_gate_in_kernel` 和 `use_exp2` 是兼容上层调用的固定属性，不扩展 TilingKey：
-前者只支持 `False`，后者只支持 `True`。ACLNN 和 Tiling 两层均校验该支持域，
-因此无法从 GE 图路径绕过 ACLNN 校验进入不受支持的计算分支。
+`use_gate_in_kernel` 是兼容上层调用的固定属性，不扩展 TilingKey，且只支持
+`False`；`use_exp2` 扩展 TilingKey，在编译期裁掉另一套指数换算路径。
 
 
 ## 4. Stage 0--15 GPU 对齐语义与当前空间划分
@@ -249,7 +249,7 @@ S12 向量预处理、S13 三条 Cube 结果、S14 每 HV partial、S15 跨 HV �
 | S2 | `dA_u` | S1：`dA_u = du @ vb.T` | Fixpipe -> owner AIV UB |
 | S2 | `k, beta` | S0 从 input 搬入并保留 | UB resident |
 | S3 | `dw0` | S1：`dw0 = du @ Hc`，`Hc=h.T` | L1 resident |
-| S3 | `kbg` | S0：`kbg = k * (beta * exp2(g))` | `kbgDoGWorkspace` -> L1 |
+| S3 | `kbg` | S0：`kbg = k * (beta * exp_fn(g))` | `kbgDoGWorkspace` -> L1 |
 | S4 | `dA_u_lower` | S2：`tril(dA_u,-1)` | UB resident |
 | S4 | `dA_w0` | S3：`dA_w0 = dw0 @ kbg.T` | Fixpipe -> owner AIV UB |
 | S5 | `dA0` | S4：`dA_u_lower - tril(dA_w0,-1)` | `dA0Workspace` -> L1 |
@@ -263,14 +263,14 @@ S12 向量预处理、S13 三条 Cube 结果、S14 每 HV partial、S15 跨 HV �
 | S8 | `db_v_partial` | S6：`rowSum(dvb * v)` | UB resident |
 | S9 | `dA` | S8：`tril(-(dA2*gate_dA),-1)` | `dA0Workspace` -> L1 |
 | S9 | `kb` | S2：`kb = k * beta` | `dk0Workspace` -> L1 |
-| S10 | `g_last` | S0：`exp2(g[M-1])` | UB resident |
+| S10 | `g_last` | S0：`exp_fn(g[M-1])` | UB resident |
 | S11 | 无前序计算结果 | 只读取原始 `do/v_new` | input -> L1 |
 | S12 | `dkb` | S9：`dkb = dA @ k` | `vbDkbWorkspace` -> UB |
 | S12 | `dkb_t` | S9：`dkb_t = dA.T @ kb` | `dvbDkbTWorkspace` -> UB |
 | S12 | `ds0` | S11：`ds0 = do @ v_new.T` | Fixpipe -> owner AIV UB |
 | S12 | `dkbg0, db_v, dg_prepare` | 分别由 S7、S8 产生 | UB resident |
 | S13 | `ds` | S12：`tril(ds0*gate_dA)*scale` | `dsWorkspace` -> L1 |
-| S13 | `do_g` | S12：`do * exp2(g) * scale` | `kbgDoGWorkspace` -> L1 |
+| S13 | `do_g` | S12：`do * exp_fn(g) * scale` | `kbgDoGWorkspace` -> L1 |
 | S13 | `v_decay` | S12：`v_new * decay` | `dk0Workspace` -> L1 |
 | S14 | `dq_hv` | S13：`do_g @ Hc + ds @ k` | Fixpipe -> owner AIV UB |
 | S14 | `dk_intra` | S13：`ds.T @ q` | Fixpipe -> owner AIV UB |
@@ -334,10 +334,11 @@ Stage 的调试输出不得占用下一任务组会提前重写的 resident 地�
 ### Stage 0：Vector，gate/beta 系数与 prepare Cube 输入
 
 ```text
-g_exp[i]  = exp2(g[i])                    # g_exp: [BT]
+exp_fn(x) = exp2(x) if use_exp2 else exp(x)
+g_exp[i]  = exp_fn(g[i])                  # g_exp: [BT]
 g_last    = g_exp[M-1]                    # 数学上为 scalar；实现中广播保存为 [BT]
-gate_dA[i,j] = exp2(g[i] - g[j])           # gate_dA: [BT,BT]
-decay[i]  = exp2(-g[i] + g[M-1])           # decay: [BT]
+gate_dA[i,j] = exp_fn(g[i] - g[j])         # gate_dA: [BT,BT]
+decay[i]  = exp_fn(-g[i] + g[M-1])         # decay: [BT]
 bg[i]     = beta[i] * g_exp[i]             # bg: [BT]
 kbg       = k * bg[:,None]                 # kbg: [BT,K]
 vb        = v * beta[:,None]                # vb: [BT,V]

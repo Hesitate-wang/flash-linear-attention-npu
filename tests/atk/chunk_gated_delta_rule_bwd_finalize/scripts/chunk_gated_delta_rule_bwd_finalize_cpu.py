@@ -29,8 +29,6 @@ def chunk_gated_delta_rule_bwd_finalize_golden(
         raise ValueError("beta_raw is required when beta sigmoid backward is enabled.")
     if bool(use_gate_in_kernel):
         raise ValueError("use_gate_in_kernel only supports False.")
-    if not bool(use_exp2):
-        raise ValueError("use_exp2 only supports True.")
     if g.dtype != beta.dtype:
         raise ValueError("g and beta must use the same dtype.")
 
@@ -120,7 +118,8 @@ def chunk_gated_delta_rule_bwd_finalize_golden(
     work_dtype = q.dtype
     g_fp32 = g.float()
     beta_fp32 = beta.float()
-    g_exp = torch.exp2(g_fp32)
+    gate_exp = torch.exp2 if use_exp2 else torch.exp
+    g_exp = gate_exp(g_fp32)
     bg = beta_fp32 * g_exp
     hv_to_hk = torch.arange(value_heads, dtype=torch.int64) // head_ratio
     k_hv = k[:, hv_to_hk]
@@ -211,7 +210,7 @@ def chunk_gated_delta_rule_bwd_finalize_golden(
             dkbg0[batch_idx, hv, token_start:token_end] = torch.matmul(
                 a_chunk.transpose(-1, -2), dw0.float()
             ).to(work_dtype)
-            gate_chunk = torch.exp2(
+            gate_chunk = gate_exp(
                 g_fp32[batch_idx, hv, token_start:token_end, None]
                 - g_fp32[batch_idx, hv, None, token_start:token_end]
             ).to(work_dtype)
@@ -245,7 +244,7 @@ def chunk_gated_delta_rule_bwd_finalize_golden(
             ).to(work_dtype)
             state_term[batch_idx, hv, state_chunk_idx] = (
                 h_chunk * dh_chunk
-            ).sum() * torch.exp2(g_fp32[batch_idx, hv, token_end - 1])
+            ).sum() * gate_exp(g_fp32[batch_idx, hv, token_end - 1])
             ds0[batch_idx, hv, token_start:token_end, :chunk_len] = torch.matmul(
                 do[batch_idx, hv, token_start:token_end].float(),
                 v_new[batch_idx, hv, token_start:token_end].float().transpose(-1, -2),
@@ -282,7 +281,7 @@ def chunk_gated_delta_rule_bwd_finalize_golden(
                 * g_exp_chunk[:, None] * scale
             ).to(work_dtype)
             do_g[batch_idx, hv, token_start:token_end] = do_g_chunk
-            decay_chunk = torch.exp2(
+            decay_chunk = gate_exp(
                 g_fp32[batch_idx, hv, token_end - 1]
                 - g_fp32[batch_idx, hv, token_start:token_end]
             )

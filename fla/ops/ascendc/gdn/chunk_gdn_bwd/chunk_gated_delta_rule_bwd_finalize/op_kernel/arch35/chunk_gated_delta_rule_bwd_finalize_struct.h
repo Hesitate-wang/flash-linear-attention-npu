@@ -20,24 +20,30 @@ ASCENDC_TPL_ARGS_DECL(ChunkGatedDeltaRuleBwdFinalize,
     ASCENDC_TPL_DTYPE_DECL(D_T_G, TPL_BF16, TPL_FP32),
     ASCENDC_TPL_BOOL_DECL(USE_QK_L2NORM, 0, 1),
     ASCENDC_TPL_BOOL_DECL(USE_BETA_SIGMOID, 0, 1),
+    ASCENDC_TPL_BOOL_DECL(USE_EXP2, 0, 1),
 );
 
-#define TPL_SEL_ONE(Q, G, USE_QK_L2NORM_VALUE, USE_BETA_SIGMOID_VALUE) \
+#define TPL_SEL_ONE(Q, G, USE_QK_L2NORM_VALUE, USE_BETA_SIGMOID_VALUE, USE_EXP2_VALUE) \
     ASCENDC_TPL_ARGS_SEL( \
         ASCENDC_TPL_DTYPE_SEL(D_T_Q, Q), \
         ASCENDC_TPL_DTYPE_SEL(D_T_G, G), \
         ASCENDC_TPL_BOOL_SEL(USE_QK_L2NORM, USE_QK_L2NORM_VALUE), \
         ASCENDC_TPL_BOOL_SEL(USE_BETA_SIGMOID, USE_BETA_SIGMOID_VALUE), \
+        ASCENDC_TPL_BOOL_SEL(USE_EXP2, USE_EXP2_VALUE), \
     )
 
 #define TPL_SEL_FOR_DTYPE(Q, G) \
-    TPL_SEL_ONE(Q, G, 0, 0), \
-    TPL_SEL_ONE(Q, G, 0, 1), \
-    TPL_SEL_ONE(Q, G, 1, 0), \
-    TPL_SEL_ONE(Q, G, 1, 1)
+    TPL_SEL_ONE(Q, G, 0, 0, 0), \
+    TPL_SEL_ONE(Q, G, 0, 0, 1), \
+    TPL_SEL_ONE(Q, G, 0, 1, 0), \
+    TPL_SEL_ONE(Q, G, 0, 1, 1), \
+    TPL_SEL_ONE(Q, G, 1, 0, 0), \
+    TPL_SEL_ONE(Q, G, 1, 0, 1), \
+    TPL_SEL_ONE(Q, G, 1, 1, 0), \
+    TPL_SEL_ONE(Q, G, 1, 1, 1)
 
 ASCENDC_TPL_SEL(
-    // g/beta 共用 dtype 模板参数，两个开关独立组合，共 8 个实例。
+    // g/beta 共用 dtype 模板参数，三个开关独立组合，共 16 个实例。
     TPL_SEL_FOR_DTYPE(TPL_BF16, TPL_BF16),
     TPL_SEL_FOR_DTYPE(TPL_BF16, TPL_FP32),
 );

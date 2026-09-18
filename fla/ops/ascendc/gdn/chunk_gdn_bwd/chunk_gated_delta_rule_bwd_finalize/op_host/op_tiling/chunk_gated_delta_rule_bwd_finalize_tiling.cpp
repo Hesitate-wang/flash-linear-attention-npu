@@ -175,10 +175,6 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleBwdFinalize(gert::TilingContext *conte
     OP_CHECK_IF(useGateValue,
                 OP_LOGE(context->GetNodeName(), "use_gate_in_kernel only supports false."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!useExp2Value,
-                OP_LOGE(context->GetNodeName(), "use_exp2 only supports true."),
-                return ge::GRAPH_FAILED);
-
     const auto cuShape = context->GetOptionalInputShape(INPUT_CU_SEQLENS_IDX);
     const auto chunkIndicesShape = context->GetOptionalInputShape(INPUT_CHUNK_INDICES_IDX);
     OP_CHECK_IF((cuShape == nullptr) != (chunkIndicesShape == nullptr),
@@ -330,11 +326,12 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleBwdFinalize(gert::TilingContext *conte
     workspaceSizes[0] = platform.GetLibApiWorkSpaceSize() + userWorkspace;
 
     // 主张量固定 BF16，g/beta 共用一个 BF16 或 FP32 模板参数；
-    // 两个 backward 开关独立控制输入搬运和 VF 公式，共 8 个模板。
+    // 三个 backward/指数开关独立控制输入搬运和 VF 公式，共 16 个模板。
     // state_v_first 只选择 state GM 布局解释，作为运行时 tiling 数据不扩展 key。
     const uint64_t tilingKey = GET_TPL_TILING_KEY(
         static_cast<uint64_t>(qKey), static_cast<uint64_t>(gKey),
-        static_cast<uint64_t>(useL2NormValue), static_cast<uint64_t>(useBetaSigmoidValue));
+        static_cast<uint64_t>(useL2NormValue), static_cast<uint64_t>(useBetaSigmoidValue),
+        static_cast<uint64_t>(useExp2Value));
     context->SetTilingKey(tilingKey);
     context->SetBlockDim(blockDim);
     context->SetScheduleMode(1);

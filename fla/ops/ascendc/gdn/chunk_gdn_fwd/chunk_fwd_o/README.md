@@ -104,7 +104,7 @@ aclnnStatus aclnnChunkFwdO(
 |---|---|---|---|---|---|
 | `scale` | 输入 | 必选 | 缩放系数 | `double` | 建议按 `1 / sqrt(K)` 设置 |
 | `chunkSize` | 输入 | 必选 | 分块大小 | `int64_t` | 仅支持 `64` / `128` |
-| `useExp2` | 输入 | 必选 | Gate 指数是否使用以 2 为底的语义 | `bool` | `true` 仅支持 A5 的 `BSND` / `TND` 新路径；`false` 走兼容旧路径 |
+| `useExp2` | 输入 | 必选 | Gate 指数是否使用以 2 为底的语义 | `bool` | 只控制指数语义，不参与新旧实现选择 |
 | `stateVFirst` | 输入 | 可选 | `h` 的末两维是否为 `[V,K]` | `bool` | 默认 `false`，A5 新路径支持 true/false |
 | `outputLayout` | 输入 | 必选 | 输出布局，大小写敏感 | `const char *` | `BNSD` / `BSND` / `TND` / `NTD`，具体组合见下表 |
 
@@ -123,6 +123,8 @@ aclnnStatus aclnnChunkFwdO(
 - `q` 和 `v` 的 `B`、`T` 必须一致，head 数允许不同。
 - `g` 的形状必须为 `[B, HV, T]`，head 维与 `v` 对齐。
 - `h` 的形状必须为 `[B, HV, numChunks, K, V]`，head 维与 `v` 对齐，`K` 维与 `q/k` 对齐，`V` 维与 `v` 对齐。
+- `q`、`k`、`v`、`h`、`oOut` 必须使用相同 dtype（`FLOAT16` 或 `BFLOAT16` 之一）。
+- `g` 的 dtype 可为 `FLOAT`或与 `q` 相同，即 `q=BFLOAT16` 时 `g ∈ {FLOAT, BFLOAT16}`，`q=FLOAT16` 时 `g ∈ {FLOAT, FLOAT16}`。
 - GVA 约束：`HV % HK == 0`，映射关系为 `hk = hv / (HV / HK)`。
 - 当前实现要求 `K = 128`。
 - 当前实现要求 `V = 128` 或 `256`。
@@ -139,6 +141,8 @@ aclnnStatus aclnnChunkFwdO(
   - 二者任意一个出现时进入变长模式，当前实现要求二者同时提供
   - 变长模式仅支持 `B = 1`
 - Torch 公开接口的 `use_exp2` 和 `output_layout` 默认值分别为 `False` 和 `"BNSD"`。
+- A5 上使用 `BSND/TND` 输出且满足 BF16、`K=V=128`、`chunkSize=64`、`HV/HK in [1,4]` 时，`useExp2=true/false` 均走优化实现。
+- 非 exp2 的 `BNSD/NTD` 输出继续走兼容实现；`useExp2=true` 和 `stateVFirst=true` 仅支持上述 A5 优化实现。
 
 ### 4.2 形状约束（强约束）
 

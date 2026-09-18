@@ -23,7 +23,7 @@ constexpr CastTrait CHUNK_FWD_O_FP32_TO_B16_PACK = {
     RegLayout::ZERO,
     SatMode::NO_SAT,
     MaskMergeMode::MERGING,
-    AscendC::RoundMode::CAST_ROUND,
+    AscendC::RoundMode::CAST_RINT,
 };
 
 __simd_callee__ inline void LoadGateFloatPair(RegTensor<float> &zero, RegTensor<float> &one, __ubuf__ float *src)

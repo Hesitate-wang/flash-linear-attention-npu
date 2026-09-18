@@ -32,6 +32,12 @@ from typing import Iterable, Optional
 DIST_INFO_GLOB = "flash_linear_attention_npu-*.dist-info"
 DIST_NAME = "flash-linear-attention-npu"
 VENDOR_DIR = "fla_npu_transformer"
+# PEP 427 lets a wheel keep its payload under ``<dist>-<version>.data/<scheme>/``
+# instead of the archive root.  ``bdist_wheel`` builds exactly that layout when a
+# distribution reports ``root_is_pure == False`` without extension modules, so the
+# installed tree and the archive no longer share entry names while pip still maps
+# both ``purelib`` and ``platlib`` onto the environment site root.
+WHEEL_PAYLOAD_SCHEMES = ("purelib", "platlib")
 
 
 def _run(command: list[str], *, env: dict[str, str], cwd: Path) -> None:
@@ -48,10 +54,30 @@ def _manifest_from_wheel(wheel: Path) -> dict[str, str]:
     result = {}
     with zipfile.ZipFile(wheel) as archive:
         for info in archive.infolist():
-            if info.is_dir() or not info.filename.startswith("fla_npu/opp/"):
+            if info.is_dir():
                 continue
-            result[info.filename] = hashlib.sha256(archive.read(info)).hexdigest()
+            relative = _installed_relative_name(info.filename)
+            if not relative.startswith("fla_npu/opp/"):
+                continue
+            result[relative] = hashlib.sha256(archive.read(info)).hexdigest()
     return result
+
+
+def _installed_relative_name(entry: str) -> str:
+    """Map a wheel entry name onto its installed, site-root-relative path.
+
+    ``fla_npu/opp/...`` stays as-is.  ``<dist>-<version>.data/purelib/fla_npu/...``
+    and its ``platlib`` twin resolve to the same installed path, because the
+    environment under test keeps both schemes in one site root.
+    """
+
+    name = entry.replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    parts = name.split("/")
+    if len(parts) > 2 and parts[0].endswith(".data") and parts[1] in WHEEL_PAYLOAD_SCHEMES:
+        return "/".join(parts[2:])
+    return name
 
 
 def _is_generated_bytecode(path: Path) -> bool:

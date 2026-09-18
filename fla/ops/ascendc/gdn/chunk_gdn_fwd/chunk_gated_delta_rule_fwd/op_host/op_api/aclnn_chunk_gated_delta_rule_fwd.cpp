@@ -16,6 +16,7 @@
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
 #include "aclnn_kernels/transpose.h"
+#include "external/aclnn_kernels/aclnn_platform.h"
 #include "opdev/common_types.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -32,7 +33,7 @@ extern "C" {
 #endif
 
 namespace {
-constexpr int64_t CHUNK_GATED_DELTA_RULE_FWD_DIM = 128;
+constexpr int64_t HEAD_DIM_128 = 128;
 constexpr int64_t CHUNK_GATED_DELTA_RULE_FWD_V256 = 256;
 constexpr int64_t CHUNK_GATED_DELTA_RULE_FWD_CHUNK_64 = 64;
 constexpr int64_t CHUNK_GATED_DELTA_RULE_FWD_CHUNK_128 = 128;
@@ -80,12 +81,37 @@ struct GdnShapeInfo {
     int64_t vDim = 0;
 };
 
+static bool IsAscend950()
+{
+    const auto npuArch = GetCurrentPlatformInfo().GetCurNpuArch();
+    using Ops::Transformer::AclnnUtil::IsRegbase;
+    return IsRegbase(npuArch);
+}
+
 static bool UsePreparePath(const ChunkGatedDeltaRuleFwdParams &params)
 {
+    if (IsAscend950()) {
+        // On Ascend950 the supported new path is selected by its shape contract.
+        // use_exp2 and layout are independent features of that path.
+        if (params.q == nullptr || params.k == nullptr || params.v == nullptr || params.layout == nullptr ||
+            params.q->GetViewShape().GetDimNum() != 4 || params.k->GetViewShape().GetDimNum() != 4 ||
+            params.v->GetViewShape().GetDimNum() != 4) {
+            return false;
+        }
+        const bool sequenceMajor = std::strcmp(params.layout, "BSND") == 0 ||
+                                   std::strcmp(params.layout, "TND") == 0;
+        const size_t headDim = sequenceMajor ? 2 : 1;
+        const int64_t hq = params.q->GetViewShape().GetDim(headDim);
+        const int64_t hv = params.v->GetViewShape().GetDim(headDim);
+        return params.q->GetDataType() == DataType::DT_BF16 &&
+               params.k->GetDataType() == DataType::DT_BF16 && params.v->GetDataType() == DataType::DT_BF16 &&
+               params.q->GetViewShape().GetDim(3) == HEAD_DIM_128 &&
+               params.v->GetViewShape().GetDim(3) == HEAD_DIM_128 &&
+               params.chunkSize == CHUNK_GATED_DELTA_RULE_FWD_CHUNK_64 && hq > 0 && hv / hq <= 4;
+    }
     const bool legacyLayout = std::strcmp(params.layout, "BNSD") == 0 ||
                               std::strcmp(params.layout, "NTD") == 0;
-    // Phase6 computes A internally even when inference omits the public output.
-    // Select Prepare only for capabilities outside the Phase6 contract.
+    // Keep the non-Ascend950 legacy selection unchanged.
     return params.useExp2 || params.useQkL2norm ||
            params.aLogOptional != nullptr || params.dtBiasOptional != nullptr ||
            params.betaEffOutOptional != nullptr || params.allowNegEigval ||
@@ -279,12 +305,6 @@ static aclnnStatus CheckOptionalRank(const aclTensor *tensor, size_t rank, const
     return tensor == nullptr ? ACLNN_SUCCESS : CheckRank(tensor, rank, name);
 }
 
-static bool IsAscend950()
-{
-    const char *socName = aclrtGetSocName();
-    return socName != nullptr && std::strstr(socName, "Ascend950") != nullptr;
-}
-
 static aclnnStatus ResolveShapeInfo(const ChunkGatedDeltaRuleFwdParams &params, GdnShapeInfo &info)
 {
     if (std::strcmp(params.layout, "BNSD") == 0) {
@@ -344,6 +364,11 @@ static aclnnStatus CheckSupportedL2Contract(const ChunkGatedDeltaRuleFwdParams &
                        std::strcmp(params.layout, "NTD") == 0 || std::strcmp(params.layout, "TND") == 0,
                    ACLNN_ERR_PARAM_INVALID,
                    "The Ascend950 prepare path supports BNSD, BSND, NTD and TND.");
+        CHECK_COND(params.useQkL2norm ||
+                       (params.qHatOutOptional == nullptr && params.kHatOutOptional == nullptr &&
+                        params.qRstdOutOptional == nullptr && params.kRstdOutOptional == nullptr),
+                   ACLNN_ERR_PARAM_INVALID,
+                   "Q/K L2Norm outputs must be omitted when useQkL2norm is false.");
         return ACLNN_SUCCESS;
     }
     CHECK_COND(std::strcmp(params.layout, "BNSD") == 0 || std::strcmp(params.layout, "NTD") == 0,
@@ -394,8 +419,8 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
                ACLNN_ERR_PARAM_INVALID, "B/H/T dimensions must be positive.");
     CHECK_COND(info.hv % info.hq == 0, ACLNN_ERR_PARAM_INVALID,
                "Phase 6 GVA requires Hv divisible by Hk.");
-    CHECK_COND(info.kDim == CHUNK_GATED_DELTA_RULE_FWD_DIM &&
-                   (info.vDim == CHUNK_GATED_DELTA_RULE_FWD_DIM ||
+    CHECK_COND(info.kDim == HEAD_DIM_128 &&
+                   (info.vDim == HEAD_DIM_128 ||
                     info.vDim == CHUNK_GATED_DELTA_RULE_FWD_V256),
                ACLNN_ERR_PARAM_INVALID,
                "The Phase 6 composite GDN core supports K=128 and V=128/256.");
@@ -420,16 +445,12 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
                    "kHatOutOptional shape must match k.");
     }
     if (params.qRstdOutOptional != nullptr) {
-        const bool valid = info.isSequenceMajor
-                               ? HasShape(params.qRstdOutOptional, {info.batch, info.seqlen, info.hq})
-                               : HasShape(params.qRstdOutOptional, {info.batch, info.hq, info.seqlen});
-        CHECK_COND(valid, ACLNN_ERR_PARAM_INVALID, "qRstdOutOptional shape must follow q layout.");
+        const bool valid = HasShape(params.qRstdOutOptional, {info.batch, info.hq, info.seqlen});
+        CHECK_COND(valid, ACLNN_ERR_PARAM_INVALID, "qRstdOutOptional must have shape [B,Hk,T].");
     }
     if (params.kRstdOutOptional != nullptr) {
-        const bool valid = info.isSequenceMajor
-                               ? HasShape(params.kRstdOutOptional, {info.batch, info.seqlen, info.hq})
-                               : HasShape(params.kRstdOutOptional, {info.batch, info.hq, info.seqlen});
-        CHECK_COND(valid, ACLNN_ERR_PARAM_INVALID, "kRstdOutOptional shape must follow k layout.");
+        const bool valid = HasShape(params.kRstdOutOptional, {info.batch, info.hq, info.seqlen});
+        CHECK_COND(valid, ACLNN_ERR_PARAM_INVALID, "kRstdOutOptional must have shape [B,Hk,T].");
     }
     if (params.betaEffOutOptional != nullptr) {
         CHECK_COND(ShapeEqual(params.betaEffOutOptional->GetViewShape(), params.beta->GetViewShape()),
@@ -473,8 +494,8 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
                    (params.aOutOptional == nullptr || params.aOutOptional->GetDataType() == dtype),
                ACLNN_ERR_PARAM_INVALID, "q/k/v/oOut/aOutOptional must have the same dtype.");
     CHECK_COND((params.beta->GetDataType() == DataType::DT_FLOAT || params.beta->GetDataType() == dtype) &&
-                   params.g->GetDataType() == DataType::DT_FLOAT,
-               ACLNN_ERR_PARAM_INVALID, "beta must be float32 or match q/k/v, and g must be float32.");
+                   (params.g->GetDataType() == DataType::DT_FLOAT || params.g->GetDataType() == dtype),
+               ACLNN_ERR_PARAM_INVALID, "g and beta must be float32 or match q/k/v.");
     CHECK_COND(params.gCumsumOutOptional == nullptr || params.gCumsumOutOptional->GetDataType() == DataType::DT_FLOAT,
                ACLNN_ERR_PARAM_INVALID, "gCumsumOutOptional must be float32.");
     CHECK_COND((params.qHatOutOptional == nullptr || params.qHatOutOptional->GetDataType() == dtype) &&
@@ -489,10 +510,10 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
                     params.betaEffOutOptional->GetDataType() == DataType::DT_FLOAT),
                ACLNN_ERR_PARAM_INVALID, "qRstdOutOptional/kRstdOutOptional/betaEffOutOptional must be float32.");
     if (UsePreparePath(params)) {
-        CHECK_COND(dtype == DataType::DT_BF16 && info.vDim == CHUNK_GATED_DELTA_RULE_FWD_DIM &&
+        CHECK_COND(dtype == DataType::DT_BF16 && info.vDim == HEAD_DIM_128 &&
                        params.chunkSize == CHUNK_GATED_DELTA_RULE_FWD_CHUNK_64 && info.hv / info.hq <= 4,
                    ACLNN_ERR_PARAM_INVALID,
-                   "Ascend950 useExp2 path requires BF16, K=V=128, chunkSize=64 and Hv/Hk in {1,2,3,4}.");
+                   "Ascend950 prepare path requires BF16, K=V=128, chunkSize=64 and Hv/Hk in {1,2,3,4}.");
     }
     if (params.initialStateOptional != nullptr) {
         const DataType stateDtype = params.initialStateOptional->GetDataType();
@@ -573,17 +594,22 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
     const int64_t vDim = info.vDim;
     const int64_t seqNum = SeqNum(params, batch);
     const bool outputFinalState = params.finalStateOutOptional != nullptr;
-    const aclTensor *gSequence = params.g;
-    const aclTensor *gBht = gSequence == nullptr
+    const aclTensor *betaUsed = params.beta;
+    const aclTensor *gUsed = params.g;
+    if(params.beta->GetDataType() == DataType::DT_FLOAT || params.g->GetDataType() == DataType::DT_FLOAT) {
+        betaUsed = params.beta->GetDataType() == DataType::DT_FLOAT
+                                        ? params.beta
+                                        : l0op::Cast(params.beta, DataType::DT_FLOAT, executorPtr);
+        gUsed = params.g->GetDataType() == DataType::DT_FLOAT
+                                        ? params.g
+                                        : l0op::Cast(params.g, DataType::DT_FLOAT, executorPtr);
+    }
+    const aclTensor *gBht = gUsed == nullptr
                                 ? nullptr
-                                : TransposeContiguous(gSequence, {0, 2, 1}, executorPtr);
-    const aclTensor *betaFloat = params.beta->GetDataType() == DataType::DT_FLOAT
-                                     ? params.beta
-                                     : l0op::Cast(params.beta, DataType::DT_FLOAT, executorPtr);
-    const aclTensor *betaSequence = betaFloat;
-    const aclTensor *betaBht = betaSequence == nullptr
+                                : TransposeContiguous(gUsed, {0, 2, 1}, executorPtr);
+    const aclTensor *betaBht = betaUsed == nullptr
                                    ? nullptr
-                                   : TransposeContiguous(betaSequence, {0, 2, 1}, executorPtr);
+                                   : TransposeContiguous(betaUsed, {0, 2, 1}, executorPtr);
     GDN_STAGE_CHECK(gBht != nullptr && betaBht != nullptr, 169102);
 
     if (UsePreparePath(params)) {
@@ -606,10 +632,18 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const aclTensor *w = executorPtr->AllocTensor(wShape, dtype, Format::FORMAT_ND);
         const aclTensor *u = executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND);
         const aclTensor *a = executorPtr->AllocTensor(aShape, dtype, Format::FORMAT_ND);
-        const aclTensor *qHat = executorPtr->AllocTensor(qkShape, dtype, Format::FORMAT_ND);
-        const aclTensor *kHat = executorPtr->AllocTensor(qkShape, dtype, Format::FORMAT_ND);
-        const aclTensor *qRstd = executorPtr->AllocTensor(scalarQkShape, DataType::DT_FLOAT, Format::FORMAT_ND);
-        const aclTensor *kRstd = executorPtr->AllocTensor(scalarQkShape, DataType::DT_FLOAT, Format::FORMAT_ND);
+        const aclTensor *qHat = params.useQkL2norm
+                                    ? executorPtr->AllocTensor(qkShape, dtype, Format::FORMAT_ND)
+                                    : nullptr;
+        const aclTensor *kHat = params.useQkL2norm
+                                    ? executorPtr->AllocTensor(qkShape, dtype, Format::FORMAT_ND)
+                                    : nullptr;
+        const aclTensor *qRstd = params.useQkL2norm
+                                     ? executorPtr->AllocTensor(scalarQkShape, DataType::DT_FLOAT, Format::FORMAT_ND)
+                                     : nullptr;
+        const aclTensor *kRstd = params.useQkL2norm
+                                     ? executorPtr->AllocTensor(scalarQkShape, DataType::DT_FLOAT, Format::FORMAT_ND)
+                                     : nullptr;
         const aclTensor *betaEffBht = params.betaEffOutOptional == nullptr
                                           ? nullptr
                                           : executorPtr->AllocTensor(scalarHvShape, DataType::DT_FLOAT,
@@ -620,7 +654,8 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
                                           ? executorPtr->AllocTensor(stateShape, stateDtype, Format::FORMAT_ND)
                                           : params.finalStateOutOptional;
         GDN_STAGE_CHECK(gCumsumBht != nullptr && w != nullptr && u != nullptr && a != nullptr &&
-                            qHat != nullptr && kHat != nullptr && qRstd != nullptr && kRstd != nullptr &&
+                            (!params.useQkL2norm ||
+                             (qHat != nullptr && kHat != nullptr && qRstd != nullptr && kRstd != nullptr)) &&
                             h != nullptr && vNew != nullptr && finalState != nullptr &&
                             (params.betaEffOutOptional == nullptr || betaEffBht != nullptr),
                         169103);
@@ -634,6 +669,8 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
             vHead = TransposeContiguous(params.v, {0, 2, 1, 3}, executorPtr);
         }
         GDN_STAGE_CHECK(qHead != nullptr && kHead != nullptr && vHead != nullptr, 169108);
+        const aclTensor *qCompute = params.useQkL2norm ? qHat : qHead;
+        const aclTensor *kCompute = params.useQkL2norm ? kHat : kHead;
 
         auto prepareResult = l0op::ChunkGatedDeltaRuleFwdPrepare(
             qHead, kHead, vHead, gBht, betaBht, params.aLogOptional, params.dtBiasOptional,
@@ -643,18 +680,19 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
             params.aOutOptional != nullptr, gCumsumBht, w, u, a, qHat, kHat, qRstd,
             kRstd, betaEffBht, executorPtr);
         GDN_STAGE_CHECK(prepareResult[0] != nullptr && prepareResult[1] != nullptr &&
-                            prepareResult[2] != nullptr && prepareResult[4] != nullptr &&
-                            prepareResult[5] != nullptr,
+                            prepareResult[2] != nullptr &&
+                            (!params.useQkL2norm ||
+                             (prepareResult[4] != nullptr && prepareResult[5] != nullptr)),
                         169104);
 
         auto hResult = l0op::ChunkFwdH(
-            kHat, w, u, gCumsumBht, nullptr, params.initialStateOptional,
+            kCompute, w, u, gCumsumBht, nullptr, params.initialStateOptional,
             params.cuSeqlensOptional, params.chunkIndicesOptional, outputFinalState,
             params.chunkSize, true, params.useExp2, params.stateVFirst, h, vNew, finalState, executorPtr);
         GDN_STAGE_CHECK(hResult[0] != nullptr && hResult[1] != nullptr, 169105);
 
         auto oResult = l0op::ChunkFwdO(
-            qHat, kHat, vNew, h, gCumsumBht, params.cuSeqlensOptional,
+            qCompute, kCompute, vNew, h, gCumsumBht, params.cuSeqlensOptional,
             params.chunkIndicesOptional, params.scale, params.chunkSize, params.useExp2, params.stateVFirst,
             "BSND", params.oOut, executorPtr);
         GDN_STAGE_CHECK(oResult[0] != nullptr, 169106);
@@ -676,19 +714,11 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
                       ACLNN_ERR_INNER_NULLPTR);
         }
         if (params.qRstdOutOptional != nullptr) {
-            const aclTensor *qRstdExport = qRstd;
-            if (info.isSequenceMajor) {
-                qRstdExport = TransposeContiguous(qRstdExport, {0, 2, 1}, executorPtr);
-            }
-            CHECK_RET(ViewCopyIfPresent(qRstdExport, params.qRstdOutOptional, executorPtr) == ACLNN_SUCCESS,
+            CHECK_RET(ViewCopyIfPresent(qRstd, params.qRstdOutOptional, executorPtr) == ACLNN_SUCCESS,
                       ACLNN_ERR_INNER_NULLPTR);
         }
         if (params.kRstdOutOptional != nullptr) {
-            const aclTensor *kRstdExport = kRstd;
-            if (info.isSequenceMajor) {
-                kRstdExport = TransposeContiguous(kRstdExport, {0, 2, 1}, executorPtr);
-            }
-            CHECK_RET(ViewCopyIfPresent(kRstdExport, params.kRstdOutOptional, executorPtr) == ACLNN_SUCCESS,
+            CHECK_RET(ViewCopyIfPresent(kRstd, params.kRstdOutOptional, executorPtr) == ACLNN_SUCCESS,
                       ACLNN_ERR_INNER_NULLPTR);
         }
         const aclTensor *aExport = a;
