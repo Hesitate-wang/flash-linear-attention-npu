@@ -275,6 +275,10 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
     }
 
     aclnnStatus launchStatus = ACLNN_SUCCESS;
+    OP_LOGE(ACLNN_SUCCESS,
+        "L0 inputs: k=%p w=%p u=%p g=%p gk=%p initial=%p q=%p cu=%p chunk=%p",
+        k, w, u, g, gkOptional, initialStateOptional, q,
+        actualCuSeqlens, actualChunkIndices);
     auto result = l0op::ChunkFwdHOFused(
         params.k, params.w, params.u, params.g, params.gkOptional, initialStateCompute, params.q,
         params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState,
