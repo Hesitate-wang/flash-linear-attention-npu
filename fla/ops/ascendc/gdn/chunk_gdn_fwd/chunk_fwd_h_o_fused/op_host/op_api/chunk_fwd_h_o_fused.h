@@ -10,12 +10,12 @@
 namespace l0op {
 const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const aclTensor *k,
+    const aclTensor *q,
     const aclTensor *w,
     const aclTensor *u,
     const aclTensor *g,
     const aclTensor *gkOptional,
     const aclTensor *initialStateOptional,
-    const aclTensor *q,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
     bool outputFinalState,

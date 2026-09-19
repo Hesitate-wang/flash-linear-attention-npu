@@ -1498,12 +1498,13 @@ def npu_chunk_fwd_h_o_fused(
         "aclnnChunkFwdHOFused",
         lambda ctx: [
             nd_tensor(ctx, k, "k"),
+            nd_tensor(ctx, q, "q"),
             nd_tensor(ctx, w, "w"),
             nd_tensor(ctx, u, "u"),
             nd_tensor(ctx, g, "g"),
             nd_tensor(ctx, gk, "gk"),
             nd_tensor(ctx, initial_state, "initial_state"),
-            nd_tensor(ctx, q, "q"),
+            
             ctx.int_array(cu),
             ctx.int_array(indices),
             ctypes.c_bool(output_final_state),

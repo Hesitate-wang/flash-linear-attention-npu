@@ -30,12 +30,13 @@ bool IsAscend950()
 
 struct ChunkFwdHOFusedParams {
     const aclTensor *k;
+    const aclTensor *q;
     const aclTensor *w;
     const aclTensor *u;
     const aclTensor *g;
     const aclTensor *gkOptional;
     const aclTensor *initialStateOptional;
-    const aclTensor *q;
+    
     const aclIntArray *cuSeqlensOptional;
     const aclIntArray *chunkIndicesOptional;
     bool outputFinalState;
@@ -237,20 +238,20 @@ extern "C" {
 #endif
 
 aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
-    const aclTensor *k, const aclTensor *w, const aclTensor *u, const aclTensor *g,
-    const aclTensor *gkOptional, const aclTensor *initialStateOptional, const aclTensor *q,
+    const aclTensor *k, const aclTensor *q, const aclTensor *w, const aclTensor *u, const aclTensor *g,
+    const aclTensor *gkOptional, const aclTensor *initialStateOptional,
     const aclIntArray *cuSeqlensOptional, const aclIntArray *chunkIndicesOptional,
     bool outputFinalState, int64_t chunkSize, double scale, bool useExp2, bool stateVFirst,
     const char *outputLayout, const aclTensor *oOut, const aclTensor *finalStateOut,
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
 {
-    ChunkFwdHOFusedParams params{k, w, u, g, gkOptional, initialStateOptional, q,
+    ChunkFwdHOFusedParams params{k, q, w, u, g, gkOptional, initialStateOptional,
                                   cuSeqlensOptional, chunkIndicesOptional, outputFinalState,
                                   chunkSize, scale, useExp2, stateVFirst, outputLayout,
                                   oOut, finalStateOut};
     L2_DFX_PHASE_1(aclnnChunkFwdHOFused,
-                   DFX_IN(k, w, u, g, gkOptional, initialStateOptional, q, cuSeqlensOptional,
+                   DFX_IN(k, q, w, u, g, gkOptional, initialStateOptional, cuSeqlensOptional,
                           chunkIndicesOptional, outputFinalState, chunkSize, scale, useExp2,
                           stateVFirst, outputLayout),
                    DFX_OUT(oOut, finalStateOut));
@@ -275,12 +276,8 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
     }
 
     aclnnStatus launchStatus = ACLNN_SUCCESS;
-    OP_LOGE(ACLNN_SUCCESS,
-        "L0 inputs: k=%p w=%p u=%p g=%p gk=%p initial=%p q=%p cu=%p chunk=%p",
-        k, w, u, g, gkOptional, initialStateOptional, q,
-        actualCuSeqlens, actualChunkIndices);
     auto result = l0op::ChunkFwdHOFused(
-        params.k, params.w, params.u, params.g, params.gkOptional, initialStateCompute, params.q,
+        params.k,params.q, params.w, params.u, params.g, params.gkOptional, initialStateCompute, 
         params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState,
         params.chunkSize, params.scale, params.useExp2, params.outputLayout,
         params.oOut, finalStateCompute, &launchStatus, executorPtr);

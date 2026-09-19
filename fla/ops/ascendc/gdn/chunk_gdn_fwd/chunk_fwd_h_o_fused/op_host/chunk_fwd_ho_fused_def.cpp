@@ -31,6 +31,8 @@ public:
 
         this->Input("k").ParamType(REQUIRED).DataType(dataTypes).Format(formats)
             .UnknownShapeFormat(formats).AutoContiguous();
+        this->Input("q").ParamType(REQUIRED).DataType(dataTypes).Format(formats)
+            .UnknownShapeFormat(formats).AutoContiguous();    
         this->Input("w").ParamType(REQUIRED).DataType(dataTypes).Format(formats)
             .UnknownShapeFormat(formats).AutoContiguous();
         this->Input("u").ParamType(REQUIRED).DataType(dataTypes).Format(formats)
@@ -40,8 +42,6 @@ public:
         this->Input("gk").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
             .UnknownShapeFormat(formats).AutoContiguous();
         this->Input("initial_state").ParamType(OPTIONAL).DataType(stateTypes).Format(formats)
-            .UnknownShapeFormat(formats).AutoContiguous();
-        this->Input("q").ParamType(REQUIRED).DataType(dataTypes).Format(formats)
             .UnknownShapeFormat(formats).AutoContiguous();
         this->Input("cu_seqlens").ParamType(OPTIONAL).ValueDepend(OPTIONAL)
             .DataType(indexTypes).Format(formats).UnknownShapeFormat(formats).AutoContiguous();

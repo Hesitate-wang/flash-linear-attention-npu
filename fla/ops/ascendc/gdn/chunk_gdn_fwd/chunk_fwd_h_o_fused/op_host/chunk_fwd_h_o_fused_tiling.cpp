@@ -18,12 +18,12 @@ namespace optiling {
 namespace {
 
 constexpr size_t INPUT_K = 0;
-constexpr size_t INPUT_W = 1;
-constexpr size_t INPUT_U = 2;
-constexpr size_t INPUT_G = 3;
-constexpr size_t INPUT_GK = 4;
-constexpr size_t INPUT_INITIAL_STATE = 5;
-constexpr size_t INPUT_Q = 6;
+constexpr size_t INPUT_Q = 1;
+constexpr size_t INPUT_W = 2;
+constexpr size_t INPUT_U = 3;
+constexpr size_t INPUT_G = 4;
+constexpr size_t INPUT_GK = 5;
+constexpr size_t INPUT_INITIAL_STATE = 6;
 constexpr size_t INPUT_CU_SEQLENS = 7;
 constexpr size_t INPUT_CHUNK_INDICES = 8;
 

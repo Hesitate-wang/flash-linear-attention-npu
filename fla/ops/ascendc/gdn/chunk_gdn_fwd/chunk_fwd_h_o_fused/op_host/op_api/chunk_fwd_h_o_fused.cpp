@@ -43,12 +43,12 @@ const aclTensor *ConvertIntArray(const aclIntArray *value, aclOpExecutor *execut
 
 const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     const aclTensor *k,
+    const aclTensor *q,
     const aclTensor *w,
     const aclTensor *u,
     const aclTensor *g,
     const aclTensor *gkOptional,
     const aclTensor *initialStateOptional,
-    const aclTensor *q,
     const aclIntArray *cuSeqlensOptional,
     const aclIntArray *chunkIndicesOptional,
     bool outputFinalState,
@@ -64,7 +64,7 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
     if (status != nullptr) {
         *status = ACLNN_SUCCESS;
     }
-    L0_DFX(ChunkFwdHOFused, k, w, u, g, gkOptional, initialStateOptional, q,
+    L0_DFX(ChunkFwdHOFused, k, q, w, u, g, gkOptional, initialStateOptional,
            cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, scale,
            useExp2, outputLayout, oOut, finalStateOut);
     const aclTensor *actualCuSeqlens = ConvertIntArray(cuSeqlensOptional, executor);
@@ -103,7 +103,7 @@ const std::array<const aclTensor *, 2> ChunkFwdHOFused(
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkFwdHOFused,
-        OP_INPUT(k, w, u, g, gkOptional, initialStateOptional, q,
+        OP_INPUT(k, q, w, u, g, gkOptional, initialStateOptional,
                  actualCuSeqlens, actualChunkIndices),
         OP_OUTPUT(oOut, finalStateOutKernel),
         OP_ATTR(outputFinalState, chunkSize, scale, useExp2, outputLayoutStr,
