@@ -217,7 +217,7 @@ aclnnStatus CheckDtypes(const ChunkFwdHOFusedParams &params)
 
 aclnnStatus MakeInputsContiguous(ChunkFwdHOFusedParams &params, aclOpExecutor *executor)
 {
-    const aclTensor **required[] = {&params.k, &params.w, &params.u, &params.g, &params.q};
+    const aclTensor **required[] = {&params.k, &params.q, &params.w, &params.u, &params.g};
     for (const aclTensor **tensor : required) {
         CHECK_RET(MakeContiguous(*tensor, executor) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     }
@@ -277,7 +277,7 @@ aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
 
     aclnnStatus launchStatus = ACLNN_SUCCESS;
     auto result = l0op::ChunkFwdHOFused(
-        params.k,params.q, params.w, params.u, params.g, params.gkOptional, initialStateCompute, 
+        params.k, params.q, params.w, params.u, params.g, params.gkOptional, initialStateCompute,
         params.cuSeqlensOptional, params.chunkIndicesOptional, params.outputFinalState,
         params.chunkSize, params.scale, params.useExp2, params.outputLayout,
         params.oOut, finalStateCompute, &launchStatus, executorPtr);

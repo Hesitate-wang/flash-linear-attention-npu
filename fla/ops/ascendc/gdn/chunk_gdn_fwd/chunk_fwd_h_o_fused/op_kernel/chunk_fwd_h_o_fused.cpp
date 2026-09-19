@@ -206,8 +206,8 @@ __aicore__ inline void RunPipeline(
 #endif
 
 extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
-    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
-    GM_ADDR initial_state, GM_ADDR q, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+    GM_ADDR k, GM_ADDR q, GM_ADDR w, GM_ADDR u, GM_ADDR g,
+    GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
     GM_ADDR o, GM_ADDR final_state, GM_ADDR workspace, GM_ADDR tiling)
 {
     REGISTER_TILING_DEFAULT(GDN::ChunkFwdHOFusedTilingData);

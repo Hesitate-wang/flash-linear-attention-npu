@@ -1,12 +1,12 @@
-# Documentation staging
+# 文档阶段说明
 
-This directory contains:
+本目录包含以下文档：
 
-- `api.md`: the single source of truth for inputs, outputs, attributes, shapes,
-  dtypes, layouts, optional values, error behavior, and supported hardware.
-- `design.md`: the reviewed fused-stage design and resource allocation.
-- `validation.md`: temporary development-time experiments and results; remove it
-  after final conclusions have been moved to the operator and ATK READMEs.
+- `api.md`：输入、输出、属性、形状、数据类型、布局、可选值、异常行为和
+  支持硬件的唯一事实来源。
+- `design.md`：经过评审的融合阶段设计和资源分配方案。
+- `validation.md`：开发阶段的临时实验和结果记录；最终结论迁移到算子
+  README 和 ATK README 后应删除此文件。
 
-The public interface exposes only `o` and the optional `final_state`; `h` and
-`v_new` remain internal values passed directly between the two phases.
+公开接口只输出 `o` 和可选的 `final_state`；`h` 与 `v_new` 是两个阶段之间
+直接传递的内部值，不对外暴露。

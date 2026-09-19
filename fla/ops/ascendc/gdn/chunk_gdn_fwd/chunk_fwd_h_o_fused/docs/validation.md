@@ -1,68 +1,62 @@
-# Development validation
+# 开发阶段验证记录
 
-## Traceability
+## 设计追踪
 
-| Design item | Implementation |
+| 设计项 | 实现位置 |
 | --- | --- |
-| `P` producer plus `P` consumer cores | host tiling `producerCoreNum`, `consumerCoreBase`, `activeCoreNum`; local H/O schedulers |
-| full H/v_new handoff | host `FillWorkspace`; kernel `handoffHWorkspaceOffset` and `handoffVWorkspaceOffset` |
-| startup event initialization | `InitializePipelineSync` in the fused kernel entry |
-| per-chunk H-to-O publication | local H `SignalChunkReady`; local O AIV `WaitProducerSliceReady`; reverse `cube1Done` acknowledgement gates the O AIC |
-| A5 H-to-O stage boundary | arch35 H drains its events; `RunChunkFwdHOFusedA5` executes `SyncAll<false>()` before arch35 O |
-| A5 scratch ownership | host `FillWorkspaceA5`; local H offsets plus `oAPrimeWorkspaceOffset` |
-| no sibling private dependency | all H/O kernel, scheduler and epilogue files are operator-local |
+| `P` 个生产者核和 `P` 个消费者核 | Host tiling 中的 `producerCoreNum`、`consumerCoreBase`、`activeCoreNum`，以及算子内 H/O 调度器 |
+| 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
+| 启动事件初始化 | 融合 kernel 入口中的 `InitializePipelineSync` |
+| 逐 chunk 的 H 到 O 发布 | 算子内 H 的 `SignalChunkReady`；算子内 O AIV 的 `WaitProducerSliceReady`；反向 `cube1Done` 确认用于约束 O AIC |
+| A5 的 H 到 O 阶段边界 | arch35 H 清空事件；`RunChunkFwdHOFusedA5` 在执行 arch35 O 前调用 `SyncAll<false>()` |
+| A5 临时区所有权 | Host 的 `FillWorkspaceA5`；算子内 H 偏移和 `oAPrimeWorkspaceOffset` |
+| 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
 
-## Static checks completed
+## 已完成的静态检查
 
-- Host and kernel fused tiling mirrors use the same field order; host tiling
-  retains the exact local-H prefix and checks the complete serialized size.
-- Workspace offsets are user-workspace-relative and every region is aligned to
-  512 bytes; the returned size adds the platform system workspace exactly once.
-- A2 `blockDim` is `2 * B * HV`, guarded by
-  `2 * B * HV < physical AIC cores`; A5 uses every physical AIC.
-- Fixed-length Atlas A2 exp and Ascend 950 exp2 are accepted. A5 is constrained
-  to BF16 data, BF16/FP32 gates, chunk 64, K=V=128 and HV/HK in [1,4]. Varlen
-  continues to fail during tiling.
-- Cross-operator include scan is empty: the fused tree does not reference a
-  sibling operator path or an `internal` implementation path.
-- The complete local quoted-include scan resolves against the including file,
-  `op_kernel`, or `op_kernel/arch35`. The previously omitted arch35
-  `block_epilogue_gdn_fwdh_regbase.hpp` is now operator-local and matches the
-  standalone FwdH implementation; CMake fails during configuration if either
-  it or the kernel entry source is absent.
-- The operator-local O-stage structure header contains both the compact A2
-  projection and the complete `ChunkFwdOTilingData` projection consumed by the
-  copied Ascend 950 O implementation. `FillOTiling` initializes every field in
-  the Ascend 950 projection before dispatch.
-- The aclnn preflight accepts exp/BNSD-or-NTD on Atlas A2 and
-  exp2/BSND-or-TND on Ascend 950. L0 launcher failures preserve their original
-  status instead of being rewritten as `ACLNN_ERR_PARAM_NULLPTR` (161001).
-- The IB local tensor remains on the SIMD side as required by the API. In MIX
-  mode the IB index space is `2 * blockDim`; paired AIV waits are aggregated by
-  the reverse `cube1Done` generation before the AIC reads complete H/V tiles.
-- Static task-map simulation for `(B,HV,NC)=(1,8,3)` and `(2,4,3)` confirms
-  that producer `p` and consumer `P+p` enumerate identical `(b,hv,chunk)`
-  tuples and use 16 of 24 mixed cores.
-- Ascend 950 is present in the OpDef registration and selects the
-  `__CCE_AICORE__ == 310` implementation. It runs operator-local arch35 H,
-  crosses an all-core stage boundary, then runs operator-local arch35 O.
-  Workspace offsets for H/v_new handoff, H scratch and O A-prime scratch are
-  disjoint.
-- `git diff --check` passes (line-ending conversion warnings only).
+- Host 和 kernel 的融合 tiling 镜像使用相同字段顺序；Host tiling 保留与算子内
+  H 完全一致的结构前缀，并检查完整序列化结构的大小。
+- Workspace 偏移均相对于用户 workspace，所有区域都按 512 字节对齐；返回的
+  workspace 大小只累加一次平台系统 workspace。
+- A2 的 `blockDim` 为 `2 * B * HV`，并受
+  `2 * B * HV < physical AIC cores` 约束；A5 使用全部物理 AIC。
+- 已接受 Atlas A2 的定长自然指数路径和 Ascend 950 的定长 exp2 路径。A5
+  约束为：数据使用 BF16，门控使用 BF16/FP32，chunk 为 64，K=V=128，且
+  HV/HK 位于 `[1,4]`。变长输入仍在 tiling 阶段失败。
+- 跨算子 include 扫描结果为空：融合算子目录树未引用同级算子路径或
+  `internal` 实现路径。
+- 所有使用双引号的本地 include 都能从当前文件目录、`op_kernel` 或
+  `op_kernel/arch35` 解析。此前缺失的 arch35
+  `block_epilogue_gdn_fwdh_regbase.hpp` 现已位于当前算子目录，并与独立 FwdH
+  实现一致；若该文件或 kernel 入口源文件缺失，CMake 会在配置阶段失败。
+- 当前算子的 O 阶段结构头文件同时包含紧凑的 A2 投影，以及复制后的 Ascend
+  950 O 实现所使用的完整 `ChunkFwdOTilingData` 投影。分发前，`FillOTiling`
+  会初始化 Ascend 950 投影的全部字段。
+- ACLNN 前置检查在 Atlas A2 上接受自然指数和 BNSD/NTD，在 Ascend 950 上
+  接受 exp2 和 BSND/TND。L0 下发失败时保留原始状态码，不再统一改写为
+  `ACLNN_ERR_PARAM_NULLPTR`（161001）。
+- 按接口要求，IB 本地张量保留在 SIMD 侧。在 MIX 模式下，IB 索引空间为
+  `2 * blockDim`；O AIC 读取完整 H/V tile 前，通过反向 `cube1Done` 的代次
+  聚合两个配对 AIV 的等待结果。
+- 对 `(B,HV,NC)=(1,8,3)` 和 `(2,4,3)` 进行的静态任务映射模拟表明，生产者
+  `p` 和消费者 `P+p` 会枚举完全相同的 `(b,hv,chunk)` 元组，并使用 24 个
+  MIX 核中的 16 个。
+- OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径先
+  执行当前算子目录内的 arch35 H，跨越一次全核阶段边界，再执行当前算子目录
+  内的 arch35 O。H/`v_new` 交接区、H 临时区和 O A-prime 临时区互不重叠。
+- `git diff --check` 已通过，仅存在行尾转换警告。
 
-## Environment limitation and pending device evidence
+## 环境限制与待补充的设备证据
 
-This Windows workspace exposes no configured CANN environment, NPU device or
-usable Python runtime, so an operator build and runtime accuracy test cannot be
-completed here. The following remain mandatory on the target environment:
+当前 Windows 工作区没有已配置的 CANN 环境、NPU 设备或可用的 Python 运行
+环境，因此无法在这里完成算子构建和运行时精度测试。仍须在目标环境完成：
 
-1. build and install the single-operator package for `ascend910b` and
-   `ascend950`;
-2. run a minimum fixed-length case with at least three chunks, V=128, with and
-   without initial/final state and `gk`;
-3. run V=256 and tail-chunk cases;
-4. compare `o` and optional final state against the CPU/reference composition;
-5. collect an execution trace proving producer/consumer chunk order and IB
-   event reuse, then profile handoff L2 hit rate before considering buffering.
-6. on Ascend 950, run `--use-exp2` and compare both fused and composed BSND
-   outputs for BF16/FP32 gates, with and without initial/final state.
+1. 分别为 `ascend910b` 和 `ascend950` 构建并安装单算子包。
+2. 运行至少包含三个 chunk、V=128 的最小定长用例，覆盖有无初始状态、最终
+   状态和 `gk` 的组合。
+3. 运行 V=256 和尾块场景。
+4. 将 `o` 和可选最终状态与 CPU/参考组合实现进行比较。
+5. 采集执行 trace，证明生产者/消费者的 chunk 顺序和 IB 事件复用正确；在考虑
+   缓冲方案前，先对交接区域的 L2 命中率进行 profiling。
+6. 在 Ascend 950 上启用 `--use-exp2`，针对 BF16/FP32 门控、有无初始状态和
+   最终状态的组合，比较融合实现与独立组合实现的 BSND 输出。

@@ -1,98 +1,88 @@
-# ChunkFwdHOFused design
+# ChunkFwdHOFused 方案设计
 
-Rules version: `V2`
+方案设计规则版本：`V2`
 
-## 1. Scope
+## 1. 目标与范围
 
-The device implementations target fixed-length Atlas A2 exp and Ascend 950
-exp2 output paths. Both fuse the state recurrence and output calculation in one
-kernel launch while keeping `h` and `v_new` internal. Varlen remains rejected.
+设备侧实现面向 Atlas A2 的定长自然指数路径和 Ascend 950 的定长 exp2 输出
+路径。两种实现都在一次 kernel 下发中融合状态递推与输出计算，并将 `h` 和
+`v_new` 保留为内部数据。当前不支持变长输入，检测到变长输入时直接拒绝。
 
-Ascend 950 uses architecture-local copies of the established arch35 H and O
-implementations. Compile-time architecture selection prevents the A5 compiler
-from including the A2 producer/consumer implementation. A5 runs H and O
-sequentially and preserves the standalone composition's natural-exponent H
-plus exp2 O semantics.
+Ascend 950 使用算子目录内复制的既有 arch35 H 和 O 实现。编译期架构选择确保
+A5 编译器不会包含 A2 的生产者/消费者实现。A5 依次执行 H 和 O，保持独立算子
+组合时“H 阶段采用自然指数、O 阶段采用 exp2”的语义。
 
-## 2. Core mapping and execution order
+## 2. 核映射与执行顺序
 
-Let `P = B * HV` and `NC = ceil(T / chunk_size)`. The pipeline is selected only
-when `2 * P < physical_aic_core_count`, and launches `blockDim = 2 * P` mixed
-cores in batch schedule mode.
+令 `P = B * HV`，`NC = ceil(T / chunk_size)`。仅当
+`2 * P < physical_aic_core_count` 时选择流水实现，并以 batch 调度模式启动
+`blockDim = 2 * P` 个 MIX 核。
 
-- mixed cores `[0, P)` are H producers; producer `p = b * HV + hv` owns all
-  chunks of one `(b, hv)` pair in ascending chunk order;
-- mixed cores `[P, 2P)` are O consumers; consumer `P + p` owns the same pair
-  and also visits its chunks in ascending order;
-- the corresponding AIV0/AIV1 lanes retain the established split-row work;
-  because IB synchronization is a SIMD-side API, each consumer AIV waits on
-  the matching producer AIV index in the MIX logical-index space.
+- MIX 核 `[0, P)` 是 H 生产者；生产者 `p = b * HV + hv` 按 chunk 升序负责
+  一个 `(b, hv)` 对的全部 chunk。
+- MIX 核 `[P, 2P)` 是 O 消费者；消费者 `P + p` 负责相同的 `(b, hv)` 对，
+  同样按 chunk 升序遍历。
+- 对应的 AIV0/AIV1 通道沿用既有的分行处理方式。IB 同步是 SIMD 侧接口，
+  因此每个消费者 AIV 都在 MIX 逻辑索引空间内等待对应的生产者 AIV 索引。
 
-All active AIVs first zero their own IB event slots. One startup `SyncAll` makes
-that initialization visible before the core groups diverge. For every chunk,
-H publishes each completed AIV slice of the current `h` and `v_new` through
-`IBSet<false>`. After O's two AIVs complete their matching `IBWait<false>`, they
-reuse the already-consumed `cube1Done` stream flag in the reverse direction.
-The O AIC waits for the aggregated pair before its first GM-to-L1 read of the
-complete `h`/`v_new` tiles. `vec1Done` independently protects the later
-`attnMask` input. Two IB event IDs are selected by `chunk_index % 2`. There is
-no reverse free signal because every chunk has distinct handoff storage.
+所有活跃 AIV 首先将自己的 IB 事件槽清零。启动阶段执行一次 `SyncAll`，确保
+核组分流前所有核都能观察到初始化结果。对于每个 chunk，H 通过
+`IBSet<false>` 发布当前 `h` 和 `v_new` 中由各 AIV 完成的切片。O 的两个 AIV
+完成对应的 `IBWait<false>` 后，反向复用已经消费完毕的 `cube1Done` 流水标志。
+O 的 AIC 在首次把完整 `h`/`v_new` tile 从 GM 搬入 L1 前，等待这两个 AIV 的
+聚合确认。`vec1Done` 独立保护随后使用的 `attnMask` 输入。IB 事件编号由
+`chunk_index % 2` 选择。由于每个 chunk 都有独立的交接存储区，因此不需要
+反向发送空闲信号。
 
-The H implementation replaces its former per-wave global barriers in pipeline
-mode with its existing per-mixed-core CrossCore flags. Thus consumer cores do
-not have to enter H, and H/O execute concurrently after the startup barrier.
+在流水模式下，H 实现使用既有的逐 MIX 核 CrossCore 标志替代原先逐 wave 的
+全局同步。因此，消费者核不需要进入 H；启动同步完成后，H 和 O 可以并发执行。
 
-## 3. Workspace ownership
+## 3. Workspace 所有权
 
-All serialized offsets are relative to `AscendC::GetUserWorkspace(workspace)`;
-the total allocation returned to the framework is `system_workspace +
-user_workspace_bytes`. Every region starts on a 512-byte boundary.
+所有序列化偏移都相对于 `AscendC::GetUserWorkspace(workspace)`；框架获得的
+总分配量为 `system_workspace + user_workspace_bytes`。每个区域都从 512 字节
+对齐地址开始。
 
-| Region | Shape/capacity | Owner and lifetime |
+| 区域 | 形状或容量 | 所有者与生命周期 |
 | --- | --- | --- |
-| handoff H | `[B, HV, NC, K, V]`, input dtype | H writes one chunk; paired O reads it after IB wait; retained to kernel end |
-| handoff v_new | `[B, HV, T, V]`, input dtype | H writes one chunk; paired O reads it after IB wait; retained to kernel end |
-| IB events | `2 events * 2 AIV/core * blockDim * 8` int32 words | one eight-word slot per MIX logical AIV and event ID, as required by the IB API |
-| H v/v-update scratch | `P * 2 * C * V` FP32 each | private to producer mixed core and ping/pong stage |
-| optional H k-decay scratch | `P * 2 * C * K` FP32 | allocated only when `gk` is present |
-| H state-update scratch | `P * 2 * K * V` FP32 | private to producer mixed core and ping/pong stage |
-| O v/h scratch | `P * 2 * C * V` FP32 each | private to consumer mixed core and ping/pong stage |
-| O attention/aftermask scratch | `P * 2 * C * C` FP32 each | private to consumer mixed core and ping/pong stage |
-| O causal mask | `C * C` bytes | read-only after construction |
+| H 交接区 | `[B, HV, NC, K, V]`，输入数据类型 | H 写入一个 chunk；配对的 O 在 IB 等待完成后读取；保留到 kernel 结束 |
+| `v_new` 交接区 | `[B, HV, T, V]`，输入数据类型 | H 写入一个 chunk；配对的 O 在 IB 等待完成后读取；保留到 kernel 结束 |
+| IB 事件区 | `2 events * 2 AIV/core * blockDim * 8` 个 int32 | 按 IB 接口要求，为每个 MIX 逻辑 AIV 和事件编号分配一个八字槽 |
+| H 的 v/v-update 临时区 | 两块，各为 `P * 2 * C * V` 个 FP32 | 生产者 MIX 核私有，供 ping/pong 阶段使用 |
+| H 的可选 k-decay 临时区 | `P * 2 * C * K` 个 FP32 | 仅存在 `gk` 时分配 |
+| H 的 state-update 临时区 | `P * 2 * K * V` 个 FP32 | 生产者 MIX 核私有，供 ping/pong 阶段使用 |
+| O 的 v/h 临时区 | 两块，各为 `P * 2 * C * V` 个 FP32 | 消费者 MIX 核私有，供 ping/pong 阶段使用 |
+| O 的 attention/aftermask 临时区 | 两块，各为 `P * 2 * C * C` 个 FP32 | 消费者 MIX 核私有，供 ping/pong 阶段使用 |
+| O 的因果掩码 | `C * C` 字节 | 构造完成后只读 |
 
-The v_new allocation is immediately followed by the IB area, and both H and O
-consume its explicit serialized offset rather than relying on pointer-relative
-layout. Full-chunk handoff storage is intentional for the first profiling
-version. A two-slot handoff buffer is considered only if device profiling
-shows poor L2 hit rate.
+`v_new` 分配区后紧接 IB 区域。H 和 O 都使用显式序列化偏移访问这两个区域，
+不依赖指针之间的相对布局。首个 profiling 版本有意为所有 chunk 保留完整交接
+存储。只有设备 profiling 表明 L2 命中率不理想时，才考虑改为双槽交接缓冲区。
 
-For A5, all physical mixed cores participate in both stages. Its workspace
-contains the full H/v_new handoff, per-core H ping/pong scratch, optional
-k-decay scratch, per-core H update scratch, sequence metadata, and one
-`CHUNK_FWD_O_APRIME_WORKSPACE_BYTES` region per physical AIC. The regions are
-512-byte aligned and non-overlapping. The H kernel drains its local events
-before returning; AIC and AIV then execute `SyncAll<false>()` before O reads
-the handoff tensors. A5 uses `blockDim=physical_aic_core_count`.
+在 A5 上，所有物理 MIX 核都参与两个阶段。其 workspace 包含完整的 H/`v_new`
+交接区、每核 H ping/pong 临时区、可选 k-decay 临时区、每核 H update 临时区、
+序列元数据，以及每个物理 AIC 对应的一块
+`CHUNK_FWD_O_APRIME_WORKSPACE_BYTES` 区域。所有区域按 512 字节对齐，且互不
+重叠。H kernel 返回前会清空本地事件；随后 AIC 和 AIV 执行
+`SyncAll<false>()`，再由 O 读取交接张量。A5 使用
+`blockDim=physical_aic_core_count`。
 
-## 4. ABI and implementation ownership
+## 4. ABI 与实现归属
 
-The host macro type and kernel-side plain mirror have identical field order and
-are size-checked by tiling. The prefix used by the local H implementation is
-also compile-time checked with `offsetof`. H/O schedulers, epilogues and kernels
-needed by this operator are owned under this operator's `op_kernel` tree. No
-sibling operator or `internal` private header is included or linked.
+Host 侧宏类型和 kernel 侧普通镜像结构具有完全相同的字段顺序，tiling 会检查
+两者大小。算子内 H 实现使用的结构前缀也通过 `offsetof` 在编译期检查。本算子
+所需的 H/O 调度器、收尾模块和 kernel 全部归属当前算子的 `op_kernel` 目录树，
+不包含或链接同级算子的文件及 `internal` 私有头文件。
 
-The supported tiling keys are `1` for V=128 and `2` for V=256 on A2. A5 uses
-key `1` because its reviewed domain is V=128.
+A2 支持的 tiling key 为：V=128 时使用 `1`，V=256 时使用 `2`。A5 当前评审
+范围仅包含 V=128，因此使用 key `1`。
 
-## 5. Correctness and performance gates
+## 5. 正确性与性能门禁
 
-Correctness requires: exact `(b,hv,chunk)` address ownership, each H AIV signal
-after publishing its own slice, both O AIV waits completing before the O AIC
-performs a dependent read, a tail-safe final chunk, and optional final-state
-behavior identical to standalone H. Validation must cover at least two chunks
-so event and reverse-flag reuse are exercised.
+正确性要求如下：准确分配 `(b,hv,chunk)` 地址所有权；每个 H AIV 发布自己的
+切片后再发送信号；O 的两个 AIV 等待均完成后，O AIC 才能执行依赖这些数据的
+读取；最后一个 chunk 必须安全处理尾块；可选最终状态的行为必须与独立 H 算子
+一致。验证至少覆盖两个 chunk，以实际执行事件和反向标志的复用。
 
-After accuracy passes, profiling records L2 hit rate and GM traffic for the
-handoff regions. Double buffering is not introduced unless that evidence shows
-the full-chunk layout misses the intended L2 reuse.
+精度通过后，profiling 需要记录交接区域的 L2 命中率和 GM 流量。只有这些证据
+表明完整 chunk 布局未达到预期的 L2 复用效果时，才引入双缓冲。
