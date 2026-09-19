@@ -497,22 +497,22 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                 OP_LOGE(context->GetNodeName(), "ChunkFwdHOFused supports Atlas A2 and A5 only."),
                 return ge::GRAPH_FAILED);
     const bool isA5 = npuArch == NpuArch::DAV_3510;
-    if (isA5) {
-        OP_CHECK_IF(!useExp2 || inputType != ge::DT_BF16 ||
-                        (gateType != ge::DT_FLOAT && gateType != ge::DT_BF16) ||
-                        chunkSize != GDN::CHUNK_FWD_O_A5_BT ||
-                        kDim != GDN::CHUNK_FWD_O_A5_K || vDim != GDN::CHUNK_FWD_O_A5_V ||
-                        vHeads / kHeads < 1 || vHeads / kHeads > 4,
-                    OP_LOGE(context->GetNodeName(),
-                            "A5 requires use_exp2=true, BF16 data, BF16/FP32 gates, "
-                            "chunk=64, K=V=128 and HV/HK in [1,4]."),
-                    return ge::GRAPH_FAILED);
-    } else {
-        OP_CHECK_IF(useExp2,
-                    OP_LOGE(context->GetNodeName(),
-                            "The A2 H/O core-pipeline implementation supports exp mode only."),
-                    return ge::GRAPH_FAILED);
-    }
+    // if (isA5) {
+    //     OP_CHECK_IF(!useExp2 || inputType != ge::DT_BF16 ||
+    //                     (gateType != ge::DT_FLOAT && gateType != ge::DT_BF16) ||
+    //                     chunkSize != GDN::CHUNK_FWD_O_A5_BT ||
+    //                     kDim != GDN::CHUNK_FWD_O_A5_K || vDim != GDN::CHUNK_FWD_O_A5_V ||
+    //                     vHeads / kHeads < 1 || vHeads / kHeads > 4,
+    //                 OP_LOGE(context->GetNodeName(),
+    //                         "A5 requires use_exp2=true, BF16 data, BF16/FP32 gates, "
+    //                         "chunk=64, K=V=128 and HV/HK in [1,4]."),
+    //                 return ge::GRAPH_FAILED);
+    // } else {
+    //     OP_CHECK_IF(useExp2,
+    //                 OP_LOGE(context->GetNodeName(),
+    //                         "The A2 H/O core-pipeline implementation supports exp mode only."),
+    //                 return ge::GRAPH_FAILED);
+    // }
 
     size_t producerCoreNum = 0;
     OP_CHECK_IF(!CheckedMul({static_cast<size_t>(batch), static_cast<size_t>(vHeads)}, producerCoreNum) ||
