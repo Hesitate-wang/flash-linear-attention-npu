@@ -2,87 +2,474 @@
 
 方案设计规则版本：`V2`
 
-## 1. 目标与范围
+本文描述当前仓库实现。公开接口契约以 [`api.md`](api.md) 为准；本文中的函数原型、
+参数顺序、TilingData 字段顺序、workspace 分配和架构分支均与当前源码一致。
 
-设备侧实现面向 Atlas A2 的定长自然指数路径和 Ascend 950 的定长 exp2 输出
-路径。两种实现都在一次 kernel 下发中融合状态递推与输出计算，并将 `h` 和
-`v_new` 保留为内部数据。当前不支持变长输入，检测到变长输入时直接拒绝。
+## 1. 目标、计算语义与实现边界
 
-Ascend 950 使用算子目录内复制的既有 arch35 H 和 O 实现。编译期架构选择确保
-A5 编译器不会包含 A2 的生产者/消费者实现。A5 依次执行 H 和 O，保持独立算子
-组合时“H 阶段采用自然指数、O 阶段采用 exp2”的语义。
+`ChunkFwdHOFused` 在一次 AICore kernel 下发中完成 H 状态递推和 O 输出计算。
+中间张量 `h`、`v_new` 位于 user workspace，不作为公开输出。
 
-## 2. 核映射与执行顺序
+令 `B/T/HK/HV` 分别为 batch、序列长度、K/Q head 数和 value head 数，
+`K=128`，`V in {128,256}`，`C=chunkSize in {64,128}`，`NC=ceil(T/C)`，
+`R=HV/HK`，`P=B*HV`，`hk=floor(hv/R)`。chunk 有效区间记为 `[s,e)`。
 
-令 `P = B * HV`，`NC = ceil(T / chunk_size)`。仅当
-`2 * P < physical_aic_core_count` 时选择流水实现，并以 batch 调度模式启动
-`blockDim = 2 * P` 个 MIX 核。
+H 阶段实现：
 
-- MIX 核 `[0, P)` 是 H 生产者；生产者 `p = b * HV + hv` 按 chunk 升序负责
-  一个 `(b, hv)` 对的全部 chunk。
-- MIX 核 `[P, 2P)` 是 O 消费者；消费者 `P + p` 负责相同的 `(b, hv)` 对，
-  同样按 chunk 升序遍历。
-- 对应的 AIV0/AIV1 通道沿用既有的分行处理方式。IB 同步是 SIMD 侧接口，
-  因此每个消费者 AIV 都在 MIX 逻辑索引空间内等待对应的生产者 AIV 索引。
+```text
+h[b,hv,chunk] = state_before_chunk
+v_new[s:e] = u[s:e] - w[s:e] @ state_before_chunk
+state_after_chunk = state_before_chunk * exp(g[e-1])
+                  + k[s:e]^T @ (v_new[s:e] * exp(g[e-1] - g[s:e]))
+```
 
-所有活跃 AIV 首先将自己的 IB 事件槽清零。启动阶段执行一次 `SyncAll`，确保
-核组分流前所有核都能观察到初始化结果。对于每个 chunk，H 通过
-`IBSet<false>` 发布当前 `h` 和 `v_new` 中由各 AIV 完成的切片。O 的两个 AIV
-完成对应的 `IBWait<false>` 后，反向复用已经消费完毕的 `cube1Done` 流水标志。
-O 的 AIC 在首次把完整 `h`/`v_new` tile 从 GM 搬入 L1 前，等待这两个 AIV 的
-聚合确认。`vec1Done` 独立保护随后使用的 `attnMask` 输入。IB 事件编号由
-`chunk_index % 2` 选择。由于每个 chunk 都有独立的交接存储区，因此不需要
-反向发送空闲信号。
+O 阶段实现：
 
-在流水模式下，H 实现使用既有的逐 MIX 核 CrossCore 标志替代原先逐 wave 的
-全局同步。因此，消费者核不需要进入 H；启动同步完成后，H 和 O 可以并发执行。
+```text
+A = q[s:e] @ k[s:e]^T
+A = tril(A * gate_fn(g[s:e,None] - g[None,s:e]))
+state_term = (q[s:e] * gate_fn(g[s:e])) @ h[b,hv,chunk]
+o[s:e] = scale * (state_term + A @ v_new[s:e])
+```
 
-## 3. Workspace 所有权
+当前实现只接受定长输入；只要 `cu_seqlens` 和 `chunk_indices` 存在，Host tiling
+立即返回 `GRAPH_FAILED`。
 
-所有序列化偏移都相对于 `AscendC::GetUserWorkspace(workspace)`；框架获得的
-总分配量为 `system_workspace + user_workspace_bytes`。每个区域都从 512 字节
-对齐地址开始。
+### 1.1 架构分支
 
-| 区域 | 形状或容量 | 所有者与生命周期 |
+| 架构 | Host 识别值 | `blockDim` | H/O 关系 | 同步方式 |
+| --- | --- | --- | --- | --- |
+| Atlas A2 | `DAV_2201` | `2*P` | 前 `P` 个 MIX 核运行 H，后 `P` 个运行 O | 启动时清空 IB 区并 `SyncAll`；逐 chunk `IBSet/IBWait` |
+| Ascend 950 | `DAV_3510` | `physicalCoreNum` | 所有核先完整运行 H，再完整运行 O | H 返回后 `SyncAll<false>()` |
+
+A2 要求 `2*P < physicalCoreNum`，并设置 `scheduleMode=1`。A5 使用全部物理 AIC。
+
+### 1.2 当前未闭合的范围
+
+Host tiling 中针对 SoC 的 `useExp2/dtype/C/K/V/R` 校验当前被注释，所以代码实际
+放行范围宽于 `api.md` 声明的设备路径：
+
+- A2 的 O-stage 投影不携带 `useExp2` 和 `outputLayout`，有效设计范围仍是自然指数
+  的 `BNSD/NTD` 路径。
+- A5 的 arch35 模板固定面向 BF16、`C=64`、`K=V=128`，Host 当前仍可能放行
+  FP16、`C=128` 或 `V=256`。
+- `V=256` 会生成 `TilingKey=2`，但 A5 入口不按 TilingKey 分派，仍进入固定的
+  arch35 路径。
+
+这些是当前实现缺口，不代表新增支持范围。
+
+## 2. Stage 与设备执行路径
+
+### 2.1 Stage 0：Host 构造执行任务和 tiling
+
+ACLNN 第一阶段完成参数校验、连续化、可选状态转置和 executor 创建。L0 将
+`aclIntArray` 转为 INT64 tensor；未请求 `final_state` 时创建 shape `[0]` 的内部
+占位 tensor，然后调用 `ADD_TO_LAUNCHER_LIST_AICORE`。
+
+Host tiling 依次完成：属性和逻辑 shape 校验、定长/layout/dtype/storage shape
+校验、架构识别、核数计算、TilingData 填充、workspace 计算，以及 TilingKey、
+blockDim、schedule mode 和 workspace size 设置。
+
+### 2.2 Stage 1：A2 H 生产者
+
+逻辑 MIX 核 `p in [0,P)` 固定负责 `b=p/HV, hv=p%HV` 的全部 chunk。H kernel
+使用两个 stream slot；`vWorkspaceOffset`、`vUpdateWorkspaceOffset`、
+`kDecayWorkspaceOffset` 和 `hWorkspaceOffset` 是其双流水临时区。每个 chunk 写：
+
+- `handoffH[b,hv,chunk,:,:]`；
+- `handoffV[b,hv,s:e,:]`；
+- 可选 `final_state[b,hv,:,:]`。
+
+两个 AIV 分别完成自己的切片后，以 `eventId=chunk%2` 调用 `IBSet<false>`。
+
+### 2.3 Stage 2：A2 O 消费者
+
+逻辑 MIX 核 `P+p` 固定消费生产者 `p` 的全部 chunk，workspace 索引使用
+`workspaceCoreIdx=p`。每个 chunk 的内部流水为：
+
+1. Cube1：`Q @ K^T` 写 attention workspace。
+2. Vector1：AIV 等待 H 的 `IBWait`，完成 gate、causal mask 和指数处理。
+3. Cube2：`Q @ H` 写 O 的 H 临时区。
+4. Cube3：masked attention `@ v_new` 写 O 的 V 临时区。
+5. Vector2：合并 Cube2/Cube3，乘 `scale` 并写出 `o`。
+
+O 使用两个 ping/pong slot。`cube1Done/vec1Done/cube3Done/vec2Done` 使用
+CrossCore flag `0..7`。两个消费者 AIV 完成 `IBWait` 后反向发布 `cube1Done`，
+AIC 在读取完整 H/V tile 前等待聚合结果。
+
+### 2.4 Stage 1A/2A：A5 顺序执行
+
+A5 的 `RunChunkFwdHOFusedA5` 先调用 arch35 H，将 `h` 和 `v_new` 写入完整交接区；
+H 返回后所有 AIC/AIV 执行 `SyncAll<false>()`，随后构造 `ChunkFwdOTilingData`
+并调用 arch35 O。A5 不使用 A2 的 IB 区和 O 临时区；O 只使用每物理核一块
+A-prime workspace。
+
+## 3. TilingData 定义和 ABI
+
+### 3.1 枚举与常量
+
+```cpp
+namespace GDN {
+enum class ChunkFwdHOFusedDtype : int64_t { FP16 = 0, BF16 = 1, FP32 = 2 };
+enum class ChunkFwdHOFusedOutputLayout : int64_t {
+    BNSD = 0, BSND = 1, TND = 2, NTD = 3
+};
+enum class ChunkFwdHOFusedTilingKey : uint64_t { V128_EXP = 1, V256_EXP = 2 };
+constexpr int64_t CHUNK_FWD_HO_AIV_PER_MIXED_CORE = 2;
+constexpr int64_t CHUNK_FWD_HO_IB_EVENT_COUNT = 2;
+constexpr int64_t CHUNK_FWD_HO_IB_WORDS_PER_EVENT = 8;
+}
+```
+
+枚举名中的 `EXP` 是现有代码名称，不表示 Host 已完成 SoC 的 exp/exp2 限制。
+
+### 3.2 Host 序列化结构
+
+以下字段顺序是 ABI，不能重排：
+
+```cpp
+BEGIN_TILING_DATA_DEF(ChunkFwdHOFusedTilingData)
+TILING_DATA_FIELD_DEF(int64_t, batch);
+TILING_DATA_FIELD_DEF(int64_t, seqlen);
+TILING_DATA_FIELD_DEF(int64_t, kNumHead);
+TILING_DATA_FIELD_DEF(int64_t, vNumHead);
+TILING_DATA_FIELD_DEF(int64_t, kHeadDim);
+TILING_DATA_FIELD_DEF(int64_t, vHeadDim);
+TILING_DATA_FIELD_DEF(int64_t, chunkSize);
+TILING_DATA_FIELD_DEF(bool, useInitialState);
+TILING_DATA_FIELD_DEF(bool, storeFinalState);
+TILING_DATA_FIELD_DEF(int64_t, dataType);
+TILING_DATA_FIELD_DEF(int64_t, gDataType);
+TILING_DATA_FIELD_DEF(int64_t, stateDataType);
+TILING_DATA_FIELD_DEF(int64_t, isVariedLen);
+TILING_DATA_FIELD_DEF(int64_t, shapeBatch);
+TILING_DATA_FIELD_DEF(int64_t, tokenBatch);
+TILING_DATA_FIELD_DEF(bool, useG);
+TILING_DATA_FIELD_DEF(bool, useGk);
+TILING_DATA_FIELD_DEF(int64_t, vWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, vUpdateWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, kDecayWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, hWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, numSeqWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, numChunksWorkspaceOffset);
+TILING_DATA_FIELD_DEF(bool, useExp2);
+TILING_DATA_FIELD_DEF(int64_t, outputLayout);
+TILING_DATA_FIELD_DEF(float, scale);
+TILING_DATA_FIELD_DEF(int64_t, chunkNum);
+TILING_DATA_FIELD_DEF(int64_t, numChunksPerBatch);
+TILING_DATA_FIELD_DEF(int64_t, hvPerHk);
+TILING_DATA_FIELD_DEF(int64_t, taskGroupSize);
+TILING_DATA_FIELD_DEF(int64_t, producerCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, consumerCoreBase);
+TILING_DATA_FIELD_DEF(int64_t, activeCoreNum);
+TILING_DATA_FIELD_DEF(int64_t, handoffHWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, handoffVWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, pipelineSyncWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, pipelineEventCount);
+TILING_DATA_FIELD_DEF(int64_t, oVWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, oHWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, oAttnWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, oAfterMaskWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, oMaskWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, oAPrimeWorkspaceOffset);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(ChunkFwdHOFused, ChunkFwdHOFusedTilingData)
+```
+
+kernel 侧 `GDN::ChunkFwdHOFusedTilingData` 是逐字段同序的普通 C++ 镜像。Host
+检查 `tiling->GetDataSize() == sizeof(GDN::ChunkFwdHOFusedTilingData)`；该检查只能
+发现总大小不一致，不能发现总大小相同但字段顺序不同。
+
+### 3.3 字段来源和消费方
+
+| 字段组 | Host 来源 | 主要消费方 |
 | --- | --- | --- |
-| H 交接区 | `[B, HV, NC, K, V]`，输入数据类型 | H 写入一个 chunk；配对的 O 在 IB 等待完成后读取；保留到 kernel 结束 |
-| `v_new` 交接区 | `[B, HV, T, V]`，输入数据类型 | H 写入一个 chunk；配对的 O 在 IB 等待完成后读取；保留到 kernel 结束 |
-| IB 事件区 | `2 events * 2 AIV/core * blockDim * 8` 个 int32 | 按 IB 接口要求，为每个 MIX 逻辑 AIV 和事件编号分配一个八字槽 |
-| H 的 v/v-update 临时区 | 两块，各为 `P * 2 * C * V` 个 FP32 | 生产者 MIX 核私有，供 ping/pong 阶段使用 |
-| H 的可选 k-decay 临时区 | `P * 2 * C * K` 个 FP32 | 仅存在 `gk` 时分配 |
-| H 的 state-update 临时区 | `P * 2 * K * V` 个 FP32 | 生产者 MIX 核私有，供 ping/pong 阶段使用 |
-| O 的 v/h 临时区 | 两块，各为 `P * 2 * C * V` 个 FP32 | 消费者 MIX 核私有，供 ping/pong 阶段使用 |
-| O 的 attention/aftermask 临时区 | 两块，各为 `P * 2 * C * C` 个 FP32 | 消费者 MIX 核私有，供 ping/pong 阶段使用 |
-| O 的因果掩码 | `C * C` 字节 | 构造完成后只读 |
+| `batch` 至 `chunkSize` | L0 逻辑属性 | H/O scheduler |
+| `useInitialState,storeFinalState` | descriptor / attr | H kernel |
+| `dataType,gDataType,stateDataType` | input descriptor | H/O dtype dispatch |
+| `isVariedLen,shapeBatch,tokenBatch` | optional shape | H/O scheduler |
+| `useG,useGk` | `true` / optional descriptor | H dispatch |
+| H workspace offsets | `FillWorkspace*` | H kernel |
+| `useExp2,outputLayout,scale` | attributes | A5 O；A2 O 只投影 `scale` |
+| chunk/head/core 派生字段 | shape 和 platform | A5 O、入口分流和调度 |
+| handoff/sync offsets | `FillWorkspace*` | fused 入口、A2 IB |
+| O workspace offsets | `FillWorkspace` | A2 O kernel |
+| `oAPrimeWorkspaceOffset` | `FillWorkspaceA5` | arch35 O |
 
-`v_new` 分配区后紧接 IB 区域。H 和 O 都使用显式序列化偏移访问这两个区域，
-不依赖指针之间的相对布局。首个 profiling 版本有意为所有 chunk 保留完整交接
-存储。只有设备 profiling 表明 L2 命中率不理想时，才考虑改为双槽交接缓冲区。
+`consumerCoreBase` 当前会写入，但 A2 入口实际以
+`GetMixedCoreIdx() < producerCoreNum` 分流，没有直接读取该字段。
 
-在 A5 上，所有物理 MIX 核都参与两个阶段。其 workspace 包含完整的 H/`v_new`
-交接区、每核 H ping/pong 临时区、可选 k-decay 临时区、每核 H update 临时区、
-序列元数据，以及每个物理 AIC 对应的一块
-`CHUNK_FWD_O_APRIME_WORKSPACE_BYTES` 区域。所有区域按 512 字节对齐，且互不
-重叠。H kernel 返回前会清空本地事件；随后 AIC 和 AIV 执行
-`SyncAll<false>()`，再由 O 读取交接张量。A5 使用
-`blockDim=physical_aic_core_count`。
+### 3.4 H 前缀和 O 投影
 
-## 4. ABI 与实现归属
+H kernel 将 tiling GM 指针解释为 `ChunkFwdHOFusedHStageTilingData*`，因此完整结构
+从 `batch` 到 `numChunksWorkspaceOffset` 必须构成严格前缀：
 
-Host 侧宏类型和 kernel 侧普通镜像结构具有完全相同的字段顺序，tiling 会检查
-两者大小。算子内 H 实现使用的结构前缀也通过 `offsetof` 在编译期检查。本算子
-所需的 H/O 调度器、收尾模块和 kernel 全部归属当前算子的 `op_kernel` 目录树，
-不包含或链接同级算子的文件及 `internal` 私有头文件。
+```cpp
+static_assert(offsetof(ChunkFwdHOFusedTilingData, useExp2) ==
+              sizeof(ChunkFwdHOFusedHStageTilingData));
+```
 
-A2 支持的 tiling key 为：V=128 时使用 `1`，V=256 时使用 `2`。A5 当前评审
-范围仅包含 V=128，因此使用 key `1`。
+O 不直接重解释完整结构：A2 投影为 `ChunkFwdHOFusedOStageTilingData`，A5 投影
+为 `ChunkFwdOTilingData`。这两个结构不是完整 TilingData 的 ABI 镜像，必须逐字段
+赋值，不能用裸指针转换代替。
 
-## 5. 正确性与性能门禁
+A2 O-stage 投影的实际定义为：
 
-正确性要求如下：准确分配 `(b,hv,chunk)` 地址所有权；每个 H AIV 发布自己的
-切片后再发送信号；O 的两个 AIV 等待均完成后，O AIC 才能执行依赖这些数据的
-读取；最后一个 chunk 必须安全处理尾块；可选最终状态的行为必须与独立 H 算子
-一致。验证至少覆盖两个 chunk，以实际执行事件和反向标志的复用。
+```cpp
+struct ChunkFwdHOFusedOStageTilingData {
+    int64_t shapeBatch;
+    int64_t seqlen;
+    int64_t kNumHead;
+    int64_t vNumHead;
+    int64_t kHeadDim;
+    int64_t vHeadDim;
+    int64_t chunkSize;
+    int64_t isVariedLen;
+    int64_t tokenBatch;
+    int64_t dataType;
+    int64_t gDataType;
+    int64_t vWorkspaceOffset;
+    int64_t hWorkspaceOffset;
+    int64_t attnWorkspaceOffset;
+    int64_t aftermaskWorkspaceOffset;
+    int64_t maskWorkspaceOffset;
+    float scale;
+    int64_t pipelineSyncWorkspaceOffset;
+};
+```
 
-精度通过后，profiling 需要记录交接区域的 L2 命中率和 GM 流量。只有这些证据
-表明完整 chunk 布局未达到预期的 L2 复用效果时，才引入双缓冲。
+A5 arch35 O-stage 投影的实际定义为：
+
+```cpp
+struct ChunkFwdOTilingData {
+    int64_t shapeBatch;
+    int64_t seqlen;
+    int64_t kNumHead;
+    int64_t vNumHead;
+    int64_t kHeadDim;
+    int64_t vHeadDim;
+    int64_t chunkSize;
+    int64_t isVariedLen;
+    int64_t tokenBatch;
+    int64_t dataType;
+    int64_t gDataType;
+    int64_t vWorkspaceOffset;
+    int64_t hWorkspaceOffset;
+    int64_t attnWorkspaceOffset;
+    int64_t aftermaskWorkspaceOffset;
+    int64_t maskWorkspaceOffset;
+    int64_t stateVFirst;
+    int64_t outputLayout;
+    float scale;
+    int64_t chunkNum;
+    int64_t hvPerHk;
+    int64_t taskGroupSize;
+    int64_t numChunksPerBatch;
+    int64_t aPrimeWorkspaceOffset;
+};
+```
+
+A2 `FillOTiling` 把 `oV/oH/oAttn/oAfterMask/oMask` 映射到上述通用 offset；A5
+`FillOTiling` 将这些通用临时 offset 和 `stateVFirst` 置零，只传递
+`outputLayout`、chunk/head 派生字段及 `oAPrimeWorkspaceOffset`。
+
+## 4. Host tiling 接口和索引
+
+### 4.1 固定索引
+
+```cpp
+// Inputs
+K=0, Q=1, W=2, U=3, G=4, GK=5, INITIAL_STATE=6,
+CU_SEQLENS=7, CHUNK_INDICES=8
+
+// Outputs
+O=0, FINAL_STATE=1
+
+// Attributes
+OUTPUT_FINAL_STATE=0, CHUNK_SIZE=1, SCALE=2, USE_EXP2=3,
+OUTPUT_LAYOUT=4, LOGICAL_BATCH=5, LOGICAL_SEQLEN=6,
+LOGICAL_K_HEADS=7, LOGICAL_V_HEADS=8, LOGICAL_K_DIM=9,
+LOGICAL_V_DIM=10
+```
+
+这些索引必须匹配 OpDef、L0 的 `OP_INPUT/OP_OUTPUT/OP_ATTR` 顺序和已安装 OPP。
+
+### 4.2 Tiling 函数
+
+```cpp
+ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context);
+ge::graphStatus TilingPrepareForChunkFwdHOFused(
+    gert::TilingParseContext *context);
+
+IMPL_OP_OPTILING(ChunkFwdHOFused)
+    .Tiling(Tiling4ChunkFwdHOFused)
+    .TilingParse<ChunkFwdHOFusedCompileInfo>(TilingPrepareForChunkFwdHOFused);
+```
+
+辅助接口：
+
+```cpp
+ge::graphStatus ValidateTensorContracts(
+    gert::TilingContext *context, int64_t batch, int64_t seqlen,
+    int64_t kHeads, int64_t vHeads, int64_t kDim, int64_t vDim,
+    int64_t outputLayout);
+
+ge::graphStatus FillWorkspace(
+    ChunkFwdHOFusedTilingData &tiling, size_t systemWorkspace,
+    size_t producerCoreNum, bool useGk, size_t &workspaceSize);
+
+ge::graphStatus FillWorkspaceA5(
+    ChunkFwdHOFusedTilingData &tiling, size_t systemWorkspace,
+    size_t physicalCoreNum, size_t taskNum, bool useGk,
+    size_t &workspaceSize);
+```
+
+## 5. Workspace 布局
+
+全部 offset 相对于 `AscendC::GetUserWorkspace(workspace)`，每个区域起点按 512
+bytes 对齐。最终返回 `systemWorkspace + alignedUserWorkspace`。以下 `E=2`、
+`F=4`、`S=2` 分别表示输入元素字节数、FP32 字节数和 ping/pong slot 数。
+
+### 5.1 A2 分配顺序
+
+| 字段 | 原始字节数 |
+| --- | --- |
+| `handoffHWorkspaceOffset` | `P*NC*K*V*E` |
+| `handoffVWorkspaceOffset` | `P*T*V*E` |
+| `pipelineSyncWorkspaceOffset` | `activeCoreNum*2*2*8*4` |
+| `vWorkspaceOffset` | `P*C*V*F*S` |
+| `vUpdateWorkspaceOffset` | `P*C*V*F*S` |
+| `kDecayWorkspaceOffset` | `P*C*K*F*S`，仅有 `gk` 时分配 |
+| `hWorkspaceOffset` | `P*K*V*F*S` |
+| `numSeqWorkspaceOffset` | `(batch+1)*sizeof(int64_t)` |
+| `numChunksWorkspaceOffset` | `(batch+1)*sizeof(int64_t)` |
+| `oVWorkspaceOffset` | `P*C*V*F*S` |
+| `oHWorkspaceOffset` | `P*C*V*F*S` |
+| `oAttnWorkspaceOffset` | `P*C*C*F*S` |
+| `oAfterMaskWorkspaceOffset` | `P*C*C*F*S` |
+| `oMaskWorkspaceOffset` | `C*C` |
+
+`oAPrimeWorkspaceOffset=0`。没有 `gk` 时 `kDecayWorkspaceOffset` 指向当前位置但不
+推进 offset，H 的非 GK 模板不消费该区域。
+
+### 5.2 A5 分配顺序
+
+| 字段 | 原始字节数 |
+| --- | --- |
+| `handoffHWorkspaceOffset` | `P*NC*K*V*E` |
+| `handoffVWorkspaceOffset` | `P*T*V*E` |
+| `vWorkspaceOffset` | `physicalCoreNum*C*V*F*S` |
+| `vUpdateWorkspaceOffset` | 同上 |
+| `kDecayWorkspaceOffset` | `physicalCoreNum*C*K*F*S`，仅有 `gk` 时分配 |
+| `hWorkspaceOffset` | `physicalCoreNum*K*V*F*S` |
+| `numSeqWorkspaceOffset` | `(batch+1)*sizeof(int64_t)` |
+| `numChunksWorkspaceOffset` | `(batch+1)*sizeof(int64_t)` |
+| `oAPrimeWorkspaceOffset` | `physicalCoreNum*CHUNK_FWD_O_APRIME_WORKSPACE_BYTES` |
+
+A5 将 `pipelineSyncWorkspaceOffset` 和全部 A2 O workspace offset 置零。
+
+## 6. 函数接口和参数顺序
+
+### 6.1 ACLNN 两阶段接口
+
+```cpp
+aclnnStatus aclnnChunkFwdHOFusedGetWorkspaceSize(
+    const aclTensor *k, const aclTensor *q, const aclTensor *w,
+    const aclTensor *u, const aclTensor *g, const aclTensor *gkOptional,
+    const aclTensor *initialStateOptional,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional,
+    bool outputFinalState, int64_t chunkSize, double scale,
+    bool useExp2, bool stateVFirst, const char *outputLayout,
+    const aclTensor *oOut, const aclTensor *finalStateOut,
+    uint64_t *workspaceSize, aclOpExecutor **executor);
+
+aclnnStatus aclnnChunkFwdHOFused(
+    void *workspace, uint64_t workspaceSize,
+    aclOpExecutor *executor, aclrtStream stream);
+```
+
+第一阶段构建 executor/workspace；第二阶段通过 `CommonOpExecutorRun` 执行任务。
+
+### 6.2 L0 接口与 launcher
+
+```cpp
+const std::array<const aclTensor *, 2> ChunkFwdHOFused(
+    const aclTensor *k, const aclTensor *q, const aclTensor *w,
+    const aclTensor *u, const aclTensor *g, const aclTensor *gkOptional,
+    const aclTensor *initialStateOptional,
+    const aclIntArray *cuSeqlensOptional,
+    const aclIntArray *chunkIndicesOptional,
+    bool outputFinalState, int64_t chunkSize, double scale, bool useExp2,
+    const char *outputLayout, const aclTensor *oOut,
+    const aclTensor *finalStateOut, aclnnStatus *status,
+    aclOpExecutor *executor);
+```
+
+```cpp
+ADD_TO_LAUNCHER_LIST_AICORE(
+    ChunkFwdHOFused,
+    OP_INPUT(k, q, w, u, g, gkOptional, initialStateOptional,
+             actualCuSeqlens, actualChunkIndices),
+    OP_OUTPUT(oOut, finalStateOutKernel),
+    OP_ATTR(outputFinalState, chunkSize, scale, useExp2, outputLayoutStr,
+            logicalBatch, logicalSeqlen, logicalKHeads, logicalVHeads,
+            logicalKDim, logicalVDim));
+```
+
+### 6.3 AICore kernel ABI
+
+```cpp
+extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
+    GM_ADDR k, GM_ADDR q, GM_ADDR w, GM_ADDR u, GM_ADDR g,
+    GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens,
+    GM_ADDR chunk_indices, GM_ADDR o, GM_ADDR final_state,
+    GM_ADDR workspace, GM_ADDR tiling);
+```
+
+kernel ABI 与 `OP_INPUT/OP_OUTPUT` 完全一致。内部 helper 为复用 H 实现改成
+`k,w,u,g,gk,initialState,q,...` 顺序，这只是内部顺序，不能反向修改公开 ABI。
+
+入口先执行：
+
+```cpp
+REGISTER_TILING_DEFAULT(GDN::ChunkFwdHOFusedTilingData);
+GET_TILING_DATA_WITH_STRUCT(
+    GDN::ChunkFwdHOFusedTilingData, tilingData, tiling);
+```
+
+A5 随后调用 `RunChunkFwdHOFusedA5`；A2 根据 key `1/2` 选择 V128/V256 的
+`RunPipeline` 模板。
+
+## 7. 注册、构建和一致性约束
+
+运行时关联链：
+
+```text
+OP_TYPE_REGISTER(ChunkFwdHOFused)
+  -> OP_ADD(ChunkFwdHOFused)
+  -> REGISTER_TILING_DATA_CLASS(ChunkFwdHOFused, ...)
+  -> IMPL_OP_OPTILING(ChunkFwdHOFused)
+  -> opFile/opInterface = chunk_fwd_h_o_fused
+  -> kernel symbol chunk_fwd_h_o_fused
+```
+
+由于连续大写 `HO` 默认会折叠成 `chunk_fwd_ho_fused`，OpDef 显式设置：
+
+```cpp
+.ExtendCfgInfo("opFile.value", "chunk_fwd_h_o_fused")
+.ExtendCfgInfo("opInterface.value", "chunk_fwd_h_o_fused")
+```
+
+ACLNN/L0 SO、OpDef、tiling SO、kernel JSON/O 和 `binary_info_config.json` 必须来自
+同一次构建和安装。必须逐项保持：
+
+1. 九个输入、两个输出和十一个属性的顺序一致。
+2. Host TilingData 与 kernel 镜像的字段顺序、类型、对齐和总大小一致。
+3. H 前缀的 `offsetof(useExp2)` 断言成立。
+4. `opFile/opInterface` 指向实际的 `chunk_fwd_h_o_fused` 符号。
+5. A2 的 IB/O workspace 和 A5 的 A-prime workspace 与架构分支一致。
+
+修改任一 ABI 字段、输入顺序或 workspace offset 后，必须同步修改 Host 定义、
+kernel 镜像、H 前缀/O 投影、OpDef、L0 launcher、测试和本文档。
