@@ -178,8 +178,11 @@ REGISTER_TILING_DATA_CLASS(ChunkFwdHOFused, ChunkFwdHOFusedTilingData)
 ```
 
 kernel 侧 `GDN::ChunkFwdHOFusedTilingData` 是逐字段同序的普通 C++ 镜像。Host
-检查 `tiling->GetDataSize() == sizeof(GDN::ChunkFwdHOFusedTilingData)`；该检查只能
-发现总大小不一致，不能发现总大小相同但字段顺序不同。
+在栈上构造宏生成的 `ChunkFwdHOFusedTilingData`，完成字段和 workspace offset
+填充后，通过 `SaveToBuffer` 序列化到 `context->GetRawTilingData()`，再设置实际
+数据长度。Host 同时检查
+`tiling.GetDataSize() == sizeof(GDN::ChunkFwdHOFusedTilingData)`；该检查只能发现
+总大小不一致，不能发现总大小相同但字段顺序不同。
 
 ### 3.3 字段来源和消费方
 

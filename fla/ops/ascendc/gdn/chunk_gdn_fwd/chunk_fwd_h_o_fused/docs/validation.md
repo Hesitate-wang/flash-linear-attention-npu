@@ -15,7 +15,10 @@
 ## 已完成的静态检查
 
 - Host 和 kernel 的融合 tiling 镜像使用相同字段顺序；Host tiling 保留与算子内
-  H 完全一致的结构前缀，并检查完整序列化结构的大小。
+  H 完全一致的结构前缀，并检查完整序列化结构的大小。宏生成的 Host TilingData
+  采用本地构造，在所有字段和 workspace offset 填充完成后显式 `SaveToBuffer` 到
+  raw tiling buffer，并设置实际数据长度；不再将 raw buffer 解释为未构造的
+  TilingData 管理对象，因此首个 `set_batch` 不会访问空的内部存储。
 - Workspace 偏移均相对于用户 workspace，所有区域都按 512 字节对齐；返回的
   workspace 大小只累加一次平台系统 workspace。
 - A2 的 `blockDim` 为 `2 * B * HV`，并受

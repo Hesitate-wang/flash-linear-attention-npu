@@ -343,9 +343,8 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
 ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
 {
     OP_LOGD(context->GetNodeName(), "Tiling4ChunkFwdHOFused start.");
-    auto *tiling = context->GetTilingData<ChunkFwdHOFusedTilingData>();
+    ChunkFwdHOFusedTilingData tiling;
     const auto *attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     const bool *outputFinalStatePtr = attrs->GetAttrPointer<bool>(ATTR_OUTPUT_FINAL_STATE);
@@ -537,49 +536,60 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                                         outputLayout) != ge::GRAPH_SUCCESS,
                 , return ge::GRAPH_FAILED);
 
-    tiling->set_batch(isVarlen ? tokenBatch : batch);
-    tiling->set_seqlen(seqlen);
-    tiling->set_kNumHead(kHeads);
-    tiling->set_vNumHead(vHeads);
-    tiling->set_kHeadDim(kDim);
-    tiling->set_vHeadDim(vDim);
-    tiling->set_chunkSize(chunkSize);
-    tiling->set_useInitialState(initialStateDesc != nullptr);
-    tiling->set_storeFinalState(outputFinalState);
-    tiling->set_dataType(DtypeToEnum(inputType));
-    tiling->set_gDataType(DtypeToEnum(gateType));
-    tiling->set_stateDataType(stateType);
-    tiling->set_isVariedLen(isVarlen ? 1 : 0);
-    tiling->set_shapeBatch(batch);
-    tiling->set_tokenBatch(tokenBatch);
-    tiling->set_useG(true);
-    tiling->set_useGk(gkDesc != nullptr);
-    tiling->set_useExp2(useExp2);
-    tiling->set_outputLayout(outputLayout);
-    tiling->set_scale(static_cast<float>(*scalePtr));
-    tiling->set_chunkNum(chunkNum);
-    tiling->set_numChunksPerBatch((seqlen + chunkSize - 1) / chunkSize);
-    tiling->set_hvPerHk(vHeads / kHeads);
-    tiling->set_taskGroupSize(vHeads / kHeads == 3 ? 3 : 4);
-    tiling->set_producerCoreNum(static_cast<int64_t>(producerCoreNum));
-    tiling->set_consumerCoreBase(static_cast<int64_t>(producerCoreNum));
-    tiling->set_activeCoreNum(static_cast<int64_t>(activeCoreNum));
-    tiling->set_pipelineEventCount(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT);
+    tiling.set_batch(isVarlen ? tokenBatch : batch);
+    tiling.set_seqlen(seqlen);
+    tiling.set_kNumHead(kHeads);
+    tiling.set_vNumHead(vHeads);
+    tiling.set_kHeadDim(kDim);
+    tiling.set_vHeadDim(vDim);
+    tiling.set_chunkSize(chunkSize);
+    tiling.set_useInitialState(initialStateDesc != nullptr);
+    tiling.set_storeFinalState(outputFinalState);
+    tiling.set_dataType(DtypeToEnum(inputType));
+    tiling.set_gDataType(DtypeToEnum(gateType));
+    tiling.set_stateDataType(stateType);
+    tiling.set_isVariedLen(isVarlen ? 1 : 0);
+    tiling.set_shapeBatch(batch);
+    tiling.set_tokenBatch(tokenBatch);
+    tiling.set_useG(true);
+    tiling.set_useGk(gkDesc != nullptr);
+    tiling.set_useExp2(useExp2);
+    tiling.set_outputLayout(outputLayout);
+    tiling.set_scale(static_cast<float>(*scalePtr));
+    tiling.set_chunkNum(chunkNum);
+    tiling.set_numChunksPerBatch((seqlen + chunkSize - 1) / chunkSize);
+    tiling.set_hvPerHk(vHeads / kHeads);
+    tiling.set_taskGroupSize(vHeads / kHeads == 3 ? 3 : 4);
+    tiling.set_producerCoreNum(static_cast<int64_t>(producerCoreNum));
+    tiling.set_consumerCoreBase(static_cast<int64_t>(producerCoreNum));
+    tiling.set_activeCoreNum(static_cast<int64_t>(activeCoreNum));
+    tiling.set_pipelineEventCount(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT);
 
-    OP_CHECK_IF(tiling->GetDataSize() != sizeof(GDN::ChunkFwdHOFusedTilingData),
+    OP_CHECK_IF(tiling.GetDataSize() != sizeof(GDN::ChunkFwdHOFusedTilingData),
                 OP_LOGE(context->GetNodeName(), "Host/kernel fused tiling size mismatch: %zu vs %zu.",
-                        tiling->GetDataSize(), sizeof(GDN::ChunkFwdHOFusedTilingData)),
+                        tiling.GetDataSize(), sizeof(GDN::ChunkFwdHOFusedTilingData)),
                 return ge::GRAPH_FAILED);
 
     size_t workspaceSize = 0;
     const ge::graphStatus workspaceStatus = isA5
-        ? FillWorkspaceA5(*tiling, platform.GetLibApiWorkSpaceSize(), physicalCoreNum,
+        ? FillWorkspaceA5(tiling, platform.GetLibApiWorkSpaceSize(), physicalCoreNum,
                           producerCoreNum, gkDesc != nullptr, workspaceSize)
-        : FillWorkspace(*tiling, platform.GetLibApiWorkSpaceSize(), producerCoreNum,
+        : FillWorkspace(tiling, platform.GetLibApiWorkSpaceSize(), producerCoreNum,
                         gkDesc != nullptr, workspaceSize);
     OP_CHECK_IF(workspaceStatus != ge::GRAPH_SUCCESS,
                 OP_LOGE(context->GetNodeName(), "Workspace calculation overflow."),
                 return ge::GRAPH_FAILED);
+
+    auto *rawTiling = context->GetRawTilingData();
+    OP_CHECK_NULL_WITH_CONTEXT(context, rawTiling);
+    auto *rawTilingData = rawTiling->GetData();
+    OP_CHECK_NULL_WITH_CONTEXT(context, rawTilingData);
+    OP_CHECK_IF(rawTiling->GetCapacity() < tiling.GetDataSize(),
+                OP_LOGE(context->GetNodeName(), "Raw tiling capacity is insufficient: %zu < %zu.",
+                        rawTiling->GetCapacity(), tiling.GetDataSize()),
+                return ge::GRAPH_FAILED);
+    tiling.SaveToBuffer(rawTilingData, rawTiling->GetCapacity());
+    rawTiling->SetDataSize(tiling.GetDataSize());
 
     uint64_t tilingKey = static_cast<uint64_t>(vDim == SUPPORTED_V256
                                                    ? GDN::ChunkFwdHOFusedTilingKey::V256_EXP
