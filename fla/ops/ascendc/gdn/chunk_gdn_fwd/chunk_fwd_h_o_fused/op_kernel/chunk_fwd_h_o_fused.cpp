@@ -213,10 +213,17 @@ extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
     REGISTER_TILING_DEFAULT(GDN::ChunkFwdHOFusedTilingData);
     GET_TILING_DATA_WITH_STRUCT(GDN::ChunkFwdHOFusedTilingData, tilingData, tiling);
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
-    GDN::Arch35::RunChunkFwdHOFusedA5(
-        k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
-        o, final_state, workspace, tiling, tilingData);
+    if (TILING_KEY_IS(1)) {
+        KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
+        GDN::Arch35::RunChunkFwdHOFusedA5(
+            k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
+            o, final_state, workspace, tiling, tilingData);
+    } else if (TILING_KEY_IS(2)) {
+        KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
+        GDN::Arch35::RunChunkFwdHOFusedA5(
+            k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
+            o, final_state, workspace, tiling, tilingData);
+    }
 #else
     if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);

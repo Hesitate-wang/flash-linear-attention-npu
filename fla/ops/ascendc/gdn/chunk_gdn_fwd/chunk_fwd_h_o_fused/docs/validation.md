@@ -8,8 +8,8 @@
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
 | 启动事件初始化 | 融合 kernel 入口中的 `InitializePipelineSync` |
 | 逐 chunk 的 H 到 O 发布 | 算子内 H 的 `SignalChunkReady`；算子内 O AIV 的 `WaitProducerSliceReady`；反向 `cube1Done` 确认用于约束 O AIC |
-| A5 的 H 到 O 阶段边界 | arch35 H 清空事件；`RunChunkFwdHOFusedA5` 在执行 arch35 O 前调用 `SyncAll<false>()` |
-| A5 临时区所有权 | Host 的 `FillWorkspaceA5`；算子内 H 偏移和 `oAPrimeWorkspaceOffset` |
+| A5 的 H 到 O 阶段边界 | arch35 H 清空事件；`RunChunkFwdHOFusedA5` 在执行 O 阶段前调用 `SyncAll<false>()` |
+| A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
 
 ## 已完成的静态检查
@@ -23,20 +23,21 @@
   workspace 大小只累加一次平台系统 workspace。
 - A2 的 `blockDim` 为 `2 * B * HV`，并受
   `2 * B * HV < physical AIC cores` 约束；A5 使用全部物理 AIC。
-- 已接受 Atlas A2 的定长自然指数路径和 Ascend 950 的定长 exp2 路径。A5
-  约束为：数据使用 BF16，门控使用 BF16/FP32，chunk 为 64，K=V=128，且
-  HV/HK 位于 `[1,4]`。变长输入仍在 tiling 阶段失败。
+- 已接受 Atlas A2 和 Ascend 950 的定长自然指数路径。两者均支持 FP16/BF16、
+  FP32 或输入类型门控、chunk 64/128、K=128、V=128/256 及 BNSD/NTD。
+  Ascend 950 的 exp2 专用路径仍限制为 BF16、BF16/FP32 门控、chunk 64、
+  K=V=128、HV/HK 位于 `[1,4]` 及 BSND/TND。变长输入仍在 tiling 阶段失败。
 - 跨算子 include 扫描结果为空：融合算子目录树未引用同级算子路径或
   `internal` 实现路径。
-- 所有使用双引号的本地 include 都能从当前文件目录、`op_kernel` 或
-  `op_kernel/arch35` 解析。此前缺失的 arch35
+- 所有使用双引号的本地 include 都能从当前文件目录、`op_kernel`、
+  `op_kernel/arch35` 或公共 kernel include 路径解析。此前缺失的 arch35
   `block_epilogue_gdn_fwdh_regbase.hpp` 现已位于当前算子目录，并与独立 FwdH
   实现一致；若该文件或 kernel 入口源文件缺失，CMake 会在配置阶段失败。
-- 当前算子的 O 阶段结构头文件同时包含紧凑的 A2 投影，以及复制后的 Ascend
-  950 O 实现所使用的完整 `ChunkFwdOTilingData` 投影。分发前，`FillOTiling`
-  会初始化 Ascend 950 投影的全部字段。
-- ACLNN 前置检查在 Atlas A2 上接受自然指数和 BNSD/NTD，在 Ascend 950 上
-  接受 exp2 和 BSND/TND。L0 下发失败时保留原始状态码，不再统一改写为
+- 当前算子的 O 阶段结构头文件同时包含通用 O 投影，以及 Ascend 950 exp2
+  专用 O 使用的完整 `ChunkFwdOTilingData` 投影。分发前，
+  `FillGenericOTiling` 或 `FillOptimizedOTiling` 会初始化对应投影的全部字段。
+- ACLNN 前置检查在 Atlas A2 和 Ascend 950 上接受自然指数与 BNSD/NTD，
+  在 Ascend 950 上另接受 exp2 与 BSND/TND。L0 下发失败时保留原始状态码，不再统一改写为
   `ACLNN_ERR_PARAM_NULLPTR`（161001）。
 - 按接口要求，IB 本地张量保留在 SIMD 侧。在 MIX 模式下，IB 索引空间为
   `2 * blockDim`；O AIC 读取完整 H/V tile 前，通过反向 `cube1Done` 的代次
@@ -45,8 +46,10 @@
   `p` 和消费者 `P+p` 会枚举完全相同的 `(b,hv,chunk)` 元组，并使用 24 个
   MIX 核中的 16 个。
 - OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径先
-  执行当前算子目录内的 arch35 H，跨越一次全核阶段边界，再执行当前算子目录
-  内的 arch35 O。H/`v_new` 交接区、H 临时区和 O A-prime 临时区互不重叠。
+  执行当前算子目录内的 arch35 H，跨越一次全核阶段边界，再按 `useExp2`
+  执行通用 O 或 arch35 专用 O。设备侧按 dtype 和 V 维度显式选择 H 模板，
+  A5 入口为 Host 下发的 key 1/2 分别声明同为 MIX 1:2 的 kernel task，避免
+  object 查找落到不存在的 default key；各路径所需 workspace 区域互不重叠。
 - `git diff --check` 已通过，仅存在行尾转换警告。
 
 ## 环境限制与待补充的设备证据
@@ -63,3 +66,5 @@
    缓冲方案前，先对交接区域的 L2 命中率进行 profiling。
 6. 在 Ascend 950 上启用 `--use-exp2`，针对 BF16/FP32 门控、有无初始状态和
    最终状态的组合，比较融合实现与独立组合实现的 BSND 输出。
+7. 在 Ascend 950 上以自然指数分别运行 FP16/BF16、V=128/256、chunk=64/128、
+   BNSD/NTD，并比较融合实现、独立组合实现和 CPU 标杆。

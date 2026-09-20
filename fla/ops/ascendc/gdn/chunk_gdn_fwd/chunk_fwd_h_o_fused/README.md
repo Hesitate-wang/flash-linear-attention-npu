@@ -38,6 +38,7 @@ chunk_fwd_h_o_fused/
 ```
 
 The A2 kernel uses per-chunk IB synchronization. The A5 kernel uses an
-all-core stage boundary between its arch35 H and O implementations. Both use
-workspace-backed internal `h`/`v_new`. See `docs/design.md` for the support
-boundaries.
+all-core stage boundary between H and O. Its natural-exp path matches the A2
+functional matrix through the generic O implementation, while its exp2 path
+keeps the specialized arch35 O implementation. Both use workspace-backed
+internal `h`/`v_new`. See `docs/design.md` for the support boundaries.

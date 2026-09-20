@@ -8,10 +8,10 @@
  */
 
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-#error "ChunkFwdHOFused currently supports Atlas A2 only"
-#endif
-
+#define CATLASS_ARCH 3510
+#else
 #define CATLASS_ARCH 2201
+#endif
 
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
@@ -22,7 +22,11 @@
 #include "../../epilogue/block/block_epilogue_gdn_fwdo_qkmask.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdo_output.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "kernel_utils/block/block_mmad_pingpong_tla_pipelined.hpp"
+#else
 #include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
+#endif
 #include "catlass/gemm/block/block_swizzle.hpp"
 #include "../block/block_scheduler_gdn_fwd_o.hpp"
 #include "catlass/gemm/dispatch_policy.hpp"

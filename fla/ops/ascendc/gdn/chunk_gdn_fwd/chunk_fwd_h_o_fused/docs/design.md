@@ -44,19 +44,20 @@ o[s:e] = scale * (state_term + A @ v_new[s:e])
 
 A2 要求 `2*P < physicalCoreNum`，并设置 `scheduleMode=1`。A5 使用全部物理 AIC。
 
-### 1.2 当前未闭合的范围
+### 1.2 A5 功能路径
 
-Host tiling 中针对 SoC 的 `useExp2/dtype/C/K/V/R` 校验当前被注释，所以代码实际
-放行范围宽于 `api.md` 声明的设备路径：
+A5 为 key 1/2 分别声明 `KERNEL_TASK_TYPE`，保证运行时能按 Host 下发的 V128/V256
+key 找到对应 kernel object。进入匹配的 object 后，再读取 TilingData 在设备侧分派：
 
-- A2 的 O-stage 投影不携带 `useExp2` 和 `outputLayout`，有效设计范围仍是自然指数
-  的 `BNSD/NTD` 路径。
-- A5 的 arch35 模板固定面向 BF16、`C=64`、`K=V=128`，Host 当前仍可能放行
-  FP16、`C=128` 或 `V=256`。
-- `V=256` 会生成 `TilingKey=2`，但 A5 入口不按 TilingKey 分派，仍进入固定的
-  arch35 路径。
+- `useExp2=false`：按 `dataType` 选择 FP16/BF16，按 `vHeadDim` 选择 V128/V256
+  的 H tile，并在全核阶段边界后执行通用 Catlass O。功能范围与 A2 的自然指数
+  路径一致，支持 `C in {64,128}` 和 `BNSD/NTD`。
+- `useExp2=true`：进入原有 BF16、`C=64`、`K=V=128` 的 arch35 专用 O 路径，
+  支持 `BSND/TND` 和 `R in [1,4]`。
 
-这些是当前实现缺口，不代表新增支持范围。
+两条路径的 H 阶段均保持自然指数语义；`useExp2` 只选择 O 阶段。A5 的 key 按
+V128/V256 写入并参与 kernel object 选择；dtype 和 exp/exp2 仍由 object 内的
+TilingData 分支选择。
 
 ## 2. Stage 与设备执行路径
 
@@ -100,9 +101,10 @@ AIC 在读取完整 H/V tile 前等待聚合结果。
 ### 2.4 Stage 1A/2A：A5 顺序执行
 
 A5 的 `RunChunkFwdHOFusedA5` 先调用 arch35 H，将 `h` 和 `v_new` 写入完整交接区；
-H 返回后所有 AIC/AIV 执行 `SyncAll<false>()`，随后构造 `ChunkFwdOTilingData`
-并调用 arch35 O。A5 不使用 A2 的 IB 区和 O 临时区；O 只使用每物理核一块
-A-prime workspace。
+H 返回后所有 AIC/AIV 执行 `SyncAll<false>()`。自然指数路径随后构造
+`ChunkFwdHOFusedOStageTilingData` 并执行通用 Catlass O，使用按物理核分配的 O
+临时区；exp2 路径构造 `ChunkFwdOTilingData` 并执行 arch35 专用 O，只使用按
+物理核分配的 A-prime workspace。A5 两条路径均不使用 A2 的 IB 区。
 
 ## 3. TilingData 定义和 ABI
 
@@ -194,11 +196,11 @@ kernel 侧 `GDN::ChunkFwdHOFusedTilingData` 是逐字段同序的普通 C++ 镜�
 | `isVariedLen,shapeBatch,tokenBatch` | optional shape | H/O scheduler |
 | `useG,useGk` | `true` / optional descriptor | H dispatch |
 | H workspace offsets | `FillWorkspace*` | H kernel |
-| `useExp2,outputLayout,scale` | attributes | A5 O；A2 O 只投影 `scale` |
+| `useExp2,outputLayout,scale` | attributes | A5 路径分派/专用 O；通用 O 投影 `scale` |
 | chunk/head/core 派生字段 | shape 和 platform | A5 O、入口分流和调度 |
 | handoff/sync offsets | `FillWorkspace*` | fused 入口、A2 IB |
-| O workspace offsets | `FillWorkspace` | A2 O kernel |
-| `oAPrimeWorkspaceOffset` | `FillWorkspaceA5` | arch35 O |
+| O workspace offsets | `FillWorkspace*` | A2 O 和 A5 自然指数 O |
+| `oAPrimeWorkspaceOffset` | `FillWorkspaceA5` | A5 exp2 专用 O |
 
 `consumerCoreBase` 当前会写入，但 A2 入口实际以
 `GetMixedCoreIdx() < producerCoreNum` 分流，没有直接读取该字段。
@@ -213,9 +215,9 @@ static_assert(offsetof(ChunkFwdHOFusedTilingData, useExp2) ==
               sizeof(ChunkFwdHOFusedHStageTilingData));
 ```
 
-O 不直接重解释完整结构：A2 投影为 `ChunkFwdHOFusedOStageTilingData`，A5 投影
-为 `ChunkFwdOTilingData`。这两个结构不是完整 TilingData 的 ABI 镜像，必须逐字段
-赋值，不能用裸指针转换代替。
+O 不直接重解释完整结构：A2 和 A5 自然指数路径投影为
+`ChunkFwdHOFusedOStageTilingData`，A5 exp2 路径投影为 `ChunkFwdOTilingData`。
+这两个结构不是完整 TilingData 的 ABI 镜像，必须逐字段赋值，不能用裸指针转换代替。
 
 A2 O-stage 投影的实际定义为：
 
@@ -273,8 +275,9 @@ struct ChunkFwdOTilingData {
 };
 ```
 
-A2 `FillOTiling` 把 `oV/oH/oAttn/oAfterMask/oMask` 映射到上述通用 offset；A5
-`FillOTiling` 将这些通用临时 offset 和 `stateVFirst` 置零，只传递
+A2 `FillOTiling` 和 A5 `FillGenericOTiling` 把
+`oV/oH/oAttn/oAfterMask/oMask` 映射到上述通用 offset；A5
+`FillOptimizedOTiling` 将这些通用临时 offset 和 `stateVFirst` 置零，只传递
 `outputLayout`、chunk/head 派生字段及 `oAPrimeWorkspaceOffset`。
 
 ## 4. Host tiling 接口和索引
@@ -325,7 +328,7 @@ ge::graphStatus FillWorkspace(
 ge::graphStatus FillWorkspaceA5(
     ChunkFwdHOFusedTilingData &tiling, size_t systemWorkspace,
     size_t physicalCoreNum, size_t taskNum, bool useGk,
-    size_t &workspaceSize);
+    bool useOptimizedO, size_t &workspaceSize);
 ```
 
 ## 5. Workspace 布局
@@ -368,9 +371,12 @@ bytes 对齐。最终返回 `systemWorkspace + alignedUserWorkspace`。以下 `E
 | `hWorkspaceOffset` | `physicalCoreNum*K*V*F*S` |
 | `numSeqWorkspaceOffset` | `(batch+1)*sizeof(int64_t)` |
 | `numChunksWorkspaceOffset` | `(batch+1)*sizeof(int64_t)` |
-| `oAPrimeWorkspaceOffset` | `physicalCoreNum*CHUNK_FWD_O_APRIME_WORKSPACE_BYTES` |
+| O 临时区或 A-prime | 见下文 |
 
-A5 将 `pipelineSyncWorkspaceOffset` 和全部 A2 O workspace offset 置零。
+A5 始终将 `pipelineSyncWorkspaceOffset` 置零。自然指数路径按物理核分配
+`oV/oH/oAttn/oAfterMask/oMask`，字节公式与 5.1 相同但将 `P` 替换为
+`physicalCoreNum`，并将 `oAPrimeWorkspaceOffset` 置零。exp2 路径分配
+`physicalCoreNum*CHUNK_FWD_O_APRIME_WORKSPACE_BYTES`，并将五个通用 O offset 置零。
 
 ## 6. 函数接口和参数顺序
 
@@ -442,8 +448,9 @@ GET_TILING_DATA_WITH_STRUCT(
     GDN::ChunkFwdHOFusedTilingData, tilingData, tiling);
 ```
 
-A5 随后调用 `RunChunkFwdHOFusedA5`；A2 根据 key `1/2` 选择 V128/V256 的
-`RunPipeline` 模板。
+A5 和 A2 都先根据 key `1/2` 选择已注册的 kernel object。A5 object 随后调用
+`RunChunkFwdHOFusedA5`，由 TilingData 中的模式、dtype 和 V 维度选择模板；
+A2 直接选择 V128/V256 的 `RunPipeline` 模板。
 
 ## 7. 注册、构建和一致性约束
 
@@ -472,7 +479,8 @@ ACLNN/L0 SO、OpDef、tiling SO、kernel JSON/O 和 `binary_info_config.json` �
 2. Host TilingData 与 kernel 镜像的字段顺序、类型、对齐和总大小一致。
 3. H 前缀的 `offsetof(useExp2)` 断言成立。
 4. `opFile/opInterface` 指向实际的 `chunk_fwd_h_o_fused` 符号。
-5. A2 的 IB/O workspace 和 A5 的 A-prime workspace 与架构分支一致。
+5. A2 的 IB/O workspace、A5 自然指数 O workspace 和 A5 exp2 A-prime
+   workspace 与架构分支一致。
 
 修改任一 ABI 字段、输入顺序或 workspace offset 后，必须同步修改 Host 定义、
 kernel 镜像、H 前缀/O 投影、OpDef、L0 launcher、测试和本文档。

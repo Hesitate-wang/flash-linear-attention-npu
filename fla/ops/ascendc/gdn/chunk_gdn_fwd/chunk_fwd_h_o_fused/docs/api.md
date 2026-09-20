@@ -32,12 +32,12 @@
 - `output_final_state: bool`
 - `chunk_size: int64`，当前支持 64 或 128
 - `scale: double`
-- `use_exp2: bool`；Atlas A2 要求为 `false`，Ascend 950 要求为 `true`
+- `use_exp2: bool`；Atlas A2 要求为 `false`，Ascend 950 支持 `false/true`
 - `state_v_first: bool`
 - `output_layout: string`，可取 `BNSD`、`BSND`、`TND` 或 `NTD`
 
-自然指数路径支持 `BNSD/NTD`，其中 `NTD` 要求物理批次 `B=1`。Ascend 950
-的 exp2 路径支持 `BSND/TND`。
+Atlas A2 和 Ascend 950 的自然指数路径支持 `BNSD/NTD`，其中 `NTD` 要求物理
+批次 `B=1`。Ascend 950 的 exp2 路径支持 `BSND/TND`。
 
 ## 输出
 
@@ -56,7 +56,12 @@ Python 适配层返回 `(o, final_state)`；未请求最终状态时，`final_st
 注册。在 A2 上，令 `P = B * HV`，tiling 要求 `2 * P` 严格小于可用 AIC
 核数。不满足该条件的形状会直接失败，不会回退到串行融合调度。
 
-Ascend 950 支持定长 exp2 路径，其约束为：q/k/w/u 使用 BF16，门控张量使用
-BF16 或 FP32，`chunk_size=64`，`K=V=128`，且 `HV/HK` 位于 `[1,4]`。
+Ascend 950 的定长自然指数路径与 A2 的功能范围一致：q/k/w/u 使用 FP16 或
+BF16，门控使用 FP32 或输入类型，`K=128`、`V in {128,256}`、
+`chunk_size in {64,128}`，输出布局为 BNSD 或 NTD。该路径采用 H/O 顺序执行，
+不承诺与 A2 core pipeline 相同的性能。
+
+Ascend 950 的定长 exp2 专用路径仍保持原约束：q/k/w/u 使用 BF16，门控张量
+使用 BF16 或 FP32，`chunk_size=64`，`K=V=128`，且 `HV/HK` 位于 `[1,4]`；
 输出布局为 BSND 或 TND。H 阶段保持独立 FwdH 的自然指数语义；`use_exp2`
 只选择 FwdO 的指数计算和布局路径。

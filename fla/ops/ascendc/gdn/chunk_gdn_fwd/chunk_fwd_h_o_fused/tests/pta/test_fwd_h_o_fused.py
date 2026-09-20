@@ -50,7 +50,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-exp2",
         action="store_true",
-        help="Use the A5 exp2/BSND path instead of the A2 exp/BNSD path.",
+        help="Use the A5 exp2 path instead of the natural-exp path.",
+    )
+    parser.add_argument(
+        "--output-layout",
+        choices=("auto", "BNSD", "NTD", "BSND", "TND"),
+        default="auto",
+        help="Output layout; auto selects BNSD for exp and BSND for exp2.",
     )
     parser.add_argument(
         "--compare-composed",
@@ -67,6 +73,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("batch, tokens and head counts must be positive")
     if args.v_heads < args.k_heads or args.v_heads % args.k_heads != 0:
         raise ValueError("v-heads must be divisible by k-heads")
+    output_layout = resolve_output_layout(args)
+    valid_layouts = ("BSND", "TND") if args.use_exp2 else ("BNSD", "NTD")
+    if output_layout not in valid_layouts:
+        raise ValueError(
+            f"use_exp2={args.use_exp2} requires output layout in {valid_layouts}"
+        )
+    if output_layout in ("NTD", "TND") and args.batch != 1:
+        raise ValueError("NTD/TND output requires --batch 1")
     if args.use_exp2:
         if args.dtype != "bfloat16":
             raise ValueError("the A5 exp2 path requires --dtype bfloat16")
@@ -74,6 +88,12 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("the A5 exp2 path requires --value-dim 128 --chunk-size 64")
         if args.v_heads // args.k_heads > 4:
             raise ValueError("the A5 exp2 path requires v-heads/k-heads <= 4")
+
+
+def resolve_output_layout(args: argparse.Namespace) -> str:
+    if args.output_layout != "auto":
+        return args.output_layout
+    return "BSND" if args.use_exp2 else "BNSD"
 
 
 def make_case(args: argparse.Namespace) -> Case:
@@ -115,7 +135,7 @@ def make_case(args: argparse.Namespace) -> Case:
 
 
 def cpu_reference(
-    case: Case, chunk_size: int, scale: float, use_exp2: bool
+    case: Case, chunk_size: int, scale: float, use_exp2: bool, output_layout: str
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     q = case.q.float()
     k = case.k.float()
@@ -175,8 +195,12 @@ def cpu_reference(
                 output[batch_idx, v_head, begin:end] = (
                     (state_term + attention @ v_chunk) * scale
                 ).to(input_dtype)
-    if use_exp2:
+    if output_layout == "BSND":
         output = output.permute(0, 2, 1, 3).contiguous()
+    elif output_layout == "NTD":
+        output = output.squeeze(0).contiguous()
+    elif output_layout == "TND":
+        output = output.permute(0, 2, 1, 3).squeeze(0).contiguous()
     return output, final_state
 
 
@@ -218,10 +242,11 @@ def main() -> None:
     torch.npu.config.allow_internal_format = False
     torch.npu.set_compile_mode(jit_compile=False)
     scale = args.scale if args.scale is not None else 1.0 / math.sqrt(128)
+    output_layout = resolve_output_layout(args)
 
     cpu_case = make_case(args)
     expected_o, expected_final = cpu_reference(
-        cpu_case, args.chunk_size, scale, args.use_exp2
+        cpu_case, args.chunk_size, scale, args.use_exp2, output_layout
     )
     npu_case = to_npu(cpu_case, args.device)
 
@@ -245,7 +270,7 @@ def main() -> None:
         scale=scale,
         use_exp2=args.use_exp2,
         state_v_first=False,
-        output_layout="BSND" if args.use_exp2 else "BNSD",
+        output_layout=output_layout,
     )
     torch.npu.synchronize()
     assert_close("fused.o vs cpu", fused_o, expected_o, args.rtol, args.atol)
@@ -280,7 +305,7 @@ def main() -> None:
             chunk_size=args.chunk_size,
             transpose_state_layout=False,
             use_exp2=args.use_exp2,
-            output_layout="BSND" if args.use_exp2 else "BNSD",
+            output_layout=output_layout,
         )
         torch.npu.synchronize()
         assert_close("fused.o vs composed.o", fused_o, composed_o, args.rtol, args.atol)
