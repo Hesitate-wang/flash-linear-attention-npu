@@ -478,6 +478,7 @@ public:
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
+                    ASCEND::PRINTF("wait pre chunk signal for h_new");
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                     // H is visible before this acknowledgement, so Cube2 can
@@ -499,11 +500,9 @@ public:
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
+                    ASCEND::PRINTF("wait v_new ready");
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
-                    // In mode2 both AIV subblocks must publish, including a
-                    // zero-row tail subblock. FFTS aggregates the pair for the
-                    // AIC's single wait when the A5 experiment is enabled.
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done[streamId]);
                 }
 

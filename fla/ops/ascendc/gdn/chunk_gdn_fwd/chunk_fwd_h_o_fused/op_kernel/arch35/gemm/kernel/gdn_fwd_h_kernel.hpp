@@ -998,6 +998,7 @@ public:
                     }
                     // H0 belongs to this batch/head task; publish it as soon as
                     // all of this AIV's state rows have reached GM.
+                    ASCEND::PRINTF("set initial state signal");
                     SignalInitialStateReady(taskIdx);
                 }
             }
@@ -1081,6 +1082,7 @@ public:
                             waitWsFromMte3, (i == 0), tailVectorPath, useDirectForTask,
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
+                        ASCEND::PRINTF("V_new sync begin");
                         SignalProducerSliceReadyAfterMte3(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
@@ -1132,6 +1134,7 @@ public:
                         }
                         if (!vec2Offsets.isFinalState) {
                             // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
+                            ASCEND::PRINTF("h generated for next chunk");
                             SignalProducerSliceReadyAfterMte3(
                                 vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
