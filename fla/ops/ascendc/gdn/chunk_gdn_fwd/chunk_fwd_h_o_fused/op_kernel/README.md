@@ -15,6 +15,11 @@ ready events provide `HReady` and `VReady` for each of the two task lanes. All
 chunks of one task lane reuse the corresponding H/V slots: `IBSet` waits until
 its GM event slot is zero before setting it to one, and the matching `IBWait`
 clears the slot after consumption, so slot reuse needs no separate O-to-H ACK.
+Before publishing a generated `VReady` or next-chunk `HReady`, each producer
+AIV drains its MTE3 pipeline so the corresponding GM slice is visible to the
+consumer. The initial `HReady` is published after the separate H-state
+initialization drain for that batch/head task, without waiting for the other
+tasks assigned to the same producer core.
 In MIX mode the IB calls execute on the AIV lanes and use the logical AIV index
 space required by the API. After `HReady`, the O-internal reverse generation of
 `cube1Done` lets the AIC compute `Q * gate @ H_old` while the AIV computes

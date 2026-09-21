@@ -205,6 +205,28 @@ public:
                               GetPipelineAivIdx(), eventBase + taskLane);
     }
 
+    __aicore__ inline void SignalProducerSliceReadyAfterMte3(
+        const GDNFwdHOffsets &offsets, uint32_t eventBase)
+    {
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        AscendC::PipeBarrier<PIPE_MTE3>();
+        SignalProducerSliceReady(offsets, eventBase);
+    }
+
+    __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
+    {
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        AscendC::PipeBarrier<PIPE_MTE3>();
+        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
+                              GetPipelineAivIdx(),
+                              GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+    }
+
 
     __aicore__ inline GDNFwdHKernel() {}
 
@@ -649,7 +671,10 @@ public:
             for (uint32_t waveIdx = 0; waveIdx < taskWaveCount; ++waveIdx) {
                 EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
                 EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
-                uint32_t taskIdx = waveIdx * coreNum + coreIdx;
+                const uint32_t waveGroup = waveIdx / PING_PONG_STAGES;
+                const uint32_t waveLane = waveIdx % PING_PONG_STAGES;
+                uint32_t taskIdx = waveGroup * coreNum * PING_PONG_STAGES +
+                                   coreIdx * PING_PONG_STAGES + waveLane;
                 uint32_t pingpongFlag = 1;
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
@@ -703,6 +728,7 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                         pingpongFlag = 1 - pingpongFlag;
                     }
+                    SignalInitialStateReady(taskIdx);
                 }
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
@@ -739,10 +765,6 @@ public:
                             continue;
                         }
                         const GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
-                        if (vec1Offsets.isInitialState) {
-                            SignalProducerSliceReady(
-                                vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                        }
                         if (vec1Offsets.blockTokens < 16) {
                             ComputeTailVWorkspace(vec1Offsets);
                         }
@@ -759,7 +781,7 @@ public:
                         );
                         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-                        SignalProducerSliceReady(
+                        SignalProducerSliceReadyAfterMte3(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
@@ -803,7 +825,8 @@ public:
                             Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
                         }
                         if (!vec2Offsets.isFinalState) {
-                            SignalProducerSliceReady(
+                            // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
+                            SignalProducerSliceReadyAfterMte3(
                                 vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);

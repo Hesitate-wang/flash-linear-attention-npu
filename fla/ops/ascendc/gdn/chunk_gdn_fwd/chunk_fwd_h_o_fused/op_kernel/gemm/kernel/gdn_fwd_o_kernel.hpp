@@ -186,9 +186,6 @@ public:
         const uint32_t producerCoreIdx =
             (producerPairIdx % (producerCoreNum * GDN_FWD_O_PING_PONG_STAGES)) /
             GDN_FWD_O_PING_PONG_STAGES;
-        // IBSet/IBWait are SIMD-side APIs. In MIX mode their block index space
-        // contains the two logical AIVs of every mixed core, so each consumer
-        // AIV waits for the matching producer AIV slice.
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane =

@@ -261,6 +261,34 @@ public:
                               GetPipelineAivIdx(), eventBase + taskLane);
     }
 
+    __aicore__ inline void SignalProducerSliceReadyAfterMte3(
+        const GDNFwdHOffsets &offsets, uint32_t eventBase)
+    {
+        if constexpr (!kSignalProducerReady) {
+            return;
+        }
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        AscendC::PipeBarrier<PIPE_MTE3>();
+        SignalProducerSliceReady(offsets, eventBase);
+    }
+
+    __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
+    {
+        if constexpr (!kSignalProducerReady) {
+            return;
+        }
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        AscendC::PipeBarrier<PIPE_MTE3>();
+        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
+                              GetPipelineAivIdx(),
+                              GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+    }
+
 
     __aicore__ inline GDNFwdHKernel() {}
 
@@ -563,6 +591,99 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(tailEventId);
     }
 
+    template <typename WLayout, typename HLayout>
+    __aicore__ inline void RunCube1DirectUb(const WLayout& wLayout, const HLayout& hLayout)
+    {
+        BlockMmadWHDirectUb blockMmadWHDirectUb(
+            resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
+        for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
+            uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
+            const auto& stream = cubeBlockScheduler.GetStream(i);
+            if (cubeBlockScheduler.StreamIsDone(stream)) {
+                continue;
+            }
+
+            const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
+            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+            if (offsets.blockTokens < 16) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.cube1Done[streamId]);
+                continue;
+            }
+
+            auto tensorW = tla::MakeTensor(gmW[offsets.wOffset], wLayout, Catlass::Arch::PositionGM{});
+            auto tensorH = tla::MakeTensor(gmH[offsets.hSrcOffset], hLayout, Catlass::Arch::PositionGM{});
+            GemmCoord shape{offsets.blockTokens, offsets.vBlockDim, kHeadDim};
+            auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.k()));
+            auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(shape.k(), shape.n()));
+
+            auto ubLayout = tla::MakeLayout<ElementVWork, LayoutV>(shape.m(), shape.n());
+            auto tensorUbPing = tla::MakeTensor(ubVWorkPing, ubLayout, Catlass::Arch::PositionUB{});
+            auto tensorUbPong = tla::MakeTensor(ubVWorkPong, ubLayout, Catlass::Arch::PositionUB{});
+            using UbTensor = decltype(tensorUbPing);
+            UbTensor tensorUbList[BlockMmadWHDirectUb::MAX_CUBE_VEC_SYNC_NUM];
+            for (uint32_t ubIdx = 0; ubIdx < BlockMmadWHDirectUb::MAX_CUBE_VEC_SYNC_NUM; ++ubIdx) {
+                tensorUbList[ubIdx] = (ubIdx & 1U) ? tensorUbPong : tensorUbPing;
+            }
+            uint32_t ubListId = streamId;
+            uint32_t rowsPerSubBlock = CeilDiv(shape.m(), DIRECT_VEC_NUM);
+            blockMmadWHDirectUb(
+                tensorBlockW, tensorBlockH, tensorUbList, shape, rowsPerSubBlock, 0,
+                DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN, ubListId,
+                DIRECT_VEC_NUM, DIRECT_UB_STAGES);
+        }
+    }
+
+    template <typename KLayout>
+    __aicore__ inline void RunCube2DirectUb(const KLayout& kLayout)
+    {
+        BlockMmadKVDirectUb blockMmadKVDirectUb(
+            resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
+        for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
+            uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
+            const auto& stream = cubeBlockScheduler.GetStream(i);
+            if (cubeBlockScheduler.StreamIsDone(stream)) {
+                continue;
+            }
+
+            const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
+            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+            if (!cubeBlockScheduler.NeedProcessStage2(stream)) {
+                continue;
+            }
+            if (offsets.blockTokens < 16) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.cube2Done[streamId]);
+                continue;
+            }
+
+            int64_t offsetK = kGated ? offsets.kDecayWorkOffset : offsets.wkOffset;
+            auto tensorK = kGated
+                ? tla::MakeTensor(gmKDecayWorkspace[offsetK], kLayout, Catlass::Arch::PositionGM{})
+                : tla::MakeTensor(gmK[offsetK], kLayout, Catlass::Arch::PositionGM{});
+            auto vUpdateLayout = tla::MakeLayout<ElementVUpdate, LayoutVUpdate>(
+                offsets.blockTokens, offsets.vBlockDim);
+            auto tensorVwork = tla::MakeTensor(
+                gmVUpdateWorkspace[offsets.vWorkOffset], vUpdateLayout, Catlass::Arch::PositionGM{});
+            GemmCoord shape{kHeadDim, offsets.vBlockDim, offsets.blockTokens};
+            auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(shape.m(), shape.k()));
+            auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(shape.k(), shape.n()));
+
+            auto ubLayout = tla::MakeLayout<ElementHWork, LayoutH>(shape.m(), shape.n());
+            auto tensorUbPing = tla::MakeTensor(ubHUpdatePing, ubLayout, Catlass::Arch::PositionUB{});
+            auto tensorUbPong = tla::MakeTensor(ubHUpdatePong, ubLayout, Catlass::Arch::PositionUB{});
+            using UbTensor = decltype(tensorUbPing);
+            UbTensor tensorUbList[BlockMmadKVDirectUb::MAX_CUBE_VEC_SYNC_NUM];
+            for (uint32_t ubIdx = 0; ubIdx < BlockMmadKVDirectUb::MAX_CUBE_VEC_SYNC_NUM; ++ubIdx) {
+                tensorUbList[ubIdx] = (ubIdx & 1U) ? tensorUbPong : tensorUbPing;
+            }
+            uint32_t ubListId = streamId;
+            uint32_t rowsPerSubBlock = CeilDiv(shape.m(), DIRECT_VEC_NUM);
+            blockMmadKVDirectUb(
+                tensorBlockK, tensorBlockVwork, tensorUbList, shape, rowsPerSubBlock, 0,
+                DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN, ubListId,
+                DIRECT_VEC_NUM, DIRECT_UB_STAGES);
+        }
+    }
+
     __aicore__ inline void Process() {
         // FwdH can run after another stage in a megakernel. Start its AIC/AIV
         // handshake only after every core has retired the preceding stage.
@@ -572,7 +693,7 @@ public:
 
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
-            uint32_t coreNum = vecBlockScheduler.cubeCoreNum;
+            uint32_t coreNum = cubeBlockScheduler.cubeCoreNum;
 
             BlockMmadWH blockMmadWH(resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
             BlockMmadKV blockMmadKV(resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
@@ -595,45 +716,7 @@ public:
                     /* C1: v_work = w @ h[i] */
                     cubeBlockScheduler.InitTasks();
                     if (useDirectFp32Ub) {
-                        BlockMmadWHDirectUb blockMmadWHDirectUb(
-                            resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
-                        for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
-                            uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
-                            const auto& stream = cubeBlockScheduler.GetStream(i);
-                            if (cubeBlockScheduler.StreamIsDone(stream)) {
-                                continue;
-                            }
-
-                            const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
-                            if (cube1Offsets.blockTokens < 16) {
-                                Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
-                                    cubeBlockScheduler.cube1Done[streamId]);
-                                continue;
-                            }
-                            int64_t cube1OffsetW = cube1Offsets.wOffset;
-                            int64_t cube1OffsetH = cube1Offsets.hSrcOffset;
-                            auto tensorW = tla::MakeTensor(gmW[cube1OffsetW], wLayout, Catlass::Arch::PositionGM{});
-                            auto tensorH = tla::MakeTensor(gmH[cube1OffsetH], hLayout, Catlass::Arch::PositionGM{});
-                            GemmCoord cube1Shape {cube1Offsets.blockTokens, cube1Offsets.vBlockDim, kHeadDim};
-                            auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
-                            auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
-
-                            auto ubLayout = tla::MakeLayout<ElementVWork, LayoutV>(cube1Shape.m(), cube1Shape.n());
-                            auto tensorUbPing = tla::MakeTensor(ubVWorkPing, ubLayout, Catlass::Arch::PositionUB{});
-                            auto tensorUbPong = tla::MakeTensor(ubVWorkPong, ubLayout, Catlass::Arch::PositionUB{});
-                            using UbTensor = decltype(tensorUbPing);
-                            UbTensor tensorUbList[BlockMmadWHDirectUb::MAX_CUBE_VEC_SYNC_NUM];
-                            for (uint32_t ubIdx = 0; ubIdx < BlockMmadWHDirectUb::MAX_CUBE_VEC_SYNC_NUM; ++ubIdx) {
-                                tensorUbList[ubIdx] = (ubIdx & 1U) ? tensorUbPong : tensorUbPing;
-                            }
-                            uint32_t ubListId = streamId;
-                            uint32_t rowsPerSubBlock = CeilDiv(cube1Shape.m(), DIRECT_VEC_NUM);
-                            blockMmadWHDirectUb(
-                                tensorBlockW, tensorBlockH, tensorUbList, cube1Shape, rowsPerSubBlock, 0,
-                                DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN, ubListId,
-                                DIRECT_VEC_NUM, DIRECT_UB_STAGES);
-                        }
+                        RunCube1DirectUb(wLayout, hLayout);
                     } else if (useBoundedMmad) {
                         for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
                             uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
@@ -717,50 +800,7 @@ public:
                 } else {
                     /* C2: h[i+1] = k.T @ v_work */
                     if (useDirectFp32Ub) {
-                        BlockMmadKVDirectUb blockMmadKVDirectUb(
-                            resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
-                        for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
-                            uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
-                            const auto& stream = cubeBlockScheduler.GetStream(i);
-                            if (cubeBlockScheduler.StreamIsDone(stream)) {
-                                continue;
-                            }
-                            const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
-
-                            if (cubeBlockScheduler.NeedProcessStage2(stream)) {
-                                if (cube2Offsets.blockTokens < 16) {
-                                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
-                                        cubeBlockScheduler.cube2Done[streamId]);
-                                    continue;
-                                }
-                                int64_t cube2OffsetK = kGated ? cube2Offsets.kDecayWorkOffset : cube2Offsets.wkOffset;
-                                int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
-                                auto tensorK = kGated
-                                    ? tla::MakeTensor(gmKDecayWorkspace[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{})
-                                    : tla::MakeTensor(gmK[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{});
-                                auto vUpdateLayout = tla::MakeLayout<ElementVUpdate, LayoutVUpdate>(cube2Offsets.blockTokens, cube2Offsets.vBlockDim);
-                                auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[cube2OffsetVwork], vUpdateLayout, Catlass::Arch::PositionGM{});
-                                GemmCoord cube2Shape{kHeadDim, cube2Offsets.vBlockDim, cube2Offsets.blockTokens};
-                                auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
-                                auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-
-                                auto ubLayout = tla::MakeLayout<ElementHWork, LayoutH>(cube2Shape.m(), cube2Shape.n());
-                                auto tensorUbPing = tla::MakeTensor(ubHUpdatePing, ubLayout, Catlass::Arch::PositionUB{});
-                                auto tensorUbPong = tla::MakeTensor(ubHUpdatePong, ubLayout, Catlass::Arch::PositionUB{});
-                                using UbTensor = decltype(tensorUbPing);
-                                UbTensor tensorUbList[BlockMmadKVDirectUb::MAX_CUBE_VEC_SYNC_NUM];
-                                for (uint32_t ubIdx = 0; ubIdx < BlockMmadKVDirectUb::MAX_CUBE_VEC_SYNC_NUM; ++ubIdx) {
-                                    tensorUbList[ubIdx] = (ubIdx & 1U) ? tensorUbPong : tensorUbPing;
-                                }
-                                uint32_t ubListId = streamId;
-                                uint32_t rowsPerSubBlock = CeilDiv(cube2Shape.m(), DIRECT_VEC_NUM);
-                                blockMmadKVDirectUb(
-                                    tensorBlockK, tensorBlockVwork, tensorUbList, cube2Shape, rowsPerSubBlock, 0,
-                                    DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN, ubListId,
-                                    DIRECT_VEC_NUM, DIRECT_UB_STAGES);
-                            }
-                        }
+                        RunCube2DirectUb(kLayout);
                     } else if (useBoundedMmad) {
                         for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
                             uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
@@ -956,6 +996,9 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                         pingpongFlag = 1 - pingpongFlag;
                     }
+                    // H0 belongs to this batch/head task; publish it as soon as
+                    // all of this AIV's state rows have reached GM.
+                    SignalInitialStateReady(taskIdx);
                 }
             }
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
@@ -1016,10 +1059,6 @@ public:
                             continue;
                         }
                         const GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
-                        if (vec1Offsets.isInitialState) {
-                            SignalProducerSliceReady(
-                                vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                        }
                         AscendC::LocalTensor<ElementV> l1VUpdate = (i == 0) ? l1VUpdatePing : l1VUpdatePong;
                         bool tailVectorPath =
                             vec1Offsets.blockTokens < 16 && !useBoundedMmad;
@@ -1042,7 +1081,7 @@ public:
                             waitWsFromMte3, (i == 0), tailVectorPath, useDirectForTask,
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
-                        SignalProducerSliceReady(
+                        SignalProducerSliceReadyAfterMte3(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
@@ -1092,7 +1131,8 @@ public:
                             }
                         }
                         if (!vec2Offsets.isFinalState) {
-                            SignalProducerSliceReady(
+                            // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
+                            SignalProducerSliceReadyAfterMte3(
                                 vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);

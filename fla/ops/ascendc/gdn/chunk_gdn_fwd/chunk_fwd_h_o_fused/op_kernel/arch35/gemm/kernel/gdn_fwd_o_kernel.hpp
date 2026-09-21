@@ -261,15 +261,6 @@ public:
             BlockMmadQK blockMmadQK(resource);
             BlockMmadQH128 blockMmadQH128(resource);
             BlockMmadQH256 blockMmadQH256(resource);
-            // A5 local-resource lifetime:
-            //   Cube1 L1A/Q [0,64K), L1B/K [64K,128K), events A=0/1 B=2/3.
-            //   Cube2 shares L1A/Q and reuses B [64K,128K|192K), events 0..3.
-            //   Cube3 owns A [192K,256K), B [256K,320K|384K), events 4..7.
-            // Shared Q/K-H slots use the event pair for producer/consumer
-            // RAW+WAR ordering; Cube3 has no physical/event WAW alias. L0A/B/C
-            // stay shared and each compute window is drained before the next.
-            // Cross-core flags remain scheduler-owned (cube1/vec1/cube3/vec2 =
-            // 0..7); their ping-pong init and final vec2 drain are unchanged.
             constexpr uint32_t cube3L1Offset = 192 * 1024;
             constexpr uint32_t cube3L1AEventId = 4;
             constexpr uint32_t cube3L1BEventId = 6;
