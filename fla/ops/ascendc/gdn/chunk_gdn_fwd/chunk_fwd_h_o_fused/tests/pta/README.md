@@ -62,7 +62,8 @@ python test_fwd_h_o_fused.py --output-layout NTD --compare-composed
 Useful shape and dtype switches include `--tokens`, `--chunk-size`,
 `--value-dim`, `--dtype`, `--gate-dtype`, `--batch`, `--k-heads`, and
 `--v-heads`. Atlas A2 accepts exp mode with `K=128`, `V=128/256`, chunk size
-`64/128`, and requires `2 * batch * v_heads < physical AIC core count`.
+`64/128`. The kernel uses `min(batch * v_heads, physical AIC core count)`
+active cores and requires at least two active AIC cores.
 Ascend 950 natural-exp mode accepts the same matrix. Ascend 950 `--use-exp2`
 still requires BF16 data, BF16/FP32 gates, `K=V=128`, chunk size 64, and
 `v_heads/k_heads` in `[1,4]`. Use `--output-layout` to select the layout allowed

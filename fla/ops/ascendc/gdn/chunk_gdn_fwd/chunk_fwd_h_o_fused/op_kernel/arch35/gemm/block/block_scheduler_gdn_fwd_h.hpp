@@ -387,6 +387,13 @@ struct BlockSchedulerGdnFwdHCube : public BlockSchedulerGdnFwdH {
         BlockSchedulerGdnFwdH::Init(cu_seqlens, chunk_indices, tiling, user, AscendC::GetBlockIdx(), AscendC::GetBlockNum());
     }
 
+    CATLASS_DEVICE
+    void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user,
+              uint32_t logicalCoreIdx, uint32_t logicalCoreNum) {
+        BlockSchedulerGdnFwdH::Init(cu_seqlens, chunk_indices, tiling, user,
+                                    logicalCoreIdx, logicalCoreNum);
+    }
+
     template <typename TilingData>
     CATLASS_DEVICE
     void InitFromData(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, const TilingData& tilingData, GM_ADDR user) {
@@ -406,6 +413,13 @@ struct BlockSchedulerGdnFwdHVec : public BlockSchedulerGdnFwdH {
             cu_seqlens, chunk_indices, tiling, user,
             AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(),
             AscendC::GetBlockNum());
+    }
+
+    CATLASS_DEVICE
+    void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user,
+              uint32_t logicalCoreIdx, uint32_t logicalCoreNum) {
+        BlockSchedulerGdnFwdH::Init(cu_seqlens, chunk_indices, tiling, user,
+                                    logicalCoreIdx, logicalCoreNum);
     }
 
     template <typename TilingData>

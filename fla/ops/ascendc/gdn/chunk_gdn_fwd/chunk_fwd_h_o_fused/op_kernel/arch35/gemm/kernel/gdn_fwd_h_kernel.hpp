@@ -82,10 +82,14 @@ template<
     typename TileShapes = GDNFwdHTileShapes128,
     bool kGated = false,
     bool scalarGated = true,
-    bool useExp2 = false
+    bool useExp2 = false,
+    bool kChunkPipeline = false,
+    bool kSignalProducerReady = kChunkPipeline
 >
 class GDNFwdHKernel {
 public:
+
+    static constexpr uint32_t HO_PIPELINE_SYNC_UB_OFFSET = 188 * 1024;
 
     using ArchTag = Arch::Ascend950;
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHCube;
@@ -204,6 +208,11 @@ public:
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
+    AscendC::GlobalTensor<int32_t> gmPipelineSync;
+
+    bool chunkPipelineEnabled{false};
+    uint32_t pipelineProducerCoreNum{0};
+    uint32_t pipelineActiveCoreNum{0};
 
     AscendC::LocalTensor<ElementHWork> ubHUpdatePing;
     AscendC::LocalTensor<ElementHWork> ubHUpdatePong;
@@ -217,6 +226,40 @@ public:
     VecScheduler vecBlockScheduler;
 
     Arch::Resource<ArchTag> resource;
+
+    __aicore__ inline bool CanRunChunkPipeline() const
+    {
+        if constexpr (!kChunkPipeline) {
+            return false;
+        }
+        return isVariedLen == 0 && pipelineProducerCoreNum > 0;
+    }
+
+    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
+    {
+        return resource.ubBuf.template GetBufferByByte<int32_t>(HO_PIPELINE_SYNC_UB_OFFSET);
+    }
+
+    __aicore__ inline uint32_t GetPipelineAivIdx() const
+    {
+        return vecBlockScheduler.cubeCoreIdx * AscendC::GetSubBlockNum() + AscendC::GetSubBlockIdx();
+    }
+
+    __aicore__ inline void SignalProducerSliceReady(
+        const GDNFwdHOffsets &offsets, uint32_t eventBase)
+    {
+        if constexpr (!kSignalProducerReady) {
+            return;
+        }
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        // IBSet waits for a zero slot; the consumer's IBWait clears it after consumption.
+        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
+                              GetPipelineAivIdx(), eventBase + taskLane);
+    }
 
 
     __aicore__ inline GDNFwdHKernel() {}
@@ -244,12 +287,19 @@ public:
         numSeqWorkspaceOffset = gdnFwdHTilingData->numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = gdnFwdHTilingData->numChunksWorkspaceOffset;
         kDecayWorkspaceOffset = gdnFwdHTilingData->kDecayWorkspaceOffset;
+        const __gm__ GDN::ChunkFwdHOFusedTilingData *fusedTiling =
+            reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling);
+        pipelineProducerCoreNum = fusedTiling->producerCoreNum;
+        pipelineActiveCoreNum = fusedTiling->activeCoreNum;
+        chunkPipelineEnabled = CanRunChunkPipeline();
+        const uint32_t logicalCoreNum = chunkPipelineEnabled ? pipelineProducerCoreNum
+                                                             : AscendC::GetBlockNum();
         uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
         useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
                           !isVariedLen && chunkSize <= 64 &&
                           seqlen % chunkSize == 0 &&
                           kHeadDim == 128 && vHeadDim == 128 &&
-                          denseTaskCount >= AscendC::GetBlockNum();
+                          denseTaskCount >= logicalCoreNum;
 
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmW.SetGlobalBuffer((__gm__ ElementW *)w);
@@ -269,6 +319,10 @@ public:
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
         gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
 
+        if (chunkPipelineEnabled) {
+            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
+                user + fusedTiling->pipelineSyncWorkspaceOffset));
+        }
         ubHUpdatePing = resource.ubBuf.template GetBufferByByte<ElementHWork>(32 * 1024);
         ubHUpdatePong = resource.ubBuf.template GetBufferByByte<ElementHWork>(96 * 1024);
         ubVWorkPing = resource.ubBuf.template GetBufferByByte<ElementVWork>(32 * 1024);
@@ -278,11 +332,13 @@ public:
         l1VUpdatePong = resource.l1Buf.template GetBufferByByte<ElementV>(chunkSize * vHeadDim * sizeof(ElementV));
 
         if ASCEND_IS_AIC {
-            cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
+            cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user,
+                                    AscendC::GetBlockIdx(), logicalCoreNum);
         }
 
         if ASCEND_IS_AIV {
-            vecBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
+            vecBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user,
+                                   AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(), logicalCoreNum);
         }
     }
 
@@ -309,12 +365,14 @@ public:
         numSeqWorkspaceOffset = tilingData.numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = tilingData.numChunksWorkspaceOffset;
         kDecayWorkspaceOffset = tilingData.kDecayWorkspaceOffset;
+        const uint32_t logicalCoreNum = CanRunChunkPipeline() ? batch * vNumHead
+                                                              : AscendC::GetBlockNum();
         uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
         useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
                           !isVariedLen && chunkSize <= 64 &&
                           seqlen % chunkSize == 0 &&
                           kHeadDim == 128 && vHeadDim == 128 &&
-                          denseTaskCount >= AscendC::GetBlockNum();
+                          denseTaskCount >= logicalCoreNum;
 
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmW.SetGlobalBuffer((__gm__ ElementW *)w);
@@ -508,7 +566,9 @@ public:
     __aicore__ inline void Process() {
         // FwdH can run after another stage in a megakernel. Start its AIC/AIV
         // handshake only after every core has retired the preceding stage.
-        AscendC::SyncAll<false>();
+        if constexpr (!kChunkPipeline) {
+            AscendC::SyncAll<false>();
+        }
 
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
@@ -526,7 +586,9 @@ public:
             auto kLayout = tla::MakeLayout<ElementK, LayoutK>(kHeadDim, shapeBatch * kNumHead * cubeBlockScheduler.totalTokens);
             auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(kHeadDim, cubeBlockScheduler.vBlockSize);
 
-            AscendC::SyncAll<false>();
+            if constexpr (!kChunkPipeline) {
+                AscendC::SyncAll<false>();
+            }
             uint32_t currStage = 0; // 0: C1, 1: C2
             while (cubeBlockScheduler.isRunning) {
                 if (currStage == 0) {
@@ -816,7 +878,7 @@ public:
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
             uint32_t coreIdx = AscendC::GetBlockIdx() / subBlockNum;
-            uint32_t coreNum = AscendC::GetBlockNum();
+            uint32_t coreNum = chunkPipelineEnabled ? pipelineProducerCoreNum : AscendC::GetBlockNum();
             uint32_t taskCount =
                 (isVariedLen ? vecBlockScheduler.tokenBatch : shapeBatch) * vNumHead;
             uint32_t tasksPerCore = taskCount > coreNum ? PING_PONG_STAGES : 1;
@@ -899,7 +961,9 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
-            AscendC::SyncAll<false>();
+            if constexpr (!kChunkPipeline) {
+                AscendC::SyncAll<false>();
+            }
 
             if (useDirectFp32Ub) {
                 for (uint32_t slot = 0; slot < DIRECT_UB_STAGES; ++slot) {
@@ -952,6 +1016,10 @@ public:
                             continue;
                         }
                         const GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
+                        if (vec1Offsets.isInitialState) {
+                            SignalProducerSliceReady(
+                                vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                        }
                         AscendC::LocalTensor<ElementV> l1VUpdate = (i == 0) ? l1VUpdatePing : l1VUpdatePong;
                         bool tailVectorPath =
                             vec1Offsets.blockTokens < 16 && !useBoundedMmad;
@@ -974,6 +1042,8 @@ public:
                             waitWsFromMte3, (i == 0), tailVectorPath, useDirectForTask,
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
+                        SignalProducerSliceReady(
+                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
                         }
@@ -1020,6 +1090,10 @@ public:
                             if (!useDirectFp32Ub) {
                                 Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
                             }
+                        }
+                        if (!vec2Offsets.isFinalState) {
+                            SignalProducerSliceReady(
+                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
                     }

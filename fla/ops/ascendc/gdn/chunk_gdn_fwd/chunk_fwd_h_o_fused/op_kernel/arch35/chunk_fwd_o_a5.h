@@ -45,24 +45,32 @@ public:
 
     __aicore__ inline void Process()
     {
-        const uint32_t aicCoreIdx = AscendC::GetBlockIdx();
-        const uint32_t aicCoreNum = AscendC::GetBlockNum();
-        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / 2U;
-        const uint32_t aivCoreNum = AscendC::GetBlockNum();
+        const uint32_t consumerCoreBase = static_cast<uint32_t>(tiling_.consumerCoreBase);
+        const uint32_t consumerCoreNum = static_cast<uint32_t>(tiling_.producerCoreNum);
 
         if ASCEND_IS_AIV {
+            const uint32_t mixedCoreIdx = AscendC::GetBlockIdx() / 2U;
+            if (mixedCoreIdx < consumerCoreBase ||
+                mixedCoreIdx >= consumerCoreBase + consumerCoreNum) {
+                return;
+            }
             AscendC::TPipe pipe;
             ChunkFwdOA5VectorProcess<GT, UseExp2> vector(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_,
                                                        workspace_);
             vector.Init(tiling_, &pipe);
-            vector.Process(aivCoreIdx, aivCoreNum);
+            vector.Process(mixedCoreIdx - consumerCoreBase, consumerCoreNum);
             return;
         }
 
         if ASCEND_IS_AIC {
+            const uint32_t mixedCoreIdx = AscendC::GetBlockIdx();
+            if (mixedCoreIdx < consumerCoreBase ||
+                mixedCoreIdx >= consumerCoreBase + consumerCoreNum) {
+                return;
+            }
             ChunkFwdOA5CubeProcess cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
             cube.Init(tiling_);
-            cube.Process(aicCoreIdx, aicCoreNum);
+            cube.Process(mixedCoreIdx - consumerCoreBase, consumerCoreNum);
         }
     }
 

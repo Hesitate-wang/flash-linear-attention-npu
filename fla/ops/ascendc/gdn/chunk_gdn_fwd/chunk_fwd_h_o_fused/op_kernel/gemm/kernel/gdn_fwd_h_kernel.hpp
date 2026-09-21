@@ -7,10 +7,6 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-#error "ChunkFwdHOFused currently supports Atlas A2 only"
-#endif
-
 #define CATLASS_ARCH 2201
 
 #include "catlass/arch/arch.hpp"
@@ -73,8 +69,6 @@ template<
 class GDNFwdHKernel {
 public:
 
-    static constexpr uint32_t HO_PIPELINE_EVENT_COUNT =
-        GDN::CHUNK_FWD_HO_IB_EVENT_COUNT;
     static constexpr uint32_t HO_PIPELINE_SYNC_UB_OFFSET = 188 * 1024;
 
     using ArchTag = Arch::AtlasA2;
@@ -171,6 +165,8 @@ public:
     AscendC::GlobalTensor<int32_t> gmPipelineSync;
 
     bool chunkPipelineEnabled{false};
+    uint32_t pipelineProducerCoreNum{0};
+    uint32_t pipelineActiveCoreNum{0};
 
     CubeScheduler cubeBlockScheduler;
     VecScheduler vecBlockScheduler;
@@ -183,8 +179,7 @@ public:
         if constexpr (!kChunkPipeline) {
             return false;
         }
-        return isVariedLen == 0 &&
-               AscendC::GetBlockNum() == 2 * batch * vNumHead;
+        return isVariedLen == 0 && pipelineProducerCoreNum > 0;
     }
 
     __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
@@ -197,13 +192,17 @@ public:
         return vecBlockScheduler.cubeCoreIdx * AscendC::GetSubBlockNum() + AscendC::GetSubBlockIdx();
     }
 
-    __aicore__ inline void SignalChunkReady(const GDNFwdHOffsets &offsets)
+    __aicore__ inline void SignalProducerSliceReady(
+        const GDNFwdHOffsets &offsets, uint32_t eventBase)
     {
         if (!chunkPipelineEnabled) {
             return;
         }
-        const uint32_t eventId = offsets.chunkIdx % HO_PIPELINE_EVENT_COUNT;
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(), GetPipelineAivIdx(), eventId);
+        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        // IBSet waits for a zero slot; the consumer's IBWait clears it after consumption.
+        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
+                              GetPipelineAivIdx(), eventBase + taskLane);
     }
 
 
@@ -251,15 +250,17 @@ public:
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
         gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
 
+        const __gm__ GDN::ChunkFwdHOFusedTilingData *fusedTiling =
+            reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling);
+        pipelineProducerCoreNum = fusedTiling->producerCoreNum;
+        pipelineActiveCoreNum = fusedTiling->activeCoreNum;
         chunkPipelineEnabled = CanRunChunkPipeline();
         if (chunkPipelineEnabled) {
-            const __gm__ GDN::ChunkFwdHOFusedTilingData *fusedTiling =
-                reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling);
             gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
                 user + fusedTiling->pipelineSyncWorkspaceOffset));
         }
 
-        const uint32_t logicalCoreNum = chunkPipelineEnabled ? batch * vNumHead
+        const uint32_t logicalCoreNum = chunkPipelineEnabled ? pipelineProducerCoreNum
                                                              : AscendC::GetBlockNum();
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user,
@@ -500,7 +501,7 @@ public:
 
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
-            uint32_t coreNum = chunkPipelineEnabled ? batch * vNumHead : AscendC::GetBlockNum();
+            uint32_t coreNum = chunkPipelineEnabled ? pipelineProducerCoreNum : AscendC::GetBlockNum();
 
             auto wLayout = tla::MakeLayout<ElementW, LayoutW>(shapeBatch * kNumHead * cubeBlockScheduler.totalTokens, kHeadDim);
             auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * cubeBlockScheduler.totalChunks * kHeadDim, vHeadDim);
@@ -623,7 +624,7 @@ public:
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
             uint32_t coreIdx = AscendC::GetBlockIdx() / subBlockNum;
-            uint32_t coreNum = chunkPipelineEnabled ? batch * vNumHead : AscendC::GetBlockNum();
+            uint32_t coreNum = chunkPipelineEnabled ? pipelineProducerCoreNum : AscendC::GetBlockNum();
             uint32_t taskCount =
                 (isVariedLen ? vecBlockScheduler.tokenBatch : shapeBatch) * vNumHead;
             uint32_t rowsPerSubBlock = (kHeadDim + subBlockNum - 1) / subBlockNum;
@@ -738,6 +739,10 @@ public:
                             continue;
                         }
                         const GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
+                        if (vec1Offsets.isInitialState) {
+                            SignalProducerSliceReady(
+                                vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                        }
                         if (vec1Offsets.blockTokens < 16) {
                             ComputeTailVWorkspace(vec1Offsets);
                         }
@@ -754,7 +759,8 @@ public:
                         );
                         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-                        SignalChunkReady(vec1Offsets);
+                        SignalProducerSliceReady(
+                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
                         }
@@ -795,6 +801,10 @@ public:
                             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         } else {
                             Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
+                        }
+                        if (!vec2Offsets.isFinalState) {
+                            SignalProducerSliceReady(
+                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
                     }

@@ -38,6 +38,9 @@ struct ChunkFwdHOFusedOStageTilingData {
     int64_t maskWorkspaceOffset;
     float scale;
     int64_t pipelineSyncWorkspaceOffset;
+    int64_t producerCoreNum;
+    int64_t consumerCoreBase;
+    int64_t activeCoreNum;
 };
 
 // Operator-local projection consumed by the copied Ascend 950 ChunkFwdO
@@ -68,6 +71,9 @@ struct ChunkFwdOTilingData {
     int64_t taskGroupSize;
     int64_t numChunksPerBatch;
     int64_t aPrimeWorkspaceOffset;
+    int64_t producerCoreNum;
+    int64_t consumerCoreBase;
+    int64_t activeCoreNum;
 };
 
 } // namespace GDN

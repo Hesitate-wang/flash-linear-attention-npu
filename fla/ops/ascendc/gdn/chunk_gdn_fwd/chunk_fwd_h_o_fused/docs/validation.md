@@ -4,13 +4,14 @@
 
 | 设计项 | 实现位置 |
 | --- | --- |
-| `P` 个生产者核和 `P` 个消费者核 | Host tiling 中的 `producerCoreNum`、`consumerCoreBase`、`activeCoreNum`，以及算子内 H/O 调度器 |
+| `floor(A/2)` 个双任务生产者核和配对消费者核 | Host tiling 中的 `producerCoreNum`、`consumerCoreBase`、`activeCoreNum`，以及算子内 H/O 调度器 |
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
-| 启动事件初始化 | 融合 kernel 入口中的 `InitializePipelineSync` |
-| 逐 chunk 的 H 到 O 发布 | 算子内 H 的 `SignalChunkReady`；算子内 O AIV 的 `WaitProducerSliceReady`；反向 `cube1Done` 确认用于约束 O AIC |
-| A5 的 H 到 O 阶段边界 | arch35 H 清空事件；`RunChunkFwdHOFusedA5` 在执行 O 阶段前调用 `SyncAll<false>()` |
+| 启动事件初始化 | A2/A5 统一入口 `RunChunkFwdHOFused` 在 H/O 分流前调用各自的 `InitializePipelineSync` |
+| 逐 chunk 的 H 到 O 发布 | H 的 `SignalProducerSliceReady` 按 task lane 分别发布 `HReady` 和 `VReady`，共 4 个 event；同一 task 的 chunk 串行复用对应 slot，O 的 `WaitProducerSliceReady` 消费并清零；`cube1Done` 在 `HReady` 后放行 O AIC 的 `QH_old` |
+| A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 `IBSet/IBWait`；exp2 专用 O 暂以 `SyncAll<false>()` 保护交接 |
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
+| FwdO 架构隔离 | A2 实现在 `op_kernel/gemm/kernel`；A5 流水化实现及配套 epilogue 位于 `op_kernel/arch35` |
 
 ## 已完成的静态检查
 
@@ -21,8 +22,8 @@
   TilingData 管理对象，因此首个 `set_batch` 不会访问空的内部存储。
 - Workspace 偏移均相对于用户 workspace，所有区域都按 512 字节对齐；返回的
   workspace 大小只累加一次平台系统 workspace。
-- A2 的 `blockDim` 为 `2 * B * HV`，并受
-  `2 * B * HV < physical AIC cores` 约束；A5 使用全部物理 AIC。
+- A2 和 A5 的 `blockDim` 均为 `min(B * HV, physical AIC cores)`；producer 数为
+  `floor(blockDim / 2)`，每个 producer/consumer 对处理两个任务并在需要时继续后续波次。
 - 已接受 Atlas A2 和 Ascend 950 的定长自然指数路径。两者均支持 FP16/BF16、
   FP32 或输入类型门控、chunk 64/128、K=128、V=128/256 及 BNSD/NTD。
   Ascend 950 的 exp2 专用路径仍限制为 BF16、BF16/FP32 门控、chunk 64、
@@ -35,19 +36,29 @@
   实现一致；若该文件或 kernel 入口源文件缺失，CMake 会在配置阶段失败。
 - 当前算子的 O 阶段结构头文件同时包含通用 O 投影，以及 Ascend 950 exp2
   专用 O 使用的完整 `ChunkFwdOTilingData` 投影。分发前，
-  `FillGenericOTiling` 或 `FillOptimizedOTiling` 会初始化对应投影的全部字段。
+  `FillNaturalOTiling` 或 `FillOptimizedOTiling` 会初始化对应投影的全部字段。
 - ACLNN 前置检查在 Atlas A2 和 Ascend 950 上接受自然指数与 BNSD/NTD，
   在 Ascend 950 上另接受 exp2 与 BSND/TND。L0 下发失败时保留原始状态码，不再统一改写为
   `ACLNN_ERR_PARAM_NULLPTR`（161001）。
 - 按接口要求，IB 本地张量保留在 SIMD 侧。在 MIX 模式下，IB 索引空间为
-  `2 * blockDim`；O AIC 读取完整 H/V tile 前，通过反向 `cube1Done` 的代次
-  聚合两个配对 AIV 的等待结果。
-- 对 `(B,HV,NC)=(1,8,3)` 和 `(2,4,3)` 进行的静态任务映射模拟表明，生产者
-  `p` 和消费者 `P+p` 会枚举完全相同的 `(b,hv,chunk)` 元组，并使用 24 个
-  MIX 核中的 16 个。
-- OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径先
-  执行当前算子目录内的 arch35 H，跨越一次全核阶段边界，再按 `useExp2`
-  执行通用 O 或 arch35 专用 O。设备侧按 dtype 和 V 维度显式选择 H 模板，
+  `2 * blockDim`；O AIC 读取完整 `H_old` tile 前，通过反向 `cube1Done` 的代次
+  聚合两个配对 AIV 的 `HReady` 等待结果；`V_new` 由后续 `VReady` 单独约束。
+- A2 和 A5 均在 H/O 分流前由每个逻辑 AIV 清零自身的全部 IB event slot，
+  随后由全部活动 AIC/AIV 执行一次启动 rendezvous；A5 不依赖未初始化的
+  ACLNN user workspace 作为 `IBSet/IBWait` 同步状态。Host 同步区容量按
+  `activeCoreNum * AIV_PER_MIXED_CORE * eventCount * wordsPerEvent` 分配。
+- 自然指数路径为每个 producer AIV 分配 4 个 ready event，每个 task lane 分别拥有
+  `HReady` 和 `VReady`。首 chunk 的 H 来自初始化，后续 `HReady(i+1)` 由 Vec2(i)
+  发布，`VReady(i)` 由 Vec1(i) 发布；同一 task 的所有 chunk 串行复用对应 slot。
+  `IBSet` 只在 GM slot 为 0 时置 1，`IBWait` 消费后将 slot 清零，因此下一代同类
+  事件的发布由接口自身反压。
+- 已对 `(T,A,NC)=(8,8,3)`、`(9,9,4)`、`(32,32,5)` 和 `(33,32,7)` 执行
+  静态任务/event 映射检查。生产者 `p` 和消费者 `R+p` 对每个
+  `(task,chunk)` 得到相同的 producer AIV、task lane、`0..1` HReady 和 `2..3` VReady，
+  并完整覆盖全部任务；该检查同时覆盖奇数活动 core 和多波次路径。
+- OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径由
+  arch35 H producer 和 O consumer 并行推进；自然指数使用逐 chunk IB 交接，
+  exp2 专用 O 暂时保留全核交接屏障。设备侧按 dtype 和 V 维度显式选择 H 模板，
   A5 入口为 Host 下发的 key 1/2 分别声明同为 MIX 1:2 的 kernel task，避免
   object 查找落到不存在的 default key；各路径所需 workspace 区域互不重叠。
 - `git diff --check` 已通过，仅存在行尾转换警告。

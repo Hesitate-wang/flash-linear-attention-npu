@@ -180,7 +180,8 @@ ge::graphStatus ValidateTensorContracts(gert::TilingContext *context, int64_t ba
 }
 
 ge::graphStatus FillWorkspace(ChunkFwdHOFusedTilingData &tiling, size_t systemWorkspace,
-                              size_t producerCoreNum, bool useGk, size_t &workspaceSize)
+                              size_t producerCoreNum, size_t consumerCoreNum, size_t taskNum, bool useGk,
+                              size_t &workspaceSize)
 {
     // All offsets consumed by the kernel are relative to GetUserWorkspace().
     size_t offset = 0;
@@ -189,13 +190,13 @@ ge::graphStatus FillWorkspace(ChunkFwdHOFusedTilingData &tiling, size_t systemWo
 
     // Full, non-reused handoff tensors. H layout is [B, HV, NC, K, V] and
     // v_new layout is [B, HV, T, V], matching the established H/O addressing.
-    OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_numChunksPerBatch()),
+    OP_CHECK_IF(!CheckedMul({taskNum, static_cast<size_t>(tiling.get_numChunksPerBatch()),
                              static_cast<size_t>(tiling.get_kHeadDim()),
                              static_cast<size_t>(tiling.get_vHeadDim()), INPUT_ELEMENT_BYTES}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
     tiling.set_handoffHWorkspaceOffset(regionOffset);
-    OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_seqlen()),
+    OP_CHECK_IF(!CheckedMul({taskNum, static_cast<size_t>(tiling.get_seqlen()),
                              static_cast<size_t>(tiling.get_vHeadDim()), INPUT_ELEMENT_BYTES}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
@@ -244,14 +245,14 @@ ge::graphStatus FillWorkspace(ChunkFwdHOFusedTilingData &tiling, size_t systemWo
                 , return ge::GRAPH_FAILED);
     tiling.set_numChunksWorkspaceOffset(regionOffset);
 
-    OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
+    OP_CHECK_IF(!CheckedMul({consumerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                              static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
     tiling.set_oVWorkspaceOffset(regionOffset);
     OP_CHECK_IF(!AllocateRegion(bytes, offset, regionOffset), , return ge::GRAPH_FAILED);
     tiling.set_oHWorkspaceOffset(regionOffset);
-    OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
+    OP_CHECK_IF(!CheckedMul({consumerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                              static_cast<size_t>(tiling.get_chunkSize()), sizeof(float), PING_PONG_STAGES}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
@@ -271,7 +272,7 @@ ge::graphStatus FillWorkspace(ChunkFwdHOFusedTilingData &tiling, size_t systemWo
 }
 
 ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t systemWorkspace,
-                                size_t physicalCoreNum, size_t taskNum, bool useGk,
+                                size_t producerCoreNum, size_t consumerCoreNum, size_t taskNum, bool useGk,
                                 bool useOptimizedO, size_t &workspaceSize)
 {
     size_t offset = 0;
@@ -290,7 +291,7 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
                 , return ge::GRAPH_FAILED);
     tiling.set_handoffVWorkspaceOffset(regionOffset);
 
-    OP_CHECK_IF(!CheckedMul({physicalCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
+    OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                              static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
@@ -300,14 +301,14 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
 
     tiling.set_kDecayWorkspaceOffset(static_cast<int64_t>(offset));
     if (useGk) {
-        OP_CHECK_IF(!CheckedMul({physicalCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
+        OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                                  static_cast<size_t>(tiling.get_kHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
                     , return ge::GRAPH_FAILED);
         tiling.set_kDecayWorkspaceOffset(regionOffset);
     }
 
-    OP_CHECK_IF(!CheckedMul({physicalCoreNum, static_cast<size_t>(tiling.get_kHeadDim()),
+    OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_kHeadDim()),
                              static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
@@ -320,9 +321,16 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
     OP_CHECK_IF(!AllocateRegion(bytes, offset, regionOffset), , return ge::GRAPH_FAILED);
     tiling.set_numChunksWorkspaceOffset(regionOffset);
 
-    tiling.set_pipelineSyncWorkspaceOffset(0);
+    OP_CHECK_IF(!CheckedMul({static_cast<size_t>(tiling.get_activeCoreNum()),
+                             static_cast<size_t>(GDN::CHUNK_FWD_HO_AIV_PER_MIXED_CORE),
+                             static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT),
+                             static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_WORDS_PER_EVENT),
+                             sizeof(int32_t)}, bytes) ||
+                    !AllocateRegion(bytes, offset, regionOffset),
+                , return ge::GRAPH_FAILED);
+    tiling.set_pipelineSyncWorkspaceOffset(regionOffset);
     if (useOptimizedO) {
-        OP_CHECK_IF(!CheckedMul({physicalCoreNum,
+        OP_CHECK_IF(!CheckedMul({consumerCoreNum,
                                  static_cast<size_t>(GDN::CHUNK_FWD_O_APRIME_WORKSPACE_BYTES)}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
                     , return ge::GRAPH_FAILED);
@@ -333,7 +341,7 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
         tiling.set_oAfterMaskWorkspaceOffset(0);
         tiling.set_oMaskWorkspaceOffset(0);
     } else {
-        OP_CHECK_IF(!CheckedMul({physicalCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
+        OP_CHECK_IF(!CheckedMul({consumerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                                  static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float),
                                  PING_PONG_STAGES}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
@@ -341,7 +349,7 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
         tiling.set_oVWorkspaceOffset(regionOffset);
         OP_CHECK_IF(!AllocateRegion(bytes, offset, regionOffset), , return ge::GRAPH_FAILED);
         tiling.set_oHWorkspaceOffset(regionOffset);
-        OP_CHECK_IF(!CheckedMul({physicalCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
+        OP_CHECK_IF(!CheckedMul({consumerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                                  static_cast<size_t>(tiling.get_chunkSize()), sizeof(float),
                                  PING_PONG_STAGES}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
@@ -472,6 +480,10 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     OP_CHECK_IF(gkDesc != nullptr && gkDesc->GetDataType() != gateType,
                 OP_LOGE(context->GetNodeName(), "gk dtype must match g dtype."),
                 return ge::GRAPH_FAILED);
+    OP_CHECK_IF(useExp2 != (gkDesc != nullptr),
+                OP_LOGE(context->GetNodeName(),
+                        "use_exp2 is the KDA mode and must match the presence of gk."),
+                return ge::GRAPH_FAILED);
     const auto *initialStateDesc = context->GetOptionalInputDesc(INPUT_INITIAL_STATE);
     const auto *oDesc = context->GetOutputDesc(OUTPUT_O);
     OP_CHECK_NULL_WITH_CONTEXT(context, oDesc);
@@ -537,24 +549,28 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                     return ge::GRAPH_FAILED);
     }
 
-    size_t producerCoreNum = 0;
-    OP_CHECK_IF(!CheckedMul({static_cast<size_t>(batch), static_cast<size_t>(vHeads)}, producerCoreNum) ||
-                    producerCoreNum > static_cast<size_t>(std::numeric_limits<int64_t>::max()) ||
-                    producerCoreNum > std::numeric_limits<size_t>::max() / 2,
+    size_t taskNum = 0;
+    OP_CHECK_IF(!CheckedMul({static_cast<size_t>(batch), static_cast<size_t>(vHeads)}, taskNum) ||
+                    taskNum > static_cast<size_t>(std::numeric_limits<int64_t>::max()),
                 OP_LOGE(context->GetNodeName(), "B * HV overflows the core-pipeline task count."),
                 return ge::GRAPH_FAILED);
     const size_t physicalCoreNum = platform.GetCoreNumAic();
     OP_CHECK_IF(physicalCoreNum == 0,
                 OP_LOGE(context->GetNodeName(), "No AIC core is available."),
                 return ge::GRAPH_FAILED);
-    const size_t activeCoreNum = isA5 ? physicalCoreNum : producerCoreNum * 2;
-    if (!isA5) {
-        OP_CHECK_IF(activeCoreNum >= physicalCoreNum,
-                    OP_LOGE(context->GetNodeName(),
-                            "Core pipeline requires 2 * B * HV < physical AIC cores, got %zu vs %zu.",
-                            activeCoreNum, physicalCoreNum),
-                    return ge::GRAPH_FAILED);
+    size_t activeCoreNum = 0;
+    if (taskNum <= physicalCoreNum) {
+        activeCoreNum = taskNum;
+    } else {
+        // Keep the saturated-core path explicit for its follow-up specialization.
+        activeCoreNum = physicalCoreNum;
     }
+    const size_t producerCoreNum = activeCoreNum / 2;
+    OP_CHECK_IF(producerCoreNum == 0,
+                OP_LOGE(context->GetNodeName(),
+                        "The core pipeline requires at least two active AIC cores, got %zu.", activeCoreNum),
+                return ge::GRAPH_FAILED);
+    const size_t consumerCoreNum = activeCoreNum - producerCoreNum;
 
     OP_CHECK_IF(ValidateTensorContracts(context, batch, seqlen, kHeads, vHeads, kDim, vDim,
                                         outputLayout) != ge::GRAPH_SUCCESS,
@@ -596,9 +612,10 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
 
     size_t workspaceSize = 0;
     const ge::graphStatus workspaceStatus = isA5
-        ? FillWorkspaceA5(tiling, platform.GetLibApiWorkSpaceSize(), physicalCoreNum,
-                          producerCoreNum, gkDesc != nullptr, useExp2, workspaceSize)
+        ? FillWorkspaceA5(tiling, platform.GetLibApiWorkSpaceSize(), producerCoreNum,
+                          consumerCoreNum, taskNum, gkDesc != nullptr, useExp2, workspaceSize)
         : FillWorkspace(tiling, platform.GetLibApiWorkSpaceSize(), producerCoreNum,
+                        consumerCoreNum, taskNum,
                         gkDesc != nullptr, workspaceSize);
     OP_CHECK_IF(workspaceStatus != ge::GRAPH_SUCCESS,
                 OP_LOGE(context->GetNodeName(), "Workspace calculation overflow."),
@@ -620,11 +637,9 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                                                    : GDN::ChunkFwdHOFusedTilingKey::V128_EXP);
     context->SetTilingKey(tilingKey);
     context->SetBlockDim(static_cast<uint32_t>(activeCoreNum));
-    if (!isA5) {
-        OP_CHECK_IF(context->SetScheduleMode(1) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "Failed to enable mixed-core batch schedule mode."),
-                    return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(context->SetScheduleMode(1) != ge::GRAPH_SUCCESS,
+                OP_LOGE(context->GetNodeName(), "Failed to enable mixed-core batch schedule mode."),
+                return ge::GRAPH_FAILED);
     size_t *workspaceSizes = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspaceSizes);
     workspaceSizes[0] = workspaceSize;

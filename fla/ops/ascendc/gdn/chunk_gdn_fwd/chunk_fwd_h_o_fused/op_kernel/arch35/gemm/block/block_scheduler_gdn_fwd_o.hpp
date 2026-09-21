@@ -1,16 +1,16 @@
 /**
- * Copyright (c) 2026 Tianjin University, Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * the BSD 3-Clause License (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- */
+ * Copyright (c) 2026 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
 
-#ifndef CATLASS_GEMM_SCHEDULER_GDN_FWD_O_HPP
-#define CATLASS_GEMM_SCHEDULER_GDN_FWD_O_HPP
+#ifndef CATLASS_GEMM_SCHEDULER_GDN_FWD_O_ARCH35_HPP
+#define CATLASS_GEMM_SCHEDULER_GDN_FWD_O_ARCH35_HPP
 
-#include "../../chunk_fwd_o_struct.h"
+#include "../../../chunk_fwd_o_struct.h"
 
 constexpr uint32_t GDN_FWD_O_PING_PONG_STAGES = 2;
 constexpr uint32_t GDN_FWD_HO_CONSUMERS_PER_PAIR = 1;
@@ -226,12 +226,12 @@ struct BlockSchedulerGdnFwdO {
             pipelineHeadIdx = hTaskIdx % vNumHead;
             curTaskIdx = pipelineBatchIdx * numChunks * vNumHead +
                          pipelineChunkIdx * vNumHead + pipelineHeadIdx;
-            pipelineChunkIdx += 1;
-            if (pipelineChunkIdx == numChunks) {
-                pipelineChunkIdx = 0;
-                pipelineLaneIdx += 1;
-                if (pipelineLaneIdx == GDN_FWD_O_PING_PONG_STAGES) {
-                    pipelineLaneIdx = 0;
+            pipelineLaneIdx += 1;
+            if (pipelineLaneIdx == GDN_FWD_O_PING_PONG_STAGES) {
+                pipelineLaneIdx = 0;
+                pipelineChunkIdx += 1;
+                if (pipelineChunkIdx == numChunks) {
+                    pipelineChunkIdx = 0;
                     pipelineHTaskBase += pipelineTaskStride;
                 }
             }
@@ -414,4 +414,4 @@ struct BlockSchedulerGdnFwdOVec : public BlockSchedulerGdnFwdO {
 
 }  // namespace Catlass::Gemm::Block
 
-#endif // CATLASS_GEMM_SCHEDULER_GDN_FWD_O_HPP
+#endif // CATLASS_GEMM_SCHEDULER_GDN_FWD_O_ARCH35_HPP

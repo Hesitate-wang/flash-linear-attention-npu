@@ -1,3 +1,3 @@
 # Ascend 950 epilogue
 
-Contains the operator-local arch35 FwdH epilogue policy.
+Contains operator-local arch35 FwdH and FwdO epilogue policies.

@@ -12,11 +12,53 @@ using ChunkGatedDeltaRuleFwdHTilingData = ChunkFwdHOFusedHStageTilingData;
 
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #undef CATLASS_ARCH
-#include "../gemm/kernel/gdn_fwd_o_kernel.hpp"
+#include "gemm/kernel/gdn_fwd_o_kernel.hpp"
 #include "chunk_fwd_o_a5.h"
 #include <cstddef>
 
-namespace GDN::Arch35 {
+namespace GDN {
+
+__aicore__ inline uint32_t GetMixedCoreIdx()
+{
+    if ASCEND_IS_AIV {
+        return AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
+    }
+    return AscendC::GetBlockIdx();
+}
+
+// Initialize every ready/ACK slot before producer and consumer cores take
+// different paths; the user workspace is not guaranteed to be zeroed.
+__aicore__ inline void InitializePipelineSync(
+    GM_ADDR userWorkspace, const ChunkFwdHOFusedTilingData &tiling)
+{
+    if ASCEND_IS_AIV {
+        AscendC::TPipe pipe;
+        AscendC::TBuf<AscendC::TPosition::VECCALC> syncBuf;
+        pipe.InitBuffer(syncBuf, CHUNK_FWD_HO_IB_WORDS_PER_EVENT * sizeof(int32_t));
+        AscendC::LocalTensor<int32_t> syncLocal = syncBuf.Get<int32_t>();
+        AscendC::Duplicate(syncLocal, static_cast<int32_t>(0), CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::GlobalTensor<int32_t> syncGm;
+        syncGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
+            userWorkspace + tiling.pipelineSyncWorkspaceOffset));
+        const uint32_t logicalAivNum =
+            static_cast<uint32_t>(tiling.activeCoreNum) * AscendC::GetSubBlockNum();
+        const uint32_t logicalAivIdx = AscendC::GetBlockIdx();
+        if (logicalAivIdx < logicalAivNum) {
+            for (uint32_t eventId = 0;
+                 eventId < static_cast<uint32_t>(tiling.pipelineEventCount); ++eventId) {
+                const uint32_t offset =
+                    (eventId * logicalAivNum + logicalAivIdx) * CHUNK_FWD_HO_IB_WORDS_PER_EVENT;
+                AscendC::DataCopy(syncGm[offset], syncLocal, CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
+            }
+        }
+        AscendC::SyncAll<false>();
+    }
+    if ASCEND_IS_AIC {
+        AscendC::SyncAll<false>();
+    }
+}
 
 static_assert(offsetof(ChunkFwdHOFusedTilingData, useExp2) ==
                   sizeof(::ChunkFwdHOFusedHStageTilingData),
@@ -49,9 +91,12 @@ __aicore__ inline void FillOptimizedOTiling(const ChunkFwdHOFusedTilingData &src
     dst.taskGroupSize = src.taskGroupSize;
     dst.numChunksPerBatch = src.numChunksPerBatch;
     dst.aPrimeWorkspaceOffset = src.oAPrimeWorkspaceOffset;
+    dst.producerCoreNum = src.producerCoreNum;
+    dst.consumerCoreBase = src.consumerCoreBase;
+    dst.activeCoreNum = src.activeCoreNum;
 }
 
-__aicore__ inline void FillGenericOTiling(
+__aicore__ inline void FillNaturalOTiling(
     const ChunkFwdHOFusedTilingData &src, ChunkFwdHOFusedOStageTilingData &dst)
 {
     dst.shapeBatch = src.shapeBatch;
@@ -72,10 +117,13 @@ __aicore__ inline void FillGenericOTiling(
     dst.maskWorkspaceOffset = src.oMaskWorkspaceOffset;
     dst.scale = src.scale;
     dst.pipelineSyncWorkspaceOffset = src.pipelineSyncWorkspaceOffset;
+    dst.producerCoreNum = src.producerCoreNum;
+    dst.consumerCoreBase = src.consumerCoreBase;
+    dst.activeCoreNum = src.activeCoreNum;
 }
 
 template <typename InputT, typename GateT, typename StateT,
-          typename TileShapes, bool UseGk>
+          typename TileShapes, bool UseGk, bool UseExp2>
 __aicore__ inline void RunH(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
@@ -83,7 +131,7 @@ __aicore__ inline void RunH(
     GM_ADDR userWorkspace)
 {
     using Kernel = Catlass::Gemm::Kernel::GDNFwdHKernel<
-        InputT, GateT, StateT, float, TileShapes, UseGk, true, false>;
+        InputT, GateT, StateT, float, TileShapes, UseGk, true, UseExp2, true, !UseExp2>;
     Kernel kernel;
     kernel.Init(k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
                 h, vNew, finalState, tiling, userWorkspace);
@@ -91,7 +139,7 @@ __aicore__ inline void RunH(
 }
 
 template <typename InputT, typename GateT, typename StateT,
-          typename TileShapes>
+          typename TileShapes, bool UseExp2>
 __aicore__ inline void DispatchHByGk(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
@@ -99,17 +147,17 @@ __aicore__ inline void DispatchHByGk(
     GM_ADDR userWorkspace, bool useGk)
 {
     if (useGk) {
-        RunH<InputT, GateT, StateT, TileShapes, true>(
+        RunH<InputT, GateT, StateT, TileShapes, true, UseExp2>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
     } else {
-        RunH<InputT, GateT, StateT, TileShapes, false>(
+        RunH<InputT, GateT, StateT, TileShapes, false, UseExp2>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
     }
 }
 
-template <typename InputT, typename TileShapes>
+template <typename InputT, typename TileShapes, bool UseExp2>
 __aicore__ inline void DispatchH(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
@@ -119,23 +167,23 @@ __aicore__ inline void DispatchH(
     constexpr int64_t DTYPE_FP32 = 2;
     if (data.stateDataType == DTYPE_FP32) {
         if (data.gDataType == DTYPE_FP32) {
-            DispatchHByGk<InputT, float, float, TileShapes>(
+            DispatchHByGk<InputT, float, float, TileShapes, UseExp2>(
                 k, w, u, g, gk, initialState,
                 cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
                 userWorkspace, data.useGk);
         } else {
-            DispatchHByGk<InputT, InputT, float, TileShapes>(
+            DispatchHByGk<InputT, InputT, float, TileShapes, UseExp2>(
                 k, w, u, g, gk, initialState,
                 cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
                 userWorkspace, data.useGk);
         }
     } else if (data.gDataType == DTYPE_FP32) {
-        DispatchHByGk<InputT, float, InputT, TileShapes>(
+        DispatchHByGk<InputT, float, InputT, TileShapes, UseExp2>(
             k, w, u, g, gk, initialState,
             cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
             userWorkspace, data.useGk);
     } else {
-        DispatchHByGk<InputT, InputT, InputT, TileShapes>(
+        DispatchHByGk<InputT, InputT, InputT, TileShapes, UseExp2>(
             k, w, u, g, gk, initialState,
             cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
             userWorkspace, data.useGk);
@@ -153,12 +201,12 @@ __aicore__ inline void RunOptimizedO(
 }
 
 template <typename InputT, typename GateT>
-__aicore__ inline void RunGenericO(
+__aicore__ inline void RunNaturalO(
     GM_ADDR q, GM_ADDR k, GM_ADDR vNew, GM_ADDR h, GM_ADDR g,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
     GM_ADDR userWorkspace, const ChunkFwdHOFusedOStageTilingData &tiling)
 {
-    using Kernel = Catlass::Gemm::Kernel::GDNFwdOKernel<InputT, GateT, float>;
+    using Kernel = Catlass::Gemm::Kernel::GDNFwdOKernel<InputT, GateT, float, true>;
     Kernel kernel;
     kernel.Init(q, k, vNew, h, g, cuSeqlens, chunkIndices,
                 o, &tiling, userWorkspace);
@@ -166,19 +214,19 @@ __aicore__ inline void RunGenericO(
 }
 
 template <typename InputT>
-__aicore__ inline void DispatchGenericO(
+__aicore__ inline void DispatchNaturalO(
     GM_ADDR q, GM_ADDR k, GM_ADDR vNew, GM_ADDR h, GM_ADDR g,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
     GM_ADDR userWorkspace, const ChunkFwdHOFusedTilingData &data)
 {
     ChunkFwdHOFusedOStageTilingData oTiling{};
-    FillGenericOTiling(data, oTiling);
+    FillNaturalOTiling(data, oTiling);
     constexpr int64_t DTYPE_FP32 = 2;
     if (data.gDataType == DTYPE_FP32) {
-        RunGenericO<InputT, float>(q, k, vNew, h, g, cuSeqlens,
+        RunNaturalO<InputT, float>(q, k, vNew, h, g, cuSeqlens,
                                    chunkIndices, o, userWorkspace, oTiling);
     } else {
-        RunGenericO<InputT, InputT>(q, k, vNew, h, g, cuSeqlens,
+        RunNaturalO<InputT, InputT>(q, k, vNew, h, g, cuSeqlens,
                                     chunkIndices, o, userWorkspace, oTiling);
     }
 }
@@ -195,17 +243,22 @@ __aicore__ inline void RunTyped(
     GM_ADDR h = userWorkspace + data.handoffHWorkspaceOffset;
     GM_ADDR vNew = userWorkspace + data.handoffVWorkspaceOffset;
 
-    // The fused API keeps H on natural-exp semantics; useExp2 selects only
-    // the O implementation and its output-layout contract.
-    DispatchH<InputT, TileShapes>(
-        k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
-        h, vNew, finalState, tiling, userWorkspace, data);
-
-    // H drains its local events before returning. This global stage boundary
-    // makes all H GM writes visible before any AIC/AIV starts the O stage.
-    AscendC::SyncAll<false>();
+    InitializePipelineSync(userWorkspace, data);
+    if (GetMixedCoreIdx() < static_cast<uint32_t>(data.producerCoreNum)) {
+        DispatchH<InputT, TileShapes, UseExp2>(
+            k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
+            h, vNew, finalState, tiling, userWorkspace, data);
+        // The copied arch35 exp2 O implementation does not yet expose the
+        // generic O IBWait hook. Keep its handoff ordered until that hook is
+        // added; the natural-exp path remains fully chunk-pipelined.
+        if constexpr (UseExp2) {
+            AscendC::SyncAll<false>();
+        }
+        return;
+    }
 
     if constexpr (UseExp2) {
+        AscendC::SyncAll<false>();
         ChunkFwdOTilingData oTiling{};
         FillOptimizedOTiling(data, oTiling);
         constexpr int64_t DTYPE_FP32 = 2;
@@ -217,48 +270,31 @@ __aicore__ inline void RunTyped(
                                   chunkIndices, o, userWorkspace, oTiling);
         }
     } else {
-        DispatchGenericO<InputT>(q, k, vNew, h, g, cuSeqlens,
+        DispatchNaturalO<InputT>(q, k, vNew, h, g, cuSeqlens,
                                  chunkIndices, o, userWorkspace, data);
     }
 }
 
-__aicore__ inline void RunChunkFwdHOFusedA5(
+template <typename InputT, typename TileShapes>
+__aicore__ inline void RunChunkFwdHOFused(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR q, GM_ADDR cuSeqlens,
     GM_ADDR chunkIndices, GM_ADDR o, GM_ADDR finalState,
     GM_ADDR workspace, GM_ADDR tiling,
     const ChunkFwdHOFusedTilingData &data)
 {
-    constexpr int64_t DTYPE_FP16 = 0;
-    constexpr int64_t V_DIM_256 = 256;
     if (data.useExp2) {
-        RunTyped<bfloat16_t, Catlass::Gemm::Kernel::GDNFwdHTileShapes128, true>(
+        RunTyped<InputT, TileShapes, true>(
             k, w, u, g, gk, initialState, q, cuSeqlens, chunkIndices,
             o, finalState, workspace, tiling, data);
         return;
     }
 
-    if (data.dataType == DTYPE_FP16) {
-        if (data.vHeadDim == V_DIM_256) {
-            RunTyped<half, Catlass::Gemm::Kernel::GDNFwdHTileShapes256, false>(
-                k, w, u, g, gk, initialState, q, cuSeqlens, chunkIndices,
-                o, finalState, workspace, tiling, data);
-        } else {
-            RunTyped<half, Catlass::Gemm::Kernel::GDNFwdHTileShapes128, false>(
-                k, w, u, g, gk, initialState, q, cuSeqlens, chunkIndices,
-                o, finalState, workspace, tiling, data);
-        }
-    } else if (data.vHeadDim == V_DIM_256) {
-        RunTyped<bfloat16_t, Catlass::Gemm::Kernel::GDNFwdHTileShapes256, false>(
-            k, w, u, g, gk, initialState, q, cuSeqlens, chunkIndices,
-            o, finalState, workspace, tiling, data);
-    } else {
-        RunTyped<bfloat16_t, Catlass::Gemm::Kernel::GDNFwdHTileShapes128, false>(
-            k, w, u, g, gk, initialState, q, cuSeqlens, chunkIndices,
-            o, finalState, workspace, tiling, data);
-    }
+    RunTyped<InputT, TileShapes, false>(
+        k, w, u, g, gk, initialState, q, cuSeqlens, chunkIndices,
+        o, finalState, workspace, tiling, data);
 }
 
-} // namespace GDN::Arch35
+} // namespace GDN
 
 #endif // CHUNK_FWD_H_O_FUSED_ARCH35_A5_HPP

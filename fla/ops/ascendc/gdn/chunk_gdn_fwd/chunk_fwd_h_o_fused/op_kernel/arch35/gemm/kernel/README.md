@@ -1,3 +1,4 @@
 # Ascend 950 GEMM kernel
 
-Contains the arch35 FwdH kernel used before the fused H-to-O stage boundary.
+Contains separate arch35 FwdH and natural-exp FwdO kernels used by the fused
+A5 producer/consumer pipeline.

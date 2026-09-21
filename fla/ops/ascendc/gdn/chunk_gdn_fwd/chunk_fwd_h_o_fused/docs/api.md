@@ -58,8 +58,8 @@ Python 适配层返回 `(o, final_state)`；未请求最终状态时，`final_st
 
 Ascend 950 的定长自然指数路径与 A2 的功能范围一致：q/k/w/u 使用 FP16 或
 BF16，门控使用 FP32 或输入类型，`K=128`、`V in {128,256}`、
-`chunk_size in {64,128}`，输出布局为 BNSD 或 NTD。该路径采用 H/O 顺序执行，
-不承诺与 A2 core pipeline 相同的性能。
+`chunk_size in {64,128}`，输出布局为 BNSD 或 NTD。该路径采用与 A2 相同的
+H producer/O consumer 逐 chunk 交接拓扑，但使用 arch35 独立的 FwdO 实现。
 
 Ascend 950 的定长 exp2 专用路径仍保持原约束：q/k/w/u 使用 BF16，门控张量
 使用 BF16 或 FP32，`chunk_size=64`，`K=V=128`，且 `HV/HK` 位于 `[1,4]`；

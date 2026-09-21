@@ -217,7 +217,10 @@ struct BlockSchedulerGdnFwdH {
 
     CATLASS_DEVICE
     void InitTaskWave(uint32_t waveIdx) {
-        uint32_t firstTaskIdx = waveIdx * cubeCoreNum + cubeCoreIdx;
+        const uint32_t waveGroup = waveIdx / PING_PONG_STAGES;
+        const uint32_t waveLane = waveIdx % PING_PONG_STAGES;
+        uint32_t firstTaskIdx = waveGroup * cubeCoreNum * PING_PONG_STAGES +
+                                cubeCoreIdx * PING_PONG_STAGES + waveLane;
         taskStride = taskNum;
         for (uint32_t streamId = 0; streamId < PING_PONG_STAGES; ++streamId) {
             auto& stream = runningQ.streams[streamId];

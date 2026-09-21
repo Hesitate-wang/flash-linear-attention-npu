@@ -8,7 +8,7 @@ performed by `ChunkGatedDeltaRuleFwdH` with the output calculation performed by
 
 The host-side operator definition, combined tiling, L0/aclnn APIs, the
 fixed-length Atlas A2 producer/consumer kernel, and the fixed-length Ascend 950
-sequential H-to-O megakernel are implemented. Device build, accuracy,
+producer/consumer pipeline are implemented. Device build, accuracy,
 execution-trace and profiling evidence are still pending.
 
 ## Reference projects
@@ -37,8 +37,10 @@ chunk_fwd_h_o_fused/
     `-- pta/               # CPU reference and PTA comparison cases
 ```
 
-The A2 kernel uses per-chunk IB synchronization. The A5 kernel uses an
-all-core stage boundary between H and O. Its natural-exp path matches the A2
-functional matrix through the generic O implementation, while its exp2 path
-keeps the specialized arch35 O implementation. Both use workspace-backed
-internal `h`/`v_new`. See `docs/design.md` for the support boundaries.
+The A2 and A5 natural-exp kernels use separate per-chunk `HReady` and `VReady`
+IB synchronization between dedicated H producers and O consumers. This lets O
+compute `QK * mask` and `Q * gate @ H_old` before waiting for `V_new`. A5 uses
+its architecture-local Catlass O implementation, while its exp2 path keeps the
+specialized arch35 O implementation with a temporary all-core handoff barrier.
+Both use workspace-backed internal `h`/`v_new`. See `docs/design.md` for the
+support boundaries.
