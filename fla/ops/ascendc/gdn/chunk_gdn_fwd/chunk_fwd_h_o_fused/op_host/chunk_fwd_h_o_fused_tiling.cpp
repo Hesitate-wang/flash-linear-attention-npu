@@ -558,19 +558,24 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     OP_CHECK_IF(physicalCoreNum == 0,
                 OP_LOGE(context->GetNodeName(), "No AIC core is available."),
                 return ge::GRAPH_FAILED);
-    size_t activeCoreNum = 0;
-    if (taskNum <= physicalCoreNum) {
-        activeCoreNum = taskNum;
-    } else {
-        // Keep the saturated-core path explicit for its follow-up specialization.
-        activeCoreNum = physicalCoreNum;
-    }
-    const size_t producerCoreNum = activeCoreNum / 2;
-    OP_CHECK_IF(producerCoreNum == 0,
+    const size_t physicalPairNum = physicalCoreNum / 2;
+    OP_CHECK_IF(physicalPairNum == 0,
                 OP_LOGE(context->GetNodeName(),
-                        "The core pipeline requires at least two active AIC cores, got %zu.", activeCoreNum),
+                        "The core pipeline requires at least two physical AIC cores, got %zu.", physicalCoreNum),
                 return ge::GRAPH_FAILED);
-    const size_t consumerCoreNum = activeCoreNum - producerCoreNum;
+    const size_t requiredPairNum = taskNum / 2 + taskNum % 2;
+    OP_CHECK_IF(requiredPairNum == 0,
+                OP_LOGE(context->GetNodeName(), "The core pipeline requires at least one task."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(requiredPairNum > physicalPairNum,
+                OP_LOGE(context->GetNodeName(),
+                        "The paired core pipeline requires 2 * ceil(B * HV / 2) physical AIC cores; "
+                        "got %zu tasks and %zu physical cores. The saturated-core path is not implemented yet.",
+                        taskNum, physicalCoreNum),
+                return ge::GRAPH_FAILED);
+    const size_t producerCoreNum = requiredPairNum;
+    const size_t consumerCoreNum = producerCoreNum;
+    const size_t activeCoreNum = producerCoreNum + consumerCoreNum;
 
     OP_CHECK_IF(ValidateTensorContracts(context, batch, seqlen, kHeads, vHeads, kDim, vDim,
                                         outputLayout) != ge::GRAPH_SUCCESS,

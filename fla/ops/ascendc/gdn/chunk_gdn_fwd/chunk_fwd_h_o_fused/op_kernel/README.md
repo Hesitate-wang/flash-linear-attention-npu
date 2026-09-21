@@ -8,8 +8,8 @@ matching architecture implementation. Supporting H/O kernels, schedulers and
 epilogues are operator-local copies adapted to the fused producer/consumer
 schedule; they do not include sibling operator or private `internal` paths.
 
-The fixed-length pipeline uses `floor(activeCoreNum / 2)` double-buffered H
-producers followed by paired O consumers, full-task handoff
+The fixed-length pipeline uses equal numbers of double-buffered H producers
+and paired O consumers, with `activeCoreNum == 2 * producerCoreNum`, full-task handoff
 workspace, and per-chunk `IBSet<false>`/`IBWait<false>` synchronization. Four
 ready events provide `HReady` and `VReady` for each of the two task lanes. All
 chunks of one task lane reuse the corresponding H/V slots: `IBSet` waits until

@@ -213,8 +213,11 @@ struct BlockSchedulerGdnFwdO {
             while (pipelineHTaskBase < hTaskNum &&
                    pipelineHTaskBase + pipelineLaneIdx >= hTaskNum) {
                 pipelineLaneIdx = 0;
-                pipelineChunkIdx = 0;
-                pipelineHTaskBase += pipelineTaskStride;
+                pipelineChunkIdx += 1;
+                if (pipelineChunkIdx == numChunks) {
+                    pipelineChunkIdx = 0;
+                    pipelineHTaskBase += pipelineTaskStride;
+                }
             }
             if (unlikely(pipelineHTaskBase >= hTaskNum)) {
                 isRunning = false;
