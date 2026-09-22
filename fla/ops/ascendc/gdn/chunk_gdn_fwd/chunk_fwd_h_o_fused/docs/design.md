@@ -126,7 +126,7 @@ H producer `p in [0,R)` 负责 `2p` 和可选的 `2p+1` 两个 `(batch, value-he
 
 `lane = taskIdx % 2`。O 根据完整任务索引反推出 `producerCoreIdx=(taskIdx % (2R))/2`，再用相同的 `subBlockIdx` 得到 `producerAivIdx=producerCoreIdx*subBlockNum+subBlockIdx`。因此两个 O AIV 分别等待两个 H AIV 发布的对应 H/V 切片，不会互相代替。
 
-IB 槽按 `[eventId][logicalAivIdx][8 x int32]` 编址，其中 `logicalAivNum=activeCoreNum*subBlockNum`。kernel 分流前，所有活动 AIV 分工把全部 event 槽显式写零，随后 AIC/AIV 都执行一次 `SyncAll<false>()`，确认初始化完成后才进入 H 或 O。该初始化清零的是 GM event table；传给 `IBSet/IBWait` 的 32-byte UB tensor 是 API 的本地工作区，不是跨 core 共享状态。
+IB 槽按 `[eventId][logicalAivIdx][8 x int32]` 编址，其中 `logicalAivNum=activeCoreNum*subBlockNum`。kernel 分流前，所有活动 AIV 分工把全部 event 槽显式写零。本地零值由 `Duplicate` 在 `PIPE_V` 生成，通过配对的 `SetFlag/WaitFlag<HardEvent::V_MTE3>` 交给后续 UB→GM `DataCopy`；全部异步 `DataCopy` 提交后，再用 `SetFlag/WaitFlag<HardEvent::MTE3_MTE2>` 等待 GM 写回完成，确保后续 MTE2 上的 `IBSet/IBWait` 不会读取未落盘的共享槽，随后 AIC/AIV 执行一次 `SyncAll<false>()`，确认初始化完成后才进入 H 或 O。该初始化清零的是 GM event table；传给 `IBSet/IBWait` 的 32-byte UB tensor 是 API 的本地工作区，不是跨 core 共享状态。
 
 `IBSet/IBWait` 内部在数据搬入和搬出前后执行 `PipeBarrier<Pipe_all>`，因此 H 直接在对应 GM 写回操作后调用 `IBSet`，不再额外插入 `PipeBarrier<PIPE_MTE3>()`。O 的 `IBWait` 消费 ready 并归还同一个二值槽；同一 task 的后续 chunk 复用该槽，所以 H 若过早追上 O，会阻塞在下一次 `IBSet`，而不是覆盖一个未消费的 ready。handoff 数据本身按任务/chunk 独立编址，event 槽只表达就绪和背压。
 

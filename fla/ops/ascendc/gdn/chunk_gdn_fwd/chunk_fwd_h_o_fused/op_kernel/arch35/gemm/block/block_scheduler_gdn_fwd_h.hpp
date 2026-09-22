@@ -373,6 +373,20 @@ struct BlockSchedulerGdnFwdH {
     }
 
     CATLASS_DEVICE
+    uint32_t GetInitialStageCount() const {
+        if (taskNum == 0 || cubeCoreNum == 0) {
+            return 0;
+        }
+        const uint32_t maxTaskCntPerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
+        const uint32_t baseTaskIdx = cubeCoreIdx * maxTaskCntPerLoop;
+        if (baseTaskIdx >= taskNum) {
+            return 0;
+        }
+        const uint32_t remainingTasks = taskNum - baseTaskIdx;
+        return remainingTasks < maxTaskCntPerLoop ? remainingTasks : maxTaskCntPerLoop;
+    }
+
+    CATLASS_DEVICE
     bool NeedProcessStage2(const GDNFwdHStream& stream) {
         return storeFinalState || !stream.offset.isFinalState;
     }

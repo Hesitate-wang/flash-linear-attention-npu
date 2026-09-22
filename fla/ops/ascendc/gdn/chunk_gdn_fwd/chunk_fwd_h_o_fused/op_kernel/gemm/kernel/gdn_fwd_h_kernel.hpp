@@ -629,8 +629,10 @@ public:
                     }
                     currStage ^= 0x01;
                 }
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[0]);
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+            }
             }
 
         }
@@ -730,8 +732,10 @@ public:
                     AscendC::SyncAll<false>();
                 }
                 vecBlockScheduler.InitTaskWave(waveIdx);
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[0]);
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
+            }
                 PresetVectorPipelineEvents();
                 uint32_t currStage = 0; // 0: V1, 1: V2
                 bool waitStageFence = false;

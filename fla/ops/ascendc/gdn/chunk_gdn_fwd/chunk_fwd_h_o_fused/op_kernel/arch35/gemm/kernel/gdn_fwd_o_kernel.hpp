@@ -196,9 +196,9 @@ public:
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane =
             producerPairIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        AscendC::PRINTF("producerCoreIdx %d, taskLane %d, producerAivIdx %d, eventBase %d\n", producerCoreIdx, taskLane, producerAivIdx, eventBase);
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
                                producerAivIdx, eventBase + taskLane);
+        AscendC::PRINTF("producerCoreIdx %d, taskLane %d, producerAivIdx %d, eventBase %d\n", producerCoreIdx, taskLane, producerAivIdx, eventBase);
     }
 
     __aicore__ inline GDNFwdOKernel() {}
@@ -449,8 +449,10 @@ public:
                 }
                 needRun = true;
             }
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[0]);
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+            }
         }
 
         if ASCEND_IS_AIV {
@@ -460,8 +462,10 @@ public:
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[0]);
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
+            }
 
             AscendC::LocalTensor<float> maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(0);
             AscendC::Duplicate<float>(maskUbTensor, (float)0.0, 64*64);

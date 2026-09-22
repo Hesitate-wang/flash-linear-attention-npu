@@ -83,6 +83,7 @@ struct BlockSchedulerGdnFwdO {
     uint32_t pipelineHTaskBase{0};
     uint32_t pipelineChunkIdx{0};
     uint32_t pipelineTaskStride{0};
+    uint32_t initialStageCount{0};
 
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmChunkOffsets;
@@ -133,6 +134,7 @@ struct BlockSchedulerGdnFwdO {
             const uint32_t consumerCoreEnd = consumerCoreBegin + producerCoreNum;
             if (cubeCoreIdx < consumerCoreBegin || cubeCoreIdx >= consumerCoreEnd) {
                 taskIdx = taskNum;
+                initialStageCount = 0;
                 isRunning = false;
             } else {
                 const uint32_t consumerIdx = cubeCoreIdx - consumerCoreBegin;
@@ -141,13 +143,25 @@ struct BlockSchedulerGdnFwdO {
                 pipelineHTaskBase = consumerIdx * GDN_FWD_O_PING_PONG_STAGES;
                 pipelineTaskStride = producerCoreNum * GDN_FWD_O_PING_PONG_STAGES;
                 workspaceCoreIdx = consumerIdx;
+                const uint32_t hTaskNum = shapeBatch * vNumHead;
+                const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
+                                                    ? hTaskNum - pipelineHTaskBase
+                                                    : 0;
+                initialStageCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
+                                         ? remainingTasks
+                                         : GDN_FWD_O_PING_PONG_STAGES;
                 isRunning = pipelineHTaskBase < shapeBatch * vNumHead;
             }
         } else if (taskAffinity) {
             taskIdx = 0;
+            initialStageCount = GDN_FWD_O_PING_PONG_STAGES;
             isRunning = taskNum > 0 && cubeCoreNum > 0;
         } else {
             taskIdx = cubeCoreIdx * GDN_FWD_O_PING_PONG_STAGES;
+            const uint32_t remainingTasks = taskNum > taskIdx ? taskNum - taskIdx : 0;
+            initialStageCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
+                                    ? remainingTasks
+                                    : GDN_FWD_O_PING_PONG_STAGES;
             isRunning = taskIdx < taskNum;
         }
 
@@ -309,6 +323,11 @@ struct BlockSchedulerGdnFwdO {
     CATLASS_DEVICE
     uint32_t GetCurStageId() const {
         return (currStage + GDN_FWD_O_PING_PONG_STAGES - 1) % GDN_FWD_O_PING_PONG_STAGES;
+    }
+
+    CATLASS_DEVICE
+    uint32_t GetInitialStageCount() const {
+        return initialStageCount;
     }
 
     CATLASS_DEVICE

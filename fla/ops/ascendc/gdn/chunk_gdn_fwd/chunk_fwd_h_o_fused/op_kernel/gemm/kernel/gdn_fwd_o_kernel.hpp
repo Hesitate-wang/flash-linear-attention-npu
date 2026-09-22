@@ -363,8 +363,10 @@ public:
                 needRun = true;
                 // AscendC::PipeBarrier<PIPE_ALL>();
             }
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[0]);
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+            }
         }
 
         if ASCEND_IS_AIV {
@@ -374,8 +376,10 @@ public:
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[0]);
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
+            }
 
             AscendC::LocalTensor<float> maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(0);
             AscendC::Duplicate<float>(maskUbTensor, (float)0.0, 64*64);

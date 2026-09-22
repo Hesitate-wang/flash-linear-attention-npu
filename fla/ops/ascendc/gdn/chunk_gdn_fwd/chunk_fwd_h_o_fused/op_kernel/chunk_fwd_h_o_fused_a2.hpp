@@ -47,8 +47,13 @@ __aicore__ inline void InitializePipelineSync(
         AscendC::TBuf<AscendC::TPosition::VECCALC> syncBuf;
         pipe.InitBuffer(syncBuf, CHUNK_FWD_HO_IB_WORDS_PER_EVENT * sizeof(int32_t));
         AscendC::LocalTensor<int32_t> syncLocal = syncBuf.Get<int32_t>();
+        const AscendC::TEventID zeroReadyEvent =
+            pipe.AllocEventID<AscendC::HardEvent::V_MTE3>();
+        const AscendC::TEventID syncGmReadyEvent =
+            pipe.AllocEventID<AscendC::HardEvent::MTE3_MTE2>();
         AscendC::Duplicate(syncLocal, static_cast<int32_t>(0), CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
-        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
 
         AscendC::GlobalTensor<int32_t> syncGm;
         syncGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
@@ -64,6 +69,10 @@ __aicore__ inline void InitializePipelineSync(
                 AscendC::DataCopy(syncGm[offset], syncLocal, CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
             }
         }
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(syncGmReadyEvent);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(syncGmReadyEvent);
+        pipe.ReleaseEventID<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
+        pipe.ReleaseEventID<AscendC::HardEvent::MTE3_MTE2>(syncGmReadyEvent);
         AscendC::SyncAll<false>();
     }
     if ASCEND_IS_AIC {

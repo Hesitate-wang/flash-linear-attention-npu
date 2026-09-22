@@ -97,6 +97,12 @@
   发布点直接调用 `SignalProducerSliceReady`。
 - 初始 H ready 发布前的外部 `PipeBarrier<PIPE_MTE3>` 也已删除；数据可见性由
   `IBSet/IBWait` 内部搬入、搬出前后的 `PipeBarrier<Pipe_all>` 保证。
+- A2/A5 的启动事件清零由 `Duplicate` 在 `PIPE_V` 生成本地零值，再通过成对的
+  `SetFlag/WaitFlag<HardEvent::V_MTE3>` 交给 UB→GM `DataCopy`；初始化路径不再
+  单独使用 `PipeBarrier<PIPE_V>()`。
+- 所有初始化 `DataCopy` 提交后，再通过 `SetFlag/WaitFlag<HardEvent::MTE3_MTE2>`
+  等待异步 MTE3 写回完成，确保后续 MTE2 上的 `IBSet/IBWait` 不会读取未落盘的
+  共享槽，之后才执行跨核 `SyncAll<false>()`。
 
 ## 环境限制与待补充的设备证据
 

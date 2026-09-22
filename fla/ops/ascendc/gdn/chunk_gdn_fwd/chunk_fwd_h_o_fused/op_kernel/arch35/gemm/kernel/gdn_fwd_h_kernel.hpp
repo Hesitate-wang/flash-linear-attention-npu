@@ -259,9 +259,9 @@ public:
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
         // IBSet waits for a zero slot; the consumer's IBWait clears it after consumption.
-        AscendC::PRINTF("taskIdx %d, taskLane %d, aivIdx %d, eventBase %d\n", taskIdx, taskLane, GetPipelineAivIdx(), eventBase);
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(), eventBase + taskLane);
+        AscendC::PRINTF("taskIdx %d, taskLane %d, aivIdx %d, eventBase %d\n", taskIdx, taskLane, GetPipelineAivIdx(), eventBase);
     }
 
     __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
@@ -273,10 +273,10 @@ public:
             return;
         }
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        AscendC::PRINTF("initalstate: taskIdx %d, taskLane %d, aivIdx %d, eventBase %d\n", taskIdx, taskLane, GetPipelineAivIdx(), GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(),
                               GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+        AscendC::PRINTF("initalstate: taskIdx %d, taskLane %d, aivIdx %d, eventBase %d\n", taskIdx, taskLane, GetPipelineAivIdx(), GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
     }
 
 
@@ -891,8 +891,10 @@ public:
                 }
                 currStage ^= 0x01;
             }
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[0]);
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+            }
             if (useDirectFp32Ub) {
                 for (uint32_t slot = 0; slot < DIRECT_UB_STAGES; ++slot) {
                     AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(DIRECT_UB_FREE_FLAG_BEGIN + slot);
@@ -986,9 +988,6 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                         pingpongFlag = 1 - pingpongFlag;
                     }
-                    // H0 belongs to this batch/head task; publish it as soon as
-                    // all of this AIV's state rows have reached GM.
-                    // AscendC::PRINTF("set initial state signal");
                     SignalInitialStateReady(taskIdx);
                 }
             }
@@ -1004,8 +1003,10 @@ public:
                     AscendC::CrossCoreSetFlag<0x4, PIPE_V>(DIRECT_UB_FREE_FLAG_BEGIN + slot);
                 }
             }
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[0]);
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[1]);
+            const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
+            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
+            }
 
             EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
             EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
