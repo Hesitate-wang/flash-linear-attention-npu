@@ -1073,7 +1073,6 @@ public:
                             waitWsFromMte3, (i == 0), tailVectorPath, useDirectForTask,
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
-                        // AscendC::PRINTF("V_new sync begin");
                         SignalProducerSliceReady(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {

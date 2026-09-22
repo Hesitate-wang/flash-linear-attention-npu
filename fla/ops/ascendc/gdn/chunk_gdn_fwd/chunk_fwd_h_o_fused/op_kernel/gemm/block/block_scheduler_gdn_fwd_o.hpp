@@ -147,8 +147,12 @@ struct BlockSchedulerGdnFwdO {
                 const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
                                                     ? hTaskNum - pipelineHTaskBase
                                                     : 0;
-                initialStageCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
-                                         ? remainingTasks
+                // A stage is consumed by each initial (head, chunk) item.
+                // A single head still reaches stage 1 when it has multiple
+                // chunks, so head count alone is not sufficient here.
+                const uint32_t initialItems = remainingTasks * numChunks;
+                initialStageCount = initialItems < GDN_FWD_O_PING_PONG_STAGES
+                                         ? initialItems
                                          : GDN_FWD_O_PING_PONG_STAGES;
                 isRunning = pipelineHTaskBase < shapeBatch * vNumHead;
             }

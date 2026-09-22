@@ -103,6 +103,9 @@
 - 所有初始化 `DataCopy` 提交后，再通过 `SetFlag/WaitFlag<HardEvent::MTE3_MTE2>`
   等待异步 MTE3 写回完成，确保后续 MTE2 上的 `IBSet/IBWait` 不会读取未落盘的
   共享槽，之后才执行跨核 `SyncAll<false>()`。
+- FwdO chunk-pipeline 的初始 `vec2Done` 预置按有效 `(head, chunk)` 项数裁剪到
+  两个 stage；单 head 多 chunk 场景会预置两个 stage，避免第二个 chunk 在
+  `vec2Done[1]` 上形成等待环。
 
 ## 环境限制与待补充的设备证据
 

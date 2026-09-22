@@ -142,6 +142,11 @@ H 的 stream 0/1 初始任务是 `2p/2p+1`，每个 stream 完成该任务的全
 4. 两个 AIV 都执行每个 `0x2` 聚合握手；任何一个 AIV 提前退出都会使同 MIX core 的 AIC 永久等待。
 5. 每条 bypass/tail 分支也发布与常规路径相同代次的完成 flag，首轮 free flag 与末轮 drain wait 成对存在。
 6. `IBSet/IBWait` 的 32-byte 本地 UB 工作区与同一时刻的 Vector/Fixpipe UB 区域不重叠。
+
+FwdO chunk-pipeline 的初始 `vec2Done` token 数按当前 consumer 的有效
+`(head, chunk)` 项数计算，并限制到两个 ping-pong stage；不能只按有效 head 数计算。
+因此单个 head 在只有一个 chunk 时只预置 stage0，在有多个 chunk 时仍必须预置
+stage0 和 stage1。
 因此，若注释 IB 后超时消失，优先检查的不是 GM 数值内容，而是上述任一不变量是否在运行时被破坏，尤其是 task/chunk 映射、某个 AIV 分支跳过发布、同步 workspace 越界或初始化 barrier 参与者不一致。`PRINTF` 会改变发射和流水时序，只能暴露或掩盖时序问题，不能作为同步正确性的组成部分。
 
 ### 2.6 IB 通信专用 UB 区域
