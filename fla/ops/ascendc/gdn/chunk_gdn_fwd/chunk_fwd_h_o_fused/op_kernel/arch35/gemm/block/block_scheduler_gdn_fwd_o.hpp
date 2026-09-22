@@ -83,6 +83,7 @@ struct BlockSchedulerGdnFwdO {
     uint32_t pipelineHTaskBase{0};
     uint32_t pipelineChunkIdx{0};
     uint32_t pipelineTaskStride{0};
+    uint32_t pipelineStageCount{GDN_FWD_O_PING_PONG_STAGES};
 
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmChunkOffsets;
@@ -141,6 +142,20 @@ struct BlockSchedulerGdnFwdO {
                 pipelineHTaskBase = consumerIdx * GDN_FWD_O_PING_PONG_STAGES;
                 pipelineTaskStride = producerCoreNum * GDN_FWD_O_PING_PONG_STAGES;
                 workspaceCoreIdx = consumerIdx;
+                const uint32_t hTaskNum = shapeBatch * vNumHead;
+                const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
+                                                    ? hTaskNum - pipelineHTaskBase
+                                                    : 0;
+                // A producer core owns at most two task lanes. The final core
+                // may own only lane 0; keep that core on one physical buffer
+                // instead of advancing to an unpaired ping-pong stage.
+                pipelineStageCount = remainingTasks >= GDN_FWD_O_PING_PONG_STAGES
+                                         ? GDN_FWD_O_PING_PONG_STAGES
+                                         : remainingTasks;
+                if (pipelineStageCount == 0) {
+                    pipelineStageCount = 1;
+                }
+                currStage = static_cast<int32_t>(pipelineStageCount - 1);
                 isRunning = pipelineHTaskBase < shapeBatch * vNumHead;
             }
         } else if (taskAffinity) {
@@ -206,6 +221,11 @@ struct BlockSchedulerGdnFwdO {
     }
 
     CATLASS_DEVICE
+    uint32_t GetStageCount() const {
+        return chunkPipeline ? pipelineStageCount : GDN_FWD_O_PING_PONG_STAGES;
+    }
+
+    CATLASS_DEVICE
     void InitTask() {
         uint32_t curTaskIdx;
         if (chunkPipeline) {
@@ -221,7 +241,7 @@ struct BlockSchedulerGdnFwdO {
             }
             if (unlikely(pipelineHTaskBase >= hTaskNum)) {
                 isRunning = false;
-                currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
+                currStage = (currStage + 1) % GetStageCount();
                 return;
             }
             const uint32_t hTaskIdx = pipelineHTaskBase + pipelineLaneIdx;
@@ -230,7 +250,7 @@ struct BlockSchedulerGdnFwdO {
             curTaskIdx = pipelineBatchIdx * numChunks * vNumHead +
                          pipelineChunkIdx * vNumHead + pipelineHeadIdx;
             pipelineLaneIdx += 1;
-            if (pipelineLaneIdx == GDN_FWD_O_PING_PONG_STAGES) {
+            if (pipelineLaneIdx == pipelineStageCount) {
                 pipelineLaneIdx = 0;
                 pipelineChunkIdx += 1;
                 if (pipelineChunkIdx == numChunks) {
@@ -242,7 +262,7 @@ struct BlockSchedulerGdnFwdO {
             taskIdx = FindNextOwnedDenseTask(taskIdx);
             if (unlikely(taskIdx >= taskNum)) {
                 isRunning = false;
-                currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
+                currStage = (currStage + 1) % GetStageCount();
                 return;
             }
             curTaskIdx = taskIdx++;
@@ -257,7 +277,7 @@ struct BlockSchedulerGdnFwdO {
             if (unlikely(curTaskIdx >= taskNum)) {
                 isRunning = false;
                 processNewTask = true;
-                currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
+                currStage = (currStage + 1) % GetStageCount();
                 return;
             }
         }
@@ -306,17 +326,19 @@ struct BlockSchedulerGdnFwdO {
             }
         }
 
-        currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
+        currStage = (currStage + 1) % GetStageCount();
     }
 
     CATLASS_DEVICE
     uint32_t GetCurStageId() const {
-        return (currStage + GDN_FWD_O_PING_PONG_STAGES - 1) % GDN_FWD_O_PING_PONG_STAGES;
+        const uint32_t stageCount = GetStageCount();
+        return (currStage + stageCount - 1) % stageCount;
     }
 
     CATLASS_DEVICE
     uint32_t GetPrevStageId() const {
-        return (currStage + GDN_FWD_O_PING_PONG_STAGES - 2) % GDN_FWD_O_PING_PONG_STAGES;
+        const uint32_t stageCount = GetStageCount();
+        return (currStage + stageCount - 2) % stageCount;
     }
 
 

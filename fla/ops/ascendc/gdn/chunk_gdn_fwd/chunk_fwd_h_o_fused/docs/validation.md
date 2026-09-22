@@ -77,6 +77,16 @@
 - 相对 include 静态扫描通过；移动后的 A5 constants/tiling 头均从 `arch35/`
   解析，根目录不存在旧的 A5 constants 文件。
 
+## 奇数 task 的半满 ping-pong 修复
+
+- 当 `taskNum=B*vNumHead` 为奇数时，host 仍按 `ceil(taskNum/2)` 分配 producer/
+  consumer core；最后一个 core 只拥有 lane0。
+- A5 O scheduler 现在按每个 consumer core 计算 `pipelineStageCount`：满 core
+  使用 2 个 stage，半满 core 使用 1 个 stage。半满 core 的后续 chunk 固定复用
+  stage0，避免 H 侧 stream0 与 O 侧 stage1 使用不同 workspace/完成 flag。
+- 已对 `taskNum=1`、`taskNum=3` 的静态调度关系进行检查；设备运行验证仍需在
+  Ascend 950 上执行，确认 `B=1, vHead=1/3` 与多 chunk 场景不再超时。
+
 ## A5 IB 通信 UB 隔离修复
 
 - A5 UB 尾部 `[248 KiB, 256 KiB)` 已声明为 IB 通信专用区；`IBSet/IBWait`
