@@ -66,6 +66,27 @@
   object 查找落到不存在的 default key；各路径所需 workspace 区域互不重叠。
 - `git diff --check` 已通过，仅存在行尾转换警告。
 
+## A5 IB 通信 UB 隔离修复
+
+- A5 UB 尾部 `[248 KiB, 256 KiB)` 已声明为 IB 通信专用区；`IBSet/IBWait`
+  的 32-byte local tensor 固定使用 `248 KiB`，不再使用会落入 O H-pong
+  Fixpipe 槽的 `188 KiB`。
+- H/O kernel 共用同一布局常量；QK-mask 和 output epilogue 的编译期上界检查
+  已改为通信区起点，数据 tensor 若越过 `248 KiB` 将编译失败。
+- 静态检查确认通信区按 32 bytes 对齐，终点为 `256 KiB`，IB local tensor
+  终点为 `248 KiB + 32 bytes`；arch35 下不再存在旧的
+  `HO_PIPELINE_SYNC_UB_OFFSET` 或 `188 * 1024`。
+- `git diff --check` 通过。当前环境没有 CANN/NPU，尚未完成设备编译和运行验证；
+  上板时需关闭调试 `PRINTF`，覆盖多 chunk、V=128/256 的重复压力测试并确认
+  不再出现 IB 等待超时。
+
+## IB 发布屏障精简
+
+- A2/A5 的 `SignalProducerSliceReadyAfterMte3` 包装函数已删除，四个 V/H ready
+  发布点直接调用 `SignalProducerSliceReady`。
+- 初始 H ready 发布前的外部 `PipeBarrier<PIPE_MTE3>` 也已删除；数据可见性由
+  `IBSet/IBWait` 内部搬入、搬出前后的 `PipeBarrier<Pipe_all>` 保证。
+
 ## 环境限制与待补充的设备证据
 
 当前 Windows 工作区没有已配置的 CANN 环境、NPU 设备或可用的 Python 运行

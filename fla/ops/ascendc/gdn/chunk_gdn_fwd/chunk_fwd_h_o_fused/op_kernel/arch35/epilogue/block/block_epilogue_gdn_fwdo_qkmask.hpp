@@ -16,6 +16,7 @@
 #include "catlass/gemm_coord.hpp"
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
+#include "../../chunk_fwd_h_o_fused_ub_layout.h"
 
 // regbase.hpp 自身无 include guard，本算子 kernel 会同时包含 qkmask 与 output 两个
 // epilogue 头，此处用算子私有宏防止同一编译单元内重复包含（重定义 constexpr/inline 符号）
@@ -261,7 +262,9 @@ public:
         constexpr uint32_t A_UB_TENSOR_OFFSET = UB_SLOT_REGION_END;
         constexpr uint32_t OUT_UB_TENSOR_OFFSET = A_UB_TENSOR_OFFSET + FLOAT_UB_TENSOR_SIZE;
         constexpr uint32_t OUT_HALF_UB_TENSOR_OFFSET = OUT_UB_TENSOR_OFFSET + FLOAT_UB_TENSOR_SIZE;
-        static_assert(OUT_HALF_UB_TENSOR_OFFSET + HALF_UB_TENSOR_SIZE <= 248 * 1024, "UB overflow");
+        static_assert(OUT_HALF_UB_TENSOR_OFFSET + HALF_UB_TENSOR_SIZE <=
+                          GDN::CHUNK_FWD_HO_A5_COMM_UB_OFFSET,
+                      "QK-mask UB overlaps the reserved IB communication region");
 
         gUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(G_UB_TENSOR_OFFSET);
         gUbFPTensorPing = resource.ubBuf.template GetBufferByByte<GElementInput>(G_HALF_UB_TENSOR_OFFSET);

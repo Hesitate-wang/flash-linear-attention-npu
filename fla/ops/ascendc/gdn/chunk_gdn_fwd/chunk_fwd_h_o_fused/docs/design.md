@@ -13,7 +13,7 @@
 
 入口先按编译目标选择 A2 或 A5 架构实现，再通过 key 1/2 选择 V128/V256 的已注册 kernel object；key 不表示 exp/exp2。`useExp2` 只在已选定的架构实现内部选择指数模式，A5 在 `useExp2=false` 时仍使用 `arch35` FwdO；dtype、layout 和 head 维度同样在 object 内继续选择模板路径。
 
-## 2. 执行流程
+## 2. 执行流程与同步
 
 H 阶段先计算 `h` 与 `v_new`，O 阶段消费它们：
 
@@ -23,11 +23,140 @@ h_after = h_before * gate_end + k^T @ (v_new * gate_delta)
 o = scale * (q @ h_before + masked(q @ k^T) @ v_new)
 ```
 
-`GetMixedCoreIdx() < producerCoreNum` 时只运行 H，否则只运行 O。A2 与 A5 都不得采用“全核 H、全局同步、全核 O”的顺序执行模型。
+`GetMixedCoreIdx() < producerCoreNum` 时只运行 H，否则只运行 O。A2 与 A5 都不得采用“全核 H、全局同步、全核 O”的顺序执行模型。下文的核内流水细节描述当前 A5 自然指数实现，即 `arch35/gemm/kernel/gdn_fwd_h_kernel.hpp` 与 `gdn_fwd_o_kernel.hpp`；A2 使用相同的 H/O 配对和 IB handoff 协议，但其核内实现以 A2 对应 kernel 为准。
 
-H producer `p in [0,R)` 负责 `2p` 和可选的 `2p+1` 两个 `(batch, value-head)` 任务，写入按完整任务索引编址的 `handoffH`、`handoffV` 和可选 `final_state`。每个 producer AIV 使用 4 个 ready event：`HReady[0..1]` 和 `VReady[0..1]` 分别隔离两个 task lane。首 chunk 的 `HReady` 在初始状态写完后发布；后续 chunk 的 `HReady` 在前一 chunk 的 Vec2 写完 `h_after` 后发布；`VReady` 在当前 chunk 的 Vec1 写完 `v_new` 后发布。同一 task 的所有 chunk 分别复用同一个 H/V ready slot；`IBSet` 仅在对应 GM event slot 为 0 时将其置 1，因此 H 发布下一代同类事件前会自然等待 O 消费前一代事件。
+### 2.1 同步域
 
-O consumer `R+p` 消费 producer `p` 发布的同一任务序列。`QK` 不依赖 H 阶段；O AIV 在 `QK` 完成且 `HReady` 到达后反向放行 O AIC，使 `masked(QK)` 与 `Q * gate @ h_before` 并行推进。只有 `masked(QK) @ v_new` 需要继续等待 `VReady`。每次 `IBWait` 消费事件后将对应 GM slot 清零，从而直接向下一次 `IBSet` 归还该 slot，不需要额外的 O 到 H ACK。handoff 数据按任务/chunk 独立编址，不依赖 event slot 保护数据覆盖。A2 按 wave 顺序消费每个任务的全部 chunk；A5 自然指数路径按两个 stream 的同序 chunk 交错消费，以匹配各自 H scheduler 的发布次序。固定长度自然指数场景下 H/O 阶段边界不允许插入 `SyncAll`。
+当前实现存在三个彼此独立的同步域：
+
+| 同步域 | 原语 | 作用范围 | 保护对象 |
+| --- | --- | --- | --- |
+| AIV 流水线内部 | `SetFlag/WaitFlag`、`PipeBarrier` | 单个 AIV 内的 MTE2/V/MTE3 队列 | UB ping-pong 槽和同一 AIV 内的数据可见性 |
+| 同一 MIX core 的 AIC/AIV 协作 | `CrossCoreSetFlag/CrossCoreWaitFlag` | 一个 MIX core 内的 AIC 与两个 AIV | Cube/Vector 中间结果和 ping-pong workspace 复用 |
+| H producer 到 O consumer | `IBSet/IBWait` | 两个不同 MIX core 的对应 AIV | GM 中的 `H`、`V_new` handoff 就绪状态 |
+
+前两类 flag 是每个 MIX core 自己的局部协议，不会在 H core 与 O core 之间传递。IB event 才是 H/O 物理 core 之间的同步；不能用核内 `cube*Done/vec*Done` 推断另一个 MIX core 的状态。
+
+### 2.2 H 核内同步
+
+H 的两个 stream 分别使用 flag `0/1`、`2/3`、`4/5`、`6/7`：
+
+| flag | 发布方 | 等待方 | 含义 |
+| --- | --- | --- | --- |
+| `cube1Done[s]` | AIC Cube1 | 两个 AIV Vec1 | `W @ H` 的 workspace 已可读；短尾块由 AIC 直接从 MTE2 发布 |
+| `vec1Done[s]` | 两个 AIV Vec1 | AIC Cube2 | `VUpdate`（以及 gated K workspace）已可读 |
+| `cube2Done[s]` | AIC Cube2 | 两个 AIV Vec2 | `K^T @ VUpdate` 的 H workspace 已可读；无需 Cube2 的分支也必须发布匹配代次 |
+| `vec2Done[s]` | 两个 AIV Vec2 | AIC 下一次 Cube1 | 当前 stream 的 H/V/H-workspace 已消费完，可以复用 |
+
+每个 stream 的稳态闭环为：
+
+```text
+初始 H0 写回
+    -> IBSet HReady[lane]
+
+AIV 预置 vec2Done[s]
+    -> AIC wait vec2Done[s]
+    -> Cube1: W @ H
+    -> AIC set cube1Done[s]
+    -> AIV wait cube1Done[s], 生成并写回 V_new/VUpdate
+    -> AIV set vec1Done[s]
+    -> IBSet VReady[lane]
+    -> AIC wait vec1Done[s]
+    -> Cube2: K^T @ VUpdate
+    -> AIC set cube2Done[s]
+    -> AIV wait cube2Done[s], 更新并写回 H_after
+    -> 非 final chunk: IBSet HReady[lane]
+    -> AIV set vec2Done[s]
+```
+
+首轮若没有 AIV 对 `vec2Done[0..1]` 的预置，AIC 会在第一次 Cube1 前永久等待。结束时 AIC 再等待两个 `vec2Done`，保证最后一代 Vec2 已消费 workspace。短尾块虽然可能绕过 MMAD，仍会走同代次的 `cube1Done/cube2Done` 发布，避免另一侧等待一个不存在的 Cube 任务。
+
+`useDirectFp32Ub` 路径另有 `0x4` 域的 free/ready flag，负责 AIC 与 AIV 直接共享 UB 槽；它不替代上述 `0x2` 完成链。AIV 内部 epilogue 还使用 MTE2/V/MTE3 hard event 管理 UB ping-pong 槽，入口预置 free event，退出逐一 `WaitFlag` 回收，保证没有悬空的本地事件。
+
+### 2.3 O 核内同步
+
+O 的两个 stream 使用相同的编号空间，但语义不同：
+
+| flag | 方向 | 含义 |
+| --- | --- | --- |
+| `cube1Done[s]` | AIC→AIV，随后 AIV→AIC | 第一代表示 `Q @ K^T` workspace 可读；同一 flag 的下一代是两个 AIV 在收到 `HReady` 后给 AIC 的 ACK |
+| `vec1Done[s]` | AIV→AIC | masked QK 已写入 workspace，且 `VReady` 已消费，Cube3 的两个输入均可用 |
+| `cube3Done[s]` | AIC→AIV | `masked(QK) @ V_new` workspace 可读 |
+| `vec2Done[s]` | AIV→AIC | 输出 epilogue 已完成对 H/V workspace 的最终读取，AIC 可以复用该 ping-pong 槽 |
+
+当前代码的单个 stream 顺序为：
+
+```text
+AIV 预置 vec2Done[s]
+
+AIC: Cube1(Q @ K^T) -> set cube1Done[s]
+AIV: wait cube1Done[s]
+     -> IBWait HReady[lane]
+     -> set cube1Done[s]                 # 反向 ACK
+     -> 计算 masked(QK)
+     -> IBWait VReady[lane]
+     -> set vec1Done[s]
+
+AIC: wait cube1Done[s]                   # 等待 HReady ACK
+     -> Cube2(Q @ H_before)
+     -> wait vec2Done[s]                 # 复用 H/V workspace 前
+     -> wait vec1Done[s]
+     -> Cube3(masked(QK) @ V_new)
+     -> set cube3Done[s]
+
+AIV: wait cube3Done[s]
+     -> 融合 Cube2/Cube3 结果并写 O
+     -> set vec2Done[s]
+```
+
+`cube1Done[s]` 是双向、分代复用的握手：AIC 发出第 `2n` 代，两个 AIV 各自等待后发出第 `2n+1` 代 ACK，AIC 必须消费 ACK 后才允许同一 stream 再发下一代 Cube1 完成事件。两个 ping-pong stream 使当前 Cube1 与上一任务的 Cube2/Cube3 重叠，但不能改变同一 stream 的代次顺序。
+
+`QK` 和 `masked(QK)` 在数学上都不依赖 H。当前代码仍按“wait Cube1 → wait HReady → ACK → masked(QK)”执行，因此 `HReady` 会阻塞 mask 计算；这里的 `HReady` 实际用于门控 AIC 的 `Q @ H_before`，不是 mask 的数据依赖。若后续把 `IBWait(HReady)` 下移以扩大并行度，必须同时保留 AIV→AIC 的 ACK，并证明 `cube1Done` 双向代次没有被重排。
+
+### 2.4 H 到 O 的 IB handoff
+
+H producer `p in [0,R)` 负责 `2p` 和可选的 `2p+1` 两个 `(batch, value-head)` 任务，O consumer `R+p` 按完全相同的 task/chunk 顺序消费。每个 producer AIV 使用 4 个 event：
+
+| event id | 事件 | H 发布时机 | O 等待后允许的操作 |
+| --- | --- | --- | --- |
+| `0 + lane` | `HReady[lane]` | chunk 0 的 H0 写回 GM 后，或 chunk `i-1` 的 Vec2 写回 `H_i` 后 | AIC 启动当前 chunk 的 `Q @ H_i` |
+| `2 + lane` | `VReady[lane]` | 当前 chunk 的 Vec1 写回 `V_new_i` 后 | AIC 启动当前 chunk 的 `masked(QK) @ V_new_i` |
+
+`lane = taskIdx % 2`。O 根据完整任务索引反推出 `producerCoreIdx=(taskIdx % (2R))/2`，再用相同的 `subBlockIdx` 得到 `producerAivIdx=producerCoreIdx*subBlockNum+subBlockIdx`。因此两个 O AIV 分别等待两个 H AIV 发布的对应 H/V 切片，不会互相代替。
+
+IB 槽按 `[eventId][logicalAivIdx][8 x int32]` 编址，其中 `logicalAivNum=activeCoreNum*subBlockNum`。kernel 分流前，所有活动 AIV 分工把全部 event 槽显式写零，随后 AIC/AIV 都执行一次 `SyncAll<false>()`，确认初始化完成后才进入 H 或 O。该初始化清零的是 GM event table；传给 `IBSet/IBWait` 的 32-byte UB tensor 是 API 的本地工作区，不是跨 core 共享状态。
+
+`IBSet/IBWait` 内部在数据搬入和搬出前后执行 `PipeBarrier<Pipe_all>`，因此 H 直接在对应 GM 写回操作后调用 `IBSet`，不再额外插入 `PipeBarrier<PIPE_MTE3>()`。O 的 `IBWait` 消费 ready 并归还同一个二值槽；同一 task 的后续 chunk 复用该槽，所以 H 若过早追上 O，会阻塞在下一次 `IBSet`，而不是覆盖一个未消费的 ready。handoff 数据本身按任务/chunk 独立编址，event 槽只表达就绪和背压。
+
+### 2.5 调度匹配与无死锁条件
+
+H 的 stream 0/1 初始任务是 `2p/2p+1`，每个 stream 完成该任务的全部 chunk 后再前进 `2R`。O 的次序是同一任务对的 `lane0 chunk0、lane1 chunk0、lane0 chunk1、lane1 chunk1...`，完成全部 chunk 后同样前进 `2R`。这保证同一 producer 的 IB 发布顺序与 consumer 等待顺序一致；最后一个奇数任务不存在时，两侧都会跳过 lane1。
+
+在下列不变量成立时，当前静态同步图不存在必然环路：
+
+1. `activeCoreNum=2R`，producer/consumer 一一配对，H/O scheduler 使用相同的 `R`、task lane 和 chunk 数。
+2. 所有 GM IB event 在第一次 `IBSet/IBWait` 前已清零，且 `pipelineSyncWorkspaceOffset`、event 数和实际分配大小一致。
+3. H 的每个有效 `HReady/VReady` 恰好有一个对应 O `IBWait`；无效 lane 和 final chunk 不额外等待不存在的事件。
+4. 两个 AIV 都执行每个 `0x2` 聚合握手；任何一个 AIV 提前退出都会使同 MIX core 的 AIC 永久等待。
+5. 每条 bypass/tail 分支也发布与常规路径相同代次的完成 flag，首轮 free flag 与末轮 drain wait 成对存在。
+6. `IBSet/IBWait` 的 32-byte 本地 UB 工作区与同一时刻的 Vector/Fixpipe UB 区域不重叠。
+
+因此，若注释 IB 后超时消失，优先检查的不是 GM 数值内容，而是上述任一不变量是否在运行时被破坏，尤其是 task/chunk 映射、某个 AIV 分支跳过发布、同步 workspace 越界或初始化 barrier 参与者不一致。`PRINTF` 会改变发射和流水时序，只能暴露或掩盖时序问题，不能作为同步正确性的组成部分。
+
+### 2.6 IB 通信专用 UB 区域
+
+A5 H/O kernel 统一使用 `chunk_fwd_h_o_fused_ub_layout.h` 声明 UB 布局。O 的数据区和 IB 通信区划分为：
+
+```text
+[0 KiB,   71 KiB)  base region
+[71 KiB, 199 KiB)  Cube Fixpipe work slots
+[199 KiB,248 KiB)  Vec scratch
+[248 KiB,256 KiB)  IB communication reserved region
+```
+
+`IBSet/IBWait` 的 32-byte local tensor 固定放在通信区起始地址 `248 KiB`。该区域不参与 Cube、Fixpipe 或 Vector 数据复用，因此 L0C 到 UB 的写入不会覆盖 IB 指令的本地操作数。H 与 O 使用同一常量，避免两侧各自维护裸偏移。
+
+共享布局对通信区的 32-byte 对齐、32-byte IB operand 容量和 256 KiB UB 总容量执行编译期检查；两个 O epilogue 也以通信区起点作为数据区硬上界。后续扩展任何 O UB tensor 时，若侵入 `[248 KiB, 256 KiB)` 将直接编译失败。A2 使用独立的 192 KiB UB 布局，继续保留其现有同步偏移，不复用该 A5 常量。
 
 当前 arch35 exp2 专用 O 的底层 cube/vector 类尚未暴露 handoff 的 IBWait 接口，因此实现阶段暂时在 exp2 分支保留 H/O 边界同步作为兼容保护；该分支在补齐专用 O 的 IBWait 后必须删除该同步，恢复与自然指数路径相同的 chunk pipeline。
 

@@ -205,23 +205,12 @@ public:
                               GetPipelineAivIdx(), eventBase + taskLane);
     }
 
-    __aicore__ inline void SignalProducerSliceReadyAfterMte3(
-        const GDNFwdHOffsets &offsets, uint32_t eventBase)
-    {
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        AscendC::PipeBarrier<PIPE_MTE3>();
-        SignalProducerSliceReady(offsets, eventBase);
-    }
-
     __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
     {
         if (!chunkPipelineEnabled) {
             return;
         }
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        AscendC::PipeBarrier<PIPE_MTE3>();
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(),
                               GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
@@ -781,7 +770,7 @@ public:
                         );
                         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-                        SignalProducerSliceReadyAfterMte3(
+                        SignalProducerSliceReady(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
@@ -826,7 +815,7 @@ public:
                         }
                         if (!vec2Offsets.isFinalState) {
                             // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
-                            SignalProducerSliceReadyAfterMte3(
+                            SignalProducerSliceReady(
                                 vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);

@@ -31,6 +31,7 @@
 #include "kernel_operator.h"
 #include "../../../chunk_fwd_h_o_fused_struct.h"
 #include "../../../chunk_fwd_o_struct.h"
+#include "../../chunk_fwd_h_o_fused_ub_layout.h"
 using namespace Catlass;
 using namespace tla;
 
@@ -47,9 +48,6 @@ template<
 >
 class GDNFwdOKernel {
 public:
-
-    static constexpr uint32_t HO_PIPELINE_SYNC_UB_OFFSET = 188 * 1024;
-
     using ArchTag = Arch::Ascend950;
     using GDNFwdOOffsets = Catlass::Gemm::Block::GDNFwdOOffsets;
 
@@ -176,7 +174,7 @@ public:
 
     __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
     {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(HO_PIPELINE_SYNC_UB_OFFSET);
+        return resource.ubBuf.template GetBufferByByte<int32_t>(GDN::CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
     }
 
     __aicore__ inline void WaitProducerSliceReady(
@@ -186,9 +184,7 @@ public:
             return;
         }
         const uint32_t producerPairIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t producerCoreIdx =
-            (producerPairIdx % (producerCoreNum * GDN_FWD_O_PING_PONG_STAGES)) /
-            GDN_FWD_O_PING_PONG_STAGES;
+        const uint32_t producerCoreIdx = producerPairIdx / GDN_FWD_O_PING_PONG_STAGES;
         // IBSet/IBWait are SIMD-side APIs. In MIX mode their block index space
         // contains the two logical AIVs of every mixed core, so each consumer
         // AIV waits for the matching producer AIV slice.
@@ -478,7 +474,7 @@ public:
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
-                    ASCEND::PRINTF("wait pre chunk signal for h_new");
+                    AscendC::PRINTF("wait pre chunk signal for h_new");
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                     // H is visible before this acknowledgement, so Cube2 can
@@ -500,7 +496,7 @@ public:
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
-                    ASCEND::PRINTF("wait v_new ready");
+                    AscendC::PRINTF("wait v_new ready");
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done[streamId]);

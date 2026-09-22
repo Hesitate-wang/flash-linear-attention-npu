@@ -28,6 +28,7 @@
 #include "catlass/layout/layout.hpp"
 #include "catlass/gemm_coord.hpp"
 #include "tla/tensor.hpp"
+#include "../../chunk_fwd_h_o_fused_ub_layout.h"
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
 
@@ -88,9 +89,6 @@ template<
 >
 class GDNFwdHKernel {
 public:
-
-    static constexpr uint32_t HO_PIPELINE_SYNC_UB_OFFSET = 188 * 1024;
-
     using ArchTag = Arch::Ascend950;
     using CubeScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHCube;
     using VecScheduler = typename Catlass::Gemm::Block::BlockSchedulerGdnFwdHVec;
@@ -237,7 +235,7 @@ public:
 
     __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
     {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(HO_PIPELINE_SYNC_UB_OFFSET);
+        return resource.ubBuf.template GetBufferByByte<int32_t>(GDN::CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
     }
 
     __aicore__ inline uint32_t GetPipelineAivIdx() const
@@ -261,19 +259,6 @@ public:
                               GetPipelineAivIdx(), eventBase + taskLane);
     }
 
-    __aicore__ inline void SignalProducerSliceReadyAfterMte3(
-        const GDNFwdHOffsets &offsets, uint32_t eventBase)
-    {
-        if constexpr (!kSignalProducerReady) {
-            return;
-        }
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        AscendC::PipeBarrier<PIPE_MTE3>();
-        SignalProducerSliceReady(offsets, eventBase);
-    }
-
     __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
     {
         if constexpr (!kSignalProducerReady) {
@@ -283,7 +268,6 @@ public:
             return;
         }
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        AscendC::PipeBarrier<PIPE_MTE3>();
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(),
                               GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
@@ -998,7 +982,7 @@ public:
                     }
                     // H0 belongs to this batch/head task; publish it as soon as
                     // all of this AIV's state rows have reached GM.
-                    ASCEND::PRINTF("set initial state signal");
+                    // AscendC::PRINTF("set initial state signal");
                     SignalInitialStateReady(taskIdx);
                 }
             }
@@ -1082,8 +1066,8 @@ public:
                             waitWsFromMte3, (i == 0), tailVectorPath, useDirectForTask,
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
-                        ASCEND::PRINTF("V_new sync begin");
-                        SignalProducerSliceReadyAfterMte3(
+                        // AscendC::PRINTF("V_new sync begin");
+                        SignalProducerSliceReady(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
@@ -1134,8 +1118,8 @@ public:
                         }
                         if (!vec2Offsets.isFinalState) {
                             // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
-                            ASCEND::PRINTF("h generated for next chunk");
-                            SignalProducerSliceReadyAfterMte3(
+                            // AscendC::PRINTF("h generated for next chunk");
+                            SignalProducerSliceReady(
                                 vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
