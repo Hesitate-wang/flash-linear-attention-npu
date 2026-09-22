@@ -259,6 +259,7 @@ public:
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
         // IBSet waits for a zero slot; the consumer's IBWait clears it after consumption.
+        AscendC::PRINTF("taskIdx %d, taskLane %d, aivIdx %d, eventBase %d\n", taskIdx, taskLane, GetPipelineAivIdx(), eventBase);
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(), eventBase + taskLane);
     }
@@ -272,6 +273,7 @@ public:
             return;
         }
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        AscendC::PRINTF("initalstate: taskIdx %d, taskLane %d, aivIdx %d, eventBase %d\n", taskIdx, taskLane, GetPipelineAivIdx(), GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(),
                               GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);

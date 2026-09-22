@@ -196,6 +196,7 @@ public:
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane =
             producerPairIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        AscendC::PRINTF("producerCoreIdx %d, taskLane %d, producerAivIdx %d, eventBase %d\n", producerCoreIdx, taskLane, producerAivIdx, eventBase);
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
                                producerAivIdx, eventBase + taskLane);
     }
