@@ -19,7 +19,6 @@
 #include "catlass/gemm/tile/tile_mmad.hpp"
 #include "catlass/layout/layout.hpp"
 #include "kernel_utils/tile/copy_l0c_to_ub.hpp"
-#include "../chunk_fwd_o_struct.h"
 #include "chunk_fwd_o_common.h"
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"

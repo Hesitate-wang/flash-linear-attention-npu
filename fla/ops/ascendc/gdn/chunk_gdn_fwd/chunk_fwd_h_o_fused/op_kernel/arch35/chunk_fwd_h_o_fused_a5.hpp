@@ -5,8 +5,13 @@
 #ifndef CHUNK_FWD_H_O_FUSED_ARCH35_A5_HPP
 #define CHUNK_FWD_H_O_FUSED_ARCH35_A5_HPP
 
+#if !defined(CHUNK_FWD_HO_ARCH35) || defined(CHUNK_FWD_HO_ARCH_A2)
+#error "chunk_fwd_h_o_fused_a5.hpp requires CHUNK_FWD_HO_ARCH35"
+#endif
+
 #include "../chunk_gated_delta_rule_fwd_h_struct.h"
 #include "../chunk_fwd_o_struct.h"
+#include "chunk_fwd_o_a5_struct.h"
 
 using ChunkGatedDeltaRuleFwdHTilingData = ChunkFwdHOFusedHStageTilingData;
 

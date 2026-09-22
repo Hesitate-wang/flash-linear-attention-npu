@@ -6,6 +6,10 @@
 #ifndef CHUNK_FWD_H_O_FUSED_A2_HPP
 #define CHUNK_FWD_H_O_FUSED_A2_HPP
 
+#if !defined(CHUNK_FWD_HO_ARCH_A2) || defined(CHUNK_FWD_HO_ARCH35)
+#error "chunk_fwd_h_o_fused_a2.hpp requires CHUNK_FWD_HO_ARCH_A2"
+#endif
+
 #include "chunk_fwd_h_o_fused_struct.h"
 #include "kernel_operator.h"
 #include "chunk_gated_delta_rule_fwd_h_struct.h"

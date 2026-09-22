@@ -7,6 +7,10 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
+#if !defined(CHUNK_FWD_HO_ARCH_A2) || defined(CHUNK_FWD_HO_ARCH35)
+#error "A2 GDN FwdH kernel compiled for the wrong architecture"
+#endif
+
 #define CATLASS_ARCH 2201
 
 #include "catlass/arch/arch.hpp"

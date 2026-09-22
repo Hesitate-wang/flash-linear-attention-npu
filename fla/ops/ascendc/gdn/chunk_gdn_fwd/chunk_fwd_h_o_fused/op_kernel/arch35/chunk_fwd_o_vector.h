@@ -10,7 +10,6 @@
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
 #include "kernel_utils/vector/regbase.hpp"
-#include "../chunk_fwd_o_struct.h"
 #include "chunk_fwd_o_common.h"
 
 namespace GDN {

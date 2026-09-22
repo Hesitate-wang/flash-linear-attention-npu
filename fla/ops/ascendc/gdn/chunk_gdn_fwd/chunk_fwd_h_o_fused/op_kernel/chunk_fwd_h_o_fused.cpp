@@ -4,12 +4,15 @@
  */
 
 #include "chunk_fwd_h_o_fused_struct.h"
+#include "chunk_fwd_h_o_fused_arch.h"
 #include "kernel_operator.h"
 
-#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#if defined(CHUNK_FWD_HO_ARCH35)
 #include "arch35/chunk_fwd_h_o_fused_a5.hpp"
-#else
+#elif defined(CHUNK_FWD_HO_ARCH_A2)
 #include "chunk_fwd_h_o_fused_a2.hpp"
+#else
+#error "Unsupported ChunkFwdHOFused architecture"
 #endif
 
 #include "lib/matmul_intf.h"

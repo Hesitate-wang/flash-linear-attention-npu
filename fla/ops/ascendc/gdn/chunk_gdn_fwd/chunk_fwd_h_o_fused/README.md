@@ -31,8 +31,9 @@ chunk_fwd_h_o_fused/
 |-- op_host/
 |   `-- op_api/            # OpDef, tiling, L0, and aclnn implementation
 |-- op_kernel/
-|   |-- epilogue/          # operator-local H/O epilogues
-|   `-- gemm/              # operator-local H/O schedulers and kernels
+|   |-- arch35/            # all Ascend 950-only kernels, constants and layouts
+|   |-- epilogue/          # A2 operator-local H/O epilogues
+|   `-- gemm/              # A2 operator-local H/O schedulers and kernels
 `-- tests/
     `-- pta/               # CPU reference and PTA comparison cases
 ```

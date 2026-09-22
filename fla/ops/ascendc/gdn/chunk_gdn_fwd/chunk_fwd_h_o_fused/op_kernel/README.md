@@ -1,12 +1,12 @@
 # Kernel implementation
 
-The fused entry is `chunk_fwd_h_o_fused.cpp`. It contains one tiling-key
-dispatch path and selects either `chunk_fwd_h_o_fused_a2.hpp` or
-`arch35/chunk_fwd_h_o_fused_a5.hpp` at compile time. The selected kernel
-headers define `CATLASS_ARCH` as 2201 or 3510, so one source file builds the
-matching architecture implementation. Supporting H/O kernels, schedulers and
-epilogues are operator-local copies adapted to the fused producer/consumer
-schedule; they do not include sibling operator or private `internal` paths.
+The fused entry is `chunk_fwd_h_o_fused.cpp`. Its architecture header defines
+exactly one of `CHUNK_FWD_HO_ARCH_A2` and `CHUNK_FWD_HO_ARCH35`. The dispatcher
+then includes only `chunk_fwd_h_o_fused_a2.hpp` or
+`arch35/chunk_fwd_h_o_fused_a5.hpp`. Architecture entry and kernel headers
+reject the wrong macro at preprocessing time. A5-only kernels, tiling
+projections, constants and UB layout live under `arch35/`; root-level kernel
+files are common or A2 implementations.
 
 The fixed-length pipeline uses equal numbers of double-buffered H producers
 and paired O consumers, with `activeCoreNum == 2 * producerCoreNum`, full-task handoff
@@ -15,11 +15,10 @@ ready events provide `HReady` and `VReady` for each of the two task lanes. All
 chunks of one task lane reuse the corresponding H/V slots: `IBSet` waits until
 its GM event slot is zero before setting it to one, and the matching `IBWait`
 clears the slot after consumption, so slot reuse needs no separate O-to-H ACK.
-Before publishing a generated `VReady` or next-chunk `HReady`, each producer
-AIV drains its MTE3 pipeline so the corresponding GM slice is visible to the
-consumer. The initial `HReady` is published after the separate H-state
-initialization drain for that batch/head task, without waiting for the other
-tasks assigned to the same producer core.
+The IB implementation's internal `PipeBarrier<Pipe_all>` orders the GM data
+transfer and ready publication, so producer call sites do not add a separate
+MTE3 barrier. The initial `HReady` is published for its batch/head task without
+waiting for the other tasks assigned to the same producer core.
 In MIX mode the IB calls execute on the AIV lanes and use the logical AIV index
 space required by the API. After `HReady`, the O-internal reverse generation of
 `cube1Done` lets the AIC compute `Q * gate @ H_old` while the AIV computes

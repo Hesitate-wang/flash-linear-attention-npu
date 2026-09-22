@@ -7,6 +7,10 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
+#if !defined(CHUNK_FWD_HO_ARCH35) || defined(CHUNK_FWD_HO_ARCH_A2)
+#error "A5 GDN FwdO kernel compiled for the wrong architecture"
+#endif
+
 #define CATLASS_ARCH 3510
 
 #include "catlass/arch/arch.hpp"
@@ -474,7 +478,6 @@ public:
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
-                    AscendC::PRINTF("wait pre chunk signal for h_new");
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                     // H is visible before this acknowledgement, so Cube2 can
@@ -496,7 +499,6 @@ public:
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
-                    AscendC::PRINTF("wait v_new ready");
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done[streamId]);

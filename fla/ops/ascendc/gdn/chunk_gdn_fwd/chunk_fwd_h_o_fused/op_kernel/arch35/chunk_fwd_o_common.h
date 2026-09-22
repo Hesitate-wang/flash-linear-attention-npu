@@ -8,8 +8,8 @@
 
 #include <cstdint>
 #include "kernel_operator.h"
-#include "../chunk_fwd_o_struct.h"
-#include "../chunk_fwd_o_a5_constants.h"
+#include "chunk_fwd_o_a5_constants.h"
+#include "chunk_fwd_o_a5_struct.h"
 
 namespace GDN {
 

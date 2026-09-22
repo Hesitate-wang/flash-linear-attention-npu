@@ -4,7 +4,7 @@
  */
 #include "chunk_fwd_h_o_fused_tiling.h"
 
-#include "../op_kernel/chunk_fwd_o_a5_constants.h"
+#include "../op_kernel/arch35/chunk_fwd_o_a5_constants.h"
 #include "../op_kernel/chunk_fwd_h_o_fused_struct.h"
 #include "tiling/platform/platform_ascendc.h"
 #include <cstring>

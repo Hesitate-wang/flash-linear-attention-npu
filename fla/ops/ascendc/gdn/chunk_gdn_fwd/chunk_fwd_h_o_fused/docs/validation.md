@@ -11,7 +11,7 @@
 | A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 `IBSet/IBWait`；exp2 专用 O 暂以 `SyncAll<false>()` 保护交接 |
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
-| FwdO 架构隔离 | A2 实现在 `op_kernel/gemm/kernel`；A5 流水化实现及配套 epilogue 位于 `op_kernel/arch35` |
+| FwdO 架构隔离 | A2 实现在 `op_kernel/gemm/kernel`；A5 kernel、配套 epilogue、exp2 tiling/constants 和 UB layout 全部位于 `op_kernel/arch35` |
 
 ## 已完成的静态检查
 
@@ -36,8 +36,9 @@
   `op_kernel/arch35` 或公共 kernel include 路径解析。此前缺失的 arch35
   `block_epilogue_gdn_fwdh_regbase.hpp` 现已位于当前算子目录，并与独立 FwdH
   实现一致；若该文件或 kernel 入口源文件缺失，CMake 会在配置阶段失败。
-- 当前算子的 O 阶段结构头文件同时包含通用 O 投影，以及 Ascend 950 exp2
-  专用 O 使用的完整 `ChunkFwdOTilingData` 投影。分发前，
+- 当前算子的根目录 O 阶段结构头只包含自然指数路径共用的 O 投影；Ascend 950
+  exp2 专用 O 使用的完整 `ChunkFwdOTilingData` 已拆至
+  `op_kernel/arch35/chunk_fwd_o_a5_struct.h`。分发前，
   `FillNaturalOTiling` 或 `FillOptimizedOTiling` 会初始化对应投影的全部字段。
 - ACLNN 前置检查在 Atlas A2 和 Ascend 950 上接受自然指数与 BNSD/NTD，
   在 Ascend 950 上另接受 exp2 与 BSND/TND。L0 下发失败时保留原始状态码，不再统一改写为
@@ -65,6 +66,16 @@
   A5 入口为 Host 下发的 key 1/2 分别声明同为 MIX 1:2 的 kernel task，避免
   object 查找落到不存在的 default key；各路径所需 workspace 区域互不重叠。
 - `git diff --check` 已通过，仅存在行尾转换警告。
+
+## 架构文件组织
+
+- `chunk_fwd_h_o_fused_arch.h` 是唯一读取 `__CCE_AICORE__` 的设备架构选择点，
+  生成 `CHUNK_FWD_HO_ARCH_A2` 或 `CHUNK_FWD_HO_ARCH35`；统一 dispatcher 只包含
+  对应架构入口。
+- A2/A5 入口及两套 H/O kernel 头均校验架构宏，错误架构的头文件被包含时会在
+  预处理阶段失败，避免同一编译单元混入另一架构实现。
+- 相对 include 静态扫描通过；移动后的 A5 constants/tiling 头均从 `arch35/`
+  解析，根目录不存在旧的 A5 constants 文件。
 
 ## A5 IB 通信 UB 隔离修复
 

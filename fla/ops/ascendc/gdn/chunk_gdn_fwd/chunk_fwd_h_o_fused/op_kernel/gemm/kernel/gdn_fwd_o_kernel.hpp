@@ -6,6 +6,10 @@
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
+#if !defined(CHUNK_FWD_HO_ARCH_A2) || defined(CHUNK_FWD_HO_ARCH35)
+#error "A2 GDN FwdO kernel compiled for the wrong architecture"
+#endif
+
 #define CATLASS_ARCH 2201
 
 #include "catlass/arch/arch.hpp"
@@ -413,7 +417,7 @@ public:
                         vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     // In mode2 both AIV subblocks must publish, including a
                     // zero-row tail subblock. FFTS aggregates the pair for the
-                    // AIC's single wait when the A5 experiment is enabled.
+                    // AIC's single wait when the aggregate output barrier is enabled.
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done[streamId]);
                 }
 

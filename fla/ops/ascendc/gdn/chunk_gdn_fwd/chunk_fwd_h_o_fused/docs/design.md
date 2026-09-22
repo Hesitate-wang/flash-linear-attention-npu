@@ -11,7 +11,9 @@
 | Atlas A2 | V128/V256 | `2 * ceil(T/2)` | 成对 producer H + consumer O | 每 chunk `IBSet/IBWait` |
 | Ascend 950 A5 | V128/V256 | `2 * ceil(T/2)` | 成对 producer H + consumer O | 每 chunk `IBSet/IBWait` |
 
-入口先按编译目标选择 A2 或 A5 架构实现，再通过 key 1/2 选择 V128/V256 的已注册 kernel object；key 不表示 exp/exp2。`useExp2` 只在已选定的架构实现内部选择指数模式，A5 在 `useExp2=false` 时仍使用 `arch35` FwdO；dtype、layout 和 head 维度同样在 object 内继续选择模板路径。
+入口先由 `chunk_fwd_h_o_fused_arch.h` 根据编译目标定义且仅定义一个架构宏：A2 使用 `CHUNK_FWD_HO_ARCH_A2`，A5 使用 `CHUNK_FWD_HO_ARCH35`。统一源文件随后只包含对应的架构入口；架构入口和 H/O kernel 头对错误宏组合执行预处理报错。进入所选实现后，再通过 key 1/2 选择 V128/V256 的已注册 kernel object；key 不表示 exp/exp2。`useExp2` 只在已选定的架构实现内部选择指数模式，A5 在 `useExp2=false` 时仍使用 `arch35` FwdO；dtype、layout 和 head 维度同样在 object 内继续选择模板路径。
+
+A5 专用 kernel、scheduler、epilogue、exp2 O tiling 投影、tile 常量和 UB 布局统一位于 `op_kernel/arch35/`。根目录仅保留公共 ABI/投影、统一 dispatcher 和 A2 实现，避免公共头通过内部 `__CCE_AICORE__` 分支混合两套架构定义。
 
 ## 2. 执行流程与同步
 
