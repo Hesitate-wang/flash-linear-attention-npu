@@ -83,6 +83,7 @@ struct BlockSchedulerGdnFwdO {
     uint32_t pipelineHTaskBase{0};
     uint32_t pipelineChunkIdx{0};
     uint32_t pipelineTaskStride{0};
+    uint32_t pipelineStageCount{GDN_FWD_O_PING_PONG_STAGES};
     uint32_t initialStageCount{0};
 
     AscendC::GlobalTensor<int64_t> gmSeqlen;
@@ -147,13 +148,18 @@ struct BlockSchedulerGdnFwdO {
                 const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
                                                     ? hTaskNum - pipelineHTaskBase
                                                     : 0;
-                // A stage is consumed by each initial (head, chunk) item.
-                // A single head still reaches stage 1 when it has multiple
-                // chunks, so head count alone is not sufficient here.
-                const uint32_t initialItems = remainingTasks * numChunks;
-                initialStageCount = initialItems < GDN_FWD_O_PING_PONG_STAGES
-                                         ? initialItems
-                                         : GDN_FWD_O_PING_PONG_STAGES;
+                // Match FwdH: a partially filled pair uses one workspace
+                // stream. Chunks of that single head advance serially on
+                // stage 0; stage 1 is enabled only when lane 1 is valid.
+                pipelineStageCount = remainingTasks == 0
+                                         ? 1
+                                         : (remainingTasks < GDN_FWD_O_PING_PONG_STAGES
+                                                ? remainingTasks
+                                                : GDN_FWD_O_PING_PONG_STAGES);
+                initialStageCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
+                                        ? remainingTasks
+                                        : GDN_FWD_O_PING_PONG_STAGES;
+                currStage = pipelineStageCount - 1;
                 isRunning = pipelineHTaskBase < shapeBatch * vNumHead;
             }
         } else if (taskAffinity) {
@@ -236,7 +242,7 @@ struct BlockSchedulerGdnFwdO {
             }
             if (unlikely(pipelineHTaskBase >= hTaskNum)) {
                 isRunning = false;
-                currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
+                currStage = (currStage + 1) % pipelineStageCount;
                 return;
             }
             const uint32_t hTaskIdx = pipelineHTaskBase + pipelineLaneIdx;
@@ -321,12 +327,12 @@ struct BlockSchedulerGdnFwdO {
             }
         }
 
-        currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
+        currStage = (currStage + 1) % pipelineStageCount;
     }
 
     CATLASS_DEVICE
     uint32_t GetCurStageId() const {
-        return (currStage + GDN_FWD_O_PING_PONG_STAGES - 1) % GDN_FWD_O_PING_PONG_STAGES;
+        return (currStage + pipelineStageCount - 1) % pipelineStageCount;
     }
 
     CATLASS_DEVICE
@@ -336,7 +342,9 @@ struct BlockSchedulerGdnFwdO {
 
     CATLASS_DEVICE
     uint32_t GetPrevStageId() const {
-        return (currStage + GDN_FWD_O_PING_PONG_STAGES - 2) % GDN_FWD_O_PING_PONG_STAGES;
+        return pipelineStageCount == 1
+                   ? 0
+                   : (currStage + pipelineStageCount - 2) % pipelineStageCount;
     }
 
 
