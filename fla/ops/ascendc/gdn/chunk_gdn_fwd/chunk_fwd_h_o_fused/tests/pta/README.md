@@ -33,6 +33,26 @@ Add `--compare-composed` to also run
 python test_fwd_h_o_fused.py --compare-composed
 ```
 
+The test can either generate deterministic CPU input/reference data or load a
+single `torch.save`/`.pt` tensor dictionary. The actual-data path accepts both
+the operator layout (`[B,H,T,D]`) and the legacy PTA layout (`[B,T,H,D]`):
+
+```bash
+python test_fwd_h_o_fused.py \
+  --use-actual-input --use-actual-output \
+  --data-path /path/to/case.pt \
+  --batch 1 --tokens 256 --k-heads 2 --v-heads 2
+```
+
+The dictionary uses `q`, `k`, `w`, `u` (or `v`), `g`, and optionally
+`initial_state` for inputs; `o`/`ref_o` and `final_state`/`ref_final_state`
+are accepted for references. When actual input is also supplied, the CPU
+comparison remains enabled and is followed by a second comparison against the
+supplied output; with actual output alone, only the supplied reference is used.
+Every comparison prints one line per element with expected value, actual value,
+absolute difference, relative difference, and PASS/FAIL status, in addition to
+the summary.
+
 Final-state and initial-state coverage can be enabled independently:
 
 ```bash

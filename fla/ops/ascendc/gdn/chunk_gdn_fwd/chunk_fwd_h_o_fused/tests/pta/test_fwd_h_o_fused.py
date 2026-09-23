@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -63,14 +64,39 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also run chunk_gated_delta_rule_fwd_h followed by chunk_fwd_o.",
     )
-    parser.add_argument("--rtol", type=float, default=5e-2)
-    parser.add_argument("--atol", type=float, default=5e-2)
+    parser.add_argument(
+        "--use-actual-input",
+        "--use_actual_input",
+        dest="use_actual_input",
+        action="store_true",
+        help="Load q/k/w/u/g and optional initial_state from --data-path.",
+    )
+    parser.add_argument(
+        "--use-actual-output",
+        "--use_actual_output",
+        dest="use_actual_output",
+        action="store_true",
+        help="Load the expected o/final_state from --data-path.",
+    )
+    parser.add_argument(
+        "--data-path",
+        "--data_path",
+        type=str,
+        default=None,
+        help="A torch.save/.pt file containing the actual input/output tensors.",
+    )
+    parser.add_argument("--rtol", type=float, default=1e-3)
+    parser.add_argument("--atol", type=float, default=1e-3)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
     if args.batch <= 0 or args.tokens <= 0 or args.k_heads <= 0 or args.v_heads <= 0:
         raise ValueError("batch, tokens and head counts must be positive")
+    if (args.use_actual_input or args.use_actual_output) and not args.data_path:
+        raise ValueError("--data-path is required with --use-actual-input/--use-actual-output")
+    if args.data_path and not os.path.isfile(args.data_path):
+        raise FileNotFoundError(args.data_path)
     if args.v_heads < args.k_heads or args.v_heads % args.k_heads != 0:
         raise ValueError("v-heads must be divisible by k-heads")
     output_layout = resolve_output_layout(args)
@@ -132,6 +158,181 @@ def make_case(args: argparse.Namespace) -> Case:
         g=g,
         initial_state=initial_state,
     )
+
+
+def _load_pt(path: str) -> dict:
+    """Load a tensor dictionary while supporting older torch versions."""
+    try:
+        data = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        data = torch.load(path, map_location="cpu")
+    if not isinstance(data, dict):
+        raise TypeError(f"expected a tensor dictionary in {path}, got {type(data)!r}")
+    return data
+
+
+def _get_tensor(data: dict, *names: str, required: bool = True) -> Optional[torch.Tensor]:
+    for name in names:
+        value = data.get(name)
+        if value is not None:
+            if not isinstance(value, torch.Tensor):
+                value = torch.as_tensor(value)
+            return value.detach().cpu()
+    if required:
+        raise KeyError(f"none of {names!r} is present in the actual-data file")
+    return None
+
+
+def _canonical_sequence_tensor(
+    value: torch.Tensor,
+    name: str,
+    batch: int,
+    heads: int,
+    tokens: int,
+    dim: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Accept [B,H,T,D] and the reference-test [B,T,H,D] layout."""
+    if value.ndim != 4:
+        raise ValueError(f"{name} must be rank 4, got shape {tuple(value.shape)}")
+    if value.shape[1] == tokens and value.shape[2] != tokens:
+        value = value.permute(0, 2, 1, 3)
+    if value.shape[0] < batch or value.shape[1] < heads or value.shape[2] < tokens:
+        raise ValueError(
+            f"{name} shape {tuple(value.shape)} cannot provide "
+            f"[{batch}, {heads}, {tokens}, {dim}]"
+        )
+    if value.shape[3] != dim:
+        raise ValueError(f"{name} last dimension must be {dim}, got {value.shape[3]}")
+    return value[:batch, :heads, :tokens, :].to(dtype).contiguous()
+
+
+def _canonical_gate(
+    value: torch.Tensor, batch: int, heads: int, tokens: int, dtype: torch.dtype
+) -> torch.Tensor:
+    """Accept [B,H,T] and [B,T,H] gate layouts."""
+    if value.ndim != 3:
+        raise ValueError(f"g must be rank 3, got shape {tuple(value.shape)}")
+    if value.shape[1] == tokens and value.shape[2] != tokens:
+        value = value.permute(0, 2, 1)
+    if value.shape[0] < batch or value.shape[1] < heads or value.shape[2] < tokens:
+        raise ValueError(
+            f"g shape {tuple(value.shape)} cannot provide [{batch}, {heads}, {tokens}]"
+        )
+    return value[:batch, :heads, :tokens].to(dtype).contiguous()
+
+
+def _canonical_initial_state(
+    value: torch.Tensor, batch: int, heads: int, k_dim: int, v_dim: int, dtype: torch.dtype
+) -> torch.Tensor:
+    # The fused API consumes [N, HV, K, V].  H/O reference files may retain a
+    # singleton token-batch dimension as [B, HV, 1, K, V].
+    if value.ndim == 5:
+        if value.shape[2] == 1:
+            value = value[:, :, 0]
+        elif value.shape[0] == 1 and value.shape[2] == batch:
+            value = value[0].permute(1, 0, 2, 3)
+        else:
+            raise ValueError(f"unsupported initial_state shape {tuple(value.shape)}")
+    if value.ndim != 4:
+        raise ValueError(f"initial_state must be rank 4/5, got {tuple(value.shape)}")
+    if value.shape[0] < batch or value.shape[1] < heads:
+        raise ValueError(
+            f"initial_state shape {tuple(value.shape)} cannot provide "
+            f"[{batch}, {heads}, {k_dim}, {v_dim}]"
+        )
+    if value.shape[2:] != (k_dim, v_dim):
+        raise ValueError(
+            f"initial_state trailing shape must be {(k_dim, v_dim)}, got {tuple(value.shape[2:])}"
+        )
+    return value[:batch, :heads].to(dtype).contiguous()
+
+
+def load_actual_case(args: argparse.Namespace) -> Case:
+    data = _load_pt(args.data_path)
+    input_dtype = getattr(torch, args.dtype)
+    gate_dtype = torch.float32 if args.gate_dtype == "float32" else input_dtype
+    q = _canonical_sequence_tensor(
+        _get_tensor(data, "q", "query"), "q", args.batch, args.k_heads, args.tokens, 128, input_dtype
+    )
+    k = _canonical_sequence_tensor(
+        _get_tensor(data, "k", "key"), "k", args.batch, args.k_heads, args.tokens, 128, input_dtype
+    )
+    w = _canonical_sequence_tensor(
+        _get_tensor(data, "w"), "w", args.batch, args.v_heads, args.tokens, 128, input_dtype
+    )
+    u = _canonical_sequence_tensor(
+        _get_tensor(data, "u", "v"),
+        "u",
+        args.batch,
+        args.v_heads,
+        args.tokens,
+        args.value_dim,
+        input_dtype,
+    )
+    g = _canonical_gate(
+        _get_tensor(data, "g", "gate"), args.batch, args.v_heads, args.tokens, gate_dtype
+    )
+    initial_state = None
+    if args.initial_state:
+        initial_state = _canonical_initial_state(
+            _get_tensor(data, "initial_state"),
+            args.batch,
+            args.v_heads,
+            128,
+            args.value_dim,
+            torch.float32,
+        )
+    return Case(q=q, k=k, w=w, u=u, g=g, initial_state=initial_state)
+
+
+def _canonical_actual_output(
+    value: torch.Tensor, args: argparse.Namespace, output_layout: str
+) -> torch.Tensor:
+    """Normalize an actual output into the selected operator output layout."""
+    value = value.detach().cpu()
+    if value.ndim == 4:
+        if value.shape[1] == args.tokens and value.shape[2] != args.tokens:
+            value = value.permute(0, 2, 1, 3)
+        if value.shape[0] < args.batch or value.shape[1] < args.v_heads or value.shape[2] < args.tokens:
+            raise ValueError(f"o shape {tuple(value.shape)} is smaller than the requested case")
+        value = value[: args.batch, : args.v_heads, : args.tokens, : args.value_dim].contiguous()
+        if output_layout == "BNSD":
+            return value
+        if output_layout == "BSND":
+            return value.permute(0, 2, 1, 3).contiguous()
+        if args.batch != 1:
+            raise ValueError(f"{output_layout} actual output requires batch=1")
+        value = value.squeeze(0)
+        return value if output_layout == "NTD" else value.permute(1, 0, 2).contiguous()
+    if value.ndim == 3 and args.batch == 1:
+        if output_layout == "NTD":
+            if value.shape[0] == args.tokens and value.shape[1] == args.v_heads:
+                value = value.permute(1, 0, 2)
+            return value[: args.v_heads, : args.tokens, : args.value_dim].contiguous()
+        if output_layout == "TND":
+            if value.shape[0] == args.v_heads and value.shape[1] == args.tokens:
+                value = value.permute(1, 0, 2)
+            return value[: args.tokens, : args.v_heads, : args.value_dim].contiguous()
+    raise ValueError(f"unsupported actual output shape {tuple(value.shape)} for {output_layout}")
+
+
+def load_actual_output(args: argparse.Namespace, output_layout: str) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    data = _load_pt(args.data_path)
+    actual_o = _canonical_actual_output(
+        _get_tensor(data, "o", "ref_o", "output"), args, output_layout
+    )
+    actual_final = _get_tensor(data, "final_state", "ref_final_state", required=False)
+    if actual_final is not None:
+        actual_final = _canonical_initial_state(
+            actual_final,
+            args.batch,
+            args.v_heads,
+            128,
+            args.value_dim,
+            torch.float32,
+        )
+    return actual_o, actual_final
 
 
 def cpu_reference(
@@ -218,18 +419,51 @@ def to_npu(case: Case, device: int) -> Case:
     )
 
 
-def assert_close(
+def data_compare(
     name: str,
     actual: torch.Tensor,
     expected: torch.Tensor,
     rtol: float,
     atol: float,
 ) -> None:
+    """Print a data_compare-style per-element report and enforce tolerance."""
     actual_cpu = actual.detach().cpu().float()
     expected_cpu = expected.detach().cpu().float()
-    max_abs = (actual_cpu - expected_cpu).abs().max().item()
-    print(f"{name}: shape={tuple(actual.shape)}, max_abs={max_abs:.6e}")
-    torch.testing.assert_close(actual_cpu, expected_cpu, rtol=rtol, atol=atol, msg=name)
+    if actual_cpu.shape != expected_cpu.shape:
+        raise AssertionError(
+            f"{name}: shape mismatch, actual={tuple(actual_cpu.shape)}, "
+            f"expected={tuple(expected_cpu.shape)}"
+        )
+
+    actual_flat = actual_cpu.reshape(-1)
+    expected_flat = expected_cpu.reshape(-1)
+    abs_diff = (actual_flat - expected_flat).abs()
+    denominator = torch.maximum(expected_flat.abs(), torch.full_like(expected_flat, 1e-10))
+    relative_diff = abs_diff / denominator
+    tolerance = atol + rtol * expected_flat.abs()
+    passed = torch.isfinite(actual_flat) & torch.isfinite(expected_flat) & (abs_diff <= tolerance)
+
+    print("-" * 120)
+    print(f"{name}: shape={tuple(actual_cpu.shape)}, elements={actual_flat.numel()}")
+    print("index\texpected\tactual\tabs_diff\trel_diff\tresult")
+    for index, (expected_value, actual_value, abs_value, rel_value, ok) in enumerate(
+        zip(expected_flat, actual_flat, abs_diff, relative_diff, passed)
+    ):
+        print(
+            f"{index:08d}\t{float(expected_value):+.8e}\t{float(actual_value):+.8e}\t"
+            f"{float(abs_value):.8e}\t{float(rel_value):.8e}\t{'PASS' if bool(ok) else 'FAIL'}"
+        )
+
+    failed_count = int((~passed).sum().item())
+    max_abs = float(abs_diff.max().item()) if abs_diff.numel() else 0.0
+    max_relative = float(relative_diff.max().item()) if relative_diff.numel() else 0.0
+    print(
+        f"{name}: failed={failed_count}/{actual_flat.numel()}, "
+        f"max_abs={max_abs:.6e}, max_relative={max_relative:.6e}"
+    )
+    print("-" * 120)
+    if failed_count:
+        raise AssertionError(f"{name}: {failed_count} values exceeded rtol={rtol}, atol={atol}")
 
 
 def main() -> None:
@@ -244,10 +478,13 @@ def main() -> None:
     scale = args.scale if args.scale is not None else 1.0 / math.sqrt(128)
     output_layout = resolve_output_layout(args)
 
-    cpu_case = make_case(args)
-    expected_o, expected_final = cpu_reference(
+    cpu_case = load_actual_case(args) if args.use_actual_input else make_case(args)
+    cpu_o, cpu_final = cpu_reference(
         cpu_case, args.chunk_size, scale, args.use_exp2, output_layout
     )
+    actual_o = actual_final = None
+    if args.use_actual_output:
+        actual_o, actual_final = load_actual_output(args, output_layout)
     npu_case = to_npu(cpu_case, args.device)
 
     if args.runtime == "legacy":
@@ -273,16 +510,32 @@ def main() -> None:
         output_layout=output_layout,
     )
     torch.npu.synchronize()
-    assert_close("fused.o vs cpu", fused_o, expected_o, args.rtol, args.atol)
+    # Keep the CPU-generated comparison when it was generated from the same
+    # input.  If only an external output was supplied, the generated random
+    # input is unrelated to that output and must not be compared with it.
+    if actual_o is None or args.use_actual_input:
+        data_compare("fused.o vs cpu", fused_o, cpu_o, args.rtol, args.atol)
+    elif args.use_actual_output:
+        print("fused.o vs cpu: skipped (actual output supplied without actual input)")
+    if actual_o is not None:
+        data_compare("fused.o vs actual output", fused_o, actual_o, args.rtol, args.atol)
     if args.output_final_state:
         assert fused_final is not None
-        assert_close(
-            "fused.final_state vs cpu",
-            fused_final,
-            expected_final,
-            args.rtol,
-            args.atol,
-        )
+        if not args.use_actual_output or args.use_actual_input:
+            data_compare("fused.final_state vs cpu", fused_final, cpu_final, args.rtol, args.atol)
+        elif args.use_actual_output:
+            print(
+                "fused.final_state vs cpu: skipped "
+                "(actual output supplied without actual input)"
+            )
+        if actual_final is not None:
+            data_compare(
+                "fused.final_state vs actual output",
+                fused_final,
+                actual_final,
+                args.rtol,
+                args.atol,
+            )
 
     if args.compare_composed:
         h, composed_v, composed_final = ascendc.chunk_gated_delta_rule_fwd_h(
@@ -308,10 +561,10 @@ def main() -> None:
             output_layout=output_layout,
         )
         torch.npu.synchronize()
-        assert_close("fused.o vs composed.o", fused_o, composed_o, args.rtol, args.atol)
+        data_compare("fused.o vs composed.o", fused_o, composed_o, args.rtol, args.atol)
         if args.output_final_state:
             assert fused_final is not None and composed_final is not None
-            assert_close(
+            data_compare(
                 "fused.final_state vs composed.final_state",
                 fused_final,
                 composed_final,
