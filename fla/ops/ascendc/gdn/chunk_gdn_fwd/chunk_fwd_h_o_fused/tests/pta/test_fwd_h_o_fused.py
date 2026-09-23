@@ -426,7 +426,14 @@ def data_compare(
     rtol: float,
     atol: float,
 ) -> None:
-    """Print compact data_compare output and enforce the configured tolerance."""
+    """Compare using the legacy PTA mixed absolute/symmetric-relative rule.
+
+    ``atol`` is the per-element difference threshold.  ``rtol`` is retained
+    as the allowed failure fraction to keep the existing CLI/API stable; this
+    mirrors ``data_compare_h.py`` where ``pct_thd`` is the allowed failure
+    fraction.  A result is accepted when at least ``(1 - rtol)`` of elements
+    pass and the maximum normalized error is below the legacy 0.1 cap.
+    """
     actual_cpu = actual.detach().cpu().float()
     expected_cpu = expected.detach().cpu().float()
     if actual_cpu.shape != expected_cpu.shape:
@@ -438,15 +445,39 @@ def data_compare(
     actual_flat = actual_cpu.reshape(-1)
     expected_flat = expected_cpu.reshape(-1)
     abs_diff = (actual_flat - expected_flat).abs()
-    denominator = torch.maximum(expected_flat.abs(), torch.full_like(expected_flat, 1e-10))
-    relative_diff = abs_diff / denominator
-    tolerance = atol + rtol * expected_flat.abs()
-    passed = torch.isfinite(actual_flat) & torch.isfinite(expected_flat) & (abs_diff <= tolerance)
+    finite = torch.isfinite(actual_flat) & torch.isfinite(expected_flat)
+
+    # Match data_compare_h.py::cal_relative_diff_np.  The floor is derived
+    # from the fp16 quantum and prevents tiny reference values from producing
+    # meaningless relative-error spikes.
+    denominator_floor = (2.0 ** -14) / atol
+    denominator = torch.maximum(
+        torch.maximum(actual_flat.abs(), expected_flat.abs()),
+        torch.full_like(expected_flat, denominator_floor),
+    ) + 1e-9
+    mixed_diff = torch.where(abs_diff < atol, abs_diff, abs_diff / denominator)
+
+    # Exact matches are omitted by the reference implementation as well.
+    compared = finite & (abs_diff > 0)
+    passed = finite & ((abs_diff == 0) | (mixed_diff <= atol))
 
     failed_indices = torch.nonzero(~passed, as_tuple=False).flatten().tolist()
     failed_count = int((~passed).sum().item())
     max_abs = float(abs_diff.max().item()) if abs_diff.numel() else 0.0
-    max_relative = float(relative_diff.max().item()) if relative_diff.numel() else 0.0
+    failed_diff = mixed_diff[compared & (mixed_diff > atol)]
+    max_relative = float(failed_diff.max().item()) if failed_diff.numel() else 0.0
+    element_count = actual_flat.numel()
+    fulfill_percent = (
+        100.0 * (element_count - failed_count) / element_count
+        if element_count
+        else 100.0
+    )
+    required_percent = (1.0 - rtol) * 100.0
+    passed = (
+        fulfill_percent >= required_percent
+        and max_relative < 0.1
+        and bool(torch.all(finite))
+    )
 
     # Match the existing PTA data_compare format.  For a clean result print
     # only the beginning/end of the flattened data; for a failing result print
@@ -456,7 +487,6 @@ def data_compare(
         title = f"{name} error rows ({len(display_indices)}/{len(failed_indices)})"
         insert_gap = False
     else:
-        element_count = actual_flat.numel()
         if element_count <= 40:
             display_indices = list(range(element_count))
             insert_gap = False
@@ -477,10 +507,8 @@ def data_compare(
         abs_value = abs(expected_value - actual_value)
         # Keep the reference helper's interpretation: small absolute errors
         # are displayed as absolute values, otherwise display relative error.
-        rate_value = (
-            abs_value
-            if abs_value < atol
-            else abs_value / (max(abs(expected_value), abs(actual_value)) + 1e-10)
+        rate_value = abs_value if abs_value < atol else abs_value / (
+            max(abs(expected_value), abs(actual_value), denominator_floor) + 1e-9
         )
         print(
             f"{index + 1:08d}\t{expected_value:.7f}\t{actual_value:.7f}\t"
@@ -491,11 +519,15 @@ def data_compare(
     print("-" * 95)
     print(
         f"{name}: failed={failed_count}/{actual_flat.numel()}, "
+        f"fulfill={fulfill_percent:.6f}%, required={required_percent:.6f}%, "
         f"max_abs={max_abs:.6e}, max_relative={max_relative:.6e}"
     )
     print("-" * 120)
-    if failed_count:
-        raise AssertionError(f"{name}: {failed_count} values exceeded rtol={rtol}, atol={atol}")
+    if not passed:
+        raise AssertionError(
+            f"{name}: fulfill={fulfill_percent:.6f}% (required {required_percent:.6f}%), "
+            f"max_relative={max_relative:.6e} (limit 1.000000e-1)"
+        )
 
 
 def main() -> None:

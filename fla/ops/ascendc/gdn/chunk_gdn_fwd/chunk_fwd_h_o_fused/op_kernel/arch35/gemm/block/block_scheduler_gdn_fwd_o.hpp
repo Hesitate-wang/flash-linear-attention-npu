@@ -155,9 +155,12 @@ struct BlockSchedulerGdnFwdO {
                 pipelineLaneCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
                                         ? remainingTasks
                                         : GDN_FWD_O_PING_PONG_STAGES;
-                initialStageCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
-                                        ? remainingTasks
-                                        : GDN_FWD_O_PING_PONG_STAGES;
+                // Both ping-pong slots are free before the first task, even
+                // when this consumer owns only one head.  The first task is
+                // scheduled into slot 1 (currStage starts at 1), so limiting
+                // this count to one would leave vec2Done[1] unsignalled and
+                // deadlock the first AIC handoff for odd task counts.
+                initialStageCount = GDN_FWD_O_PING_PONG_STAGES;
                 currStage = pipelineStageCount - 1;
                 isRunning = pipelineHTaskBase < shapeBatch * vNumHead;
             }
