@@ -13,7 +13,7 @@ enum class ChunkFwdHOFusedDtype : int64_t { FP16 = 0, BF16 = 1, FP32 = 2 };
 enum class ChunkFwdHOFusedOutputLayout : int64_t { BNSD = 0, BSND = 1, TND = 2, NTD = 3 };
 enum class ChunkFwdHOFusedTilingKey : uint64_t { V128_EXP = 1, V256_EXP = 2 };
 constexpr int64_t CHUNK_FWD_HO_AIV_PER_MIXED_CORE = 2;
-constexpr int64_t CHUNK_FWD_HO_TASK_LANES_PER_CORE = 2;
+constexpr int64_t CHUNK_FWD_HO_TASK_LANES_PER_CORE = 1;
 constexpr int64_t CHUNK_FWD_HO_H_READY_EVENT_BASE = 0;
 constexpr int64_t CHUNK_FWD_HO_V_READY_EVENT_BASE = CHUNK_FWD_HO_TASK_LANES_PER_CORE;
 constexpr int64_t CHUNK_FWD_HO_READY_EVENT_COUNT = 2 * CHUNK_FWD_HO_TASK_LANES_PER_CORE;

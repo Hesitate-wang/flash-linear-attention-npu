@@ -558,22 +558,21 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     OP_CHECK_IF(physicalCoreNum == 0,
                 OP_LOGE(context->GetNodeName(), "No AIC core is available."),
                 return ge::GRAPH_FAILED);
-    const size_t physicalPairNum = physicalCoreNum / 2;
-    OP_CHECK_IF(physicalPairNum == 0,
+    const size_t maxPipelineTaskNum = physicalCoreNum / 2;
+    OP_CHECK_IF(maxPipelineTaskNum == 0,
                 OP_LOGE(context->GetNodeName(),
                         "The core pipeline requires at least two physical AIC cores, got %zu.", physicalCoreNum),
                 return ge::GRAPH_FAILED);
-    const size_t requiredPairNum = taskNum / 2 + taskNum % 2;
-    OP_CHECK_IF(requiredPairNum == 0,
+    OP_CHECK_IF(taskNum == 0,
                 OP_LOGE(context->GetNodeName(), "The core pipeline requires at least one task."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(requiredPairNum > physicalPairNum,
+    OP_CHECK_IF(taskNum > maxPipelineTaskNum,
                 OP_LOGE(context->GetNodeName(),
-                        "The paired core pipeline requires 2 * ceil(B * HV / 2) physical AIC cores; "
+                        "The per-head core pipeline requires 2 * B * HV physical AIC cores; "
                         "got %zu tasks and %zu physical cores. The saturated-core path is not implemented yet.",
                         taskNum, physicalCoreNum),
                 return ge::GRAPH_FAILED);
-    const size_t producerCoreNum = requiredPairNum;
+    const size_t producerCoreNum = taskNum;
     const size_t consumerCoreNum = producerCoreNum;
     const size_t activeCoreNum = producerCoreNum + consumerCoreNum;
 

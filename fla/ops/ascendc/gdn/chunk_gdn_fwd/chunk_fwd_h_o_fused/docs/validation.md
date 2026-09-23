@@ -4,10 +4,10 @@
 
 | 设计项 | 实现位置 |
 | --- | --- |
-| `R=ceil(T/2)` 对生产者/消费者核 | Host tiling 检查 `R<=floor(P/2)`，并设置相等的 producer/consumer 数、`consumerCoreBase=R` 和 `activeCoreNum=2R` |
+| `T` 对生产者/消费者核 | Host tiling 检查 `T<=floor(P/2)`，并设置相等的 producer/consumer 数、`consumerCoreBase=T` 和 `activeCoreNum=2T` |
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
 | 启动事件初始化 | A2/A5 统一入口 `RunChunkFwdHOFused` 在 H/O 分流前调用各自的 `InitializePipelineSync` |
-| 逐 chunk 的 H 到 O 发布 | H 的 `SignalProducerSliceReady` 按 task lane 分别发布 `HReady` 和 `VReady`，共 4 个 event；同一 task 的 chunk 串行复用对应 slot，O 的 `WaitProducerSliceReady` 消费并清零；`cube1Done` 在 `HReady` 后放行 O AIC 的 `QH_old` |
+| 逐 chunk 的 H 到 O 发布 | H 的 `SignalProducerSliceReady` 为每个 task 发布 `HReady` 和 `VReady`，共 2 个 event；同一 task 的 chunk 串行复用对应 slot，O 的 `WaitProducerSliceReady` 消费并清零；`cube1Done` 在 `HReady` 后放行 O AIC 的 `QH_old` |
 | A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 `IBSet/IBWait`；exp2 专用 O 暂以 `SyncAll<false>()` 保护交接 |
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
@@ -22,9 +22,9 @@
   TilingData 管理对象，因此首个 `set_batch` 不会访问空的内部存储。
 - Workspace 偏移均相对于用户 workspace，所有区域都按 512 字节对齐；返回的
   workspace 大小只累加一次平台系统 workspace。
-- A2 和 A5 的当前路径均要求 `ceil(B * HV / 2) <= floor(physical AIC cores / 2)`，
-  `blockDim=2*ceil(B*HV/2)`。producer 与 consumer 数量相等且一一配对；单任务
-  启动一对 core，奇数任务的最后一个 task lane 允许为空。核数不足的 saturated-core
+- A2 和 A5 的当前路径均要求 `B * HV <= floor(physical AIC cores / 2)`，
+  `blockDim=2*B*HV`。producer 与 consumer 数量相等且一一配对；每个逻辑 MIX core
+  只负责一个 `(batch, value-head)` 任务。核数不足的 saturated-core
   路径尚未实现，tiling 会明确返回失败。
 - 已接受 Atlas A2 和 Ascend 950 的定长自然指数路径。两者均支持 FP16/BF16、
   FP32 或输入类型门控、chunk 64/128、K=128、V=128/256 及 BNSD/NTD。
@@ -50,16 +50,16 @@
   随后由全部活动 AIC/AIV 执行一次启动 rendezvous；A5 不依赖未初始化的
   ACLNN user workspace 作为 `IBSet/IBWait` 同步状态。Host 同步区容量按
   `activeCoreNum * AIV_PER_MIXED_CORE * eventCount * wordsPerEvent` 分配。
-- 自然指数路径为每个 producer AIV 分配 4 个 ready event，每个 task lane 分别拥有
+- 自然指数路径为每个 producer AIV 分配 2 个 ready event，分别表示
   `HReady` 和 `VReady`。首 chunk 的 H 来自初始化，后续 `HReady(i+1)` 由 Vec2(i)
   发布，`VReady(i)` 由 Vec1(i) 发布；同一 task 的所有 chunk 串行复用对应 slot。
   `IBSet` 只在 GM slot 为 0 时置 1，`IBWait` 消费后将 slot 清零，因此下一代同类
   事件的发布由接口自身反压。
-- 已对 `(T,P,A,NC)=(1,32,2,3)`、`(3,32,4,4)` 和 `(9,32,10,5)` 执行
-  静态任务/event 映射检查。生产者 `p` 和消费者 `R+p` 对每个
-  `(task,chunk)` 得到相同的 producer AIV、task lane、`0..1` HReady 和 `2..3` VReady，
-  并完整覆盖全部任务。该检查覆盖单任务、奇数任务以及 A5 最后一对只有 lane0
-  有效的逐 chunk 推进；另检查 `(T,P)=(33,32)` 和 `(5,3)` 被 Host 拒绝。
+- 已对 `(T,P,A,NC)=(1,32,2,3)`、`(3,32,6,4)` 和 `(9,32,18,5)` 执行
+  静态任务/event 映射检查。生产者 `p` 和消费者 `T+p` 对每个
+  `(task,chunk)` 得到相同的 producer AIV、固定 task lane 0、event 0 的 HReady 和
+  event 1 的 VReady，并完整覆盖全部任务；另检查 `(T,P)=(17,32)` 和 `(5,3)`
+  被 Host 拒绝。
 - OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径由
   arch35 H producer 和 O consumer 并行推进；自然指数使用逐 chunk IB 交接，
   exp2 专用 O 暂时保留全核交接屏障。设备侧按 dtype 和 V 维度显式选择 H 模板，

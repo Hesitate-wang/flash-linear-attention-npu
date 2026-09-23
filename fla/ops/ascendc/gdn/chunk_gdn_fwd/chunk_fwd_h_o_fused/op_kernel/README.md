@@ -8,11 +8,11 @@ reject the wrong macro at preprocessing time. A5-only kernels, tiling
 projections, constants and UB layout live under `arch35/`; root-level kernel
 files are common or A2 implementations.
 
-The fixed-length pipeline uses equal numbers of double-buffered H producers
-and paired O consumers, with `activeCoreNum == 2 * producerCoreNum`, full-task handoff
-workspace, and per-chunk `IBSet<false>`/`IBWait<false>` synchronization. Four
-ready events provide `HReady` and `VReady` for each of the two task lanes. All
-chunks of one task lane reuse the corresponding H/V slots: `IBSet` waits until
+The fixed-length pipeline uses one H producer and one O consumer per
+`(batch, value-head)` task, with `activeCoreNum == 2 * producerCoreNum`, full-task
+handoff workspace, and per-chunk `IBSet<false>`/`IBWait<false>` synchronization. Two
+ready events provide `HReady` and `VReady` for each task. All chunks of one task
+reuse the corresponding H/V slots: `IBSet` waits until
 its GM event slot is zero before setting it to one, and the matching `IBWait`
 clears the slot after consumption, so slot reuse needs no separate O-to-H ACK.
 The IB implementation's internal `PipeBarrier<Pipe_all>` orders the GM data

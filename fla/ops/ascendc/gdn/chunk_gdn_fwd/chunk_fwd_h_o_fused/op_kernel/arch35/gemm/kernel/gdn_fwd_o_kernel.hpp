@@ -187,15 +187,14 @@ public:
         if (!chunkPipelineEnabled) {
             return;
         }
-        const uint32_t producerPairIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t producerCoreIdx = producerPairIdx / GDN_FWD_O_PING_PONG_STAGES;
+        const uint32_t producerTaskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t producerCoreIdx = producerTaskIdx;
         // IBSet/IBWait are SIMD-side APIs. In MIX mode their block index space
         // contains the two logical AIVs of every mixed core, so each consumer
         // AIV waits for the matching producer AIV slice.
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
-        const uint32_t taskLane =
-            producerPairIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        const uint32_t taskLane = 0;
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
                                producerAivIdx, eventBase + taskLane);
         AscendC::PRINTF("producerCoreIdx %d, taskLane %d, producerAivIdx %d, eventBase %d\n", producerCoreIdx, taskLane, producerAivIdx, eventBase);

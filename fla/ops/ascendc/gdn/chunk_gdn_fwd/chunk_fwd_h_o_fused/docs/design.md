@@ -4,12 +4,12 @@
 
 ## 1. 架构
 
-定义任务数 `T = shapeBatch * vNumHead`、物理 MIX core 数 `P`、配对数 `R = ceil(T / 2)`，当前路径要求 `R <= floor(P / 2)`，活动 MIX core 数恒为 `A = 2R`。A2 (`DAV_2201`) 与 A5 (`DAV_3510`) 使用相同的 core 分区：前 `R` 个 core 是 H producer，从 `consumerCoreBase=R` 开始的 `R` 个 core 是一一对应的 O consumer。每对 core 通过两个 task lane 处理两个 `(batch, value-head)` 任务；最后一对允许仅 lane0 有效。单任务场景因此启动两个 MIX core，分别承担 H 和 O。不满足配对核数前提时应进入后续的 saturated-core 调度路径，该路径当前尚未实现。
+定义任务数 `T = shapeBatch * vNumHead`、物理 MIX core 数 `P`。当前路径要求 `T <= floor(P / 2)`，活动 MIX core 数恒为 `A = 2T`。A2 (`DAV_2201`) 与 A5 (`DAV_3510`) 使用相同的 core 分区：前 `T` 个 core 是 H producer，从 `consumerCoreBase=T` 开始的 `T` 个 core 是一一对应的 O consumer。每个逻辑 MIX core 只处理一个 `(batch, value-head)` 任务；同一任务的不同 chunk 在两个 ping-pong slot 间流水。不满足核数前提时当前直接返回失败。
 
 | SoC | Tiling key | blockDim | H/O 调度 | 同步 |
 | --- | --- | --- | --- | --- |
-| Atlas A2 | V128/V256 | `2 * ceil(T/2)` | 成对 producer H + consumer O | 每 chunk `IBSet/IBWait` |
-| Ascend 950 A5 | V128/V256 | `2 * ceil(T/2)` | 成对 producer H + consumer O | 每 chunk `IBSet/IBWait` |
+| Atlas A2 | V128/V256 | `2 * T` | 一任务一 producer H + 一 consumer O | 每 chunk `IBSet/IBWait` |
+| Ascend 950 A5 | V128/V256 | `2 * T` | 一任务一 producer H + 一 consumer O | 每 chunk `IBSet/IBWait` |
 
 入口先由 `chunk_fwd_h_o_fused_arch.h` 根据编译目标定义且仅定义一个架构宏：A2 使用 `CHUNK_FWD_HO_ARCH_A2`，A5 使用 `CHUNK_FWD_HO_ARCH35`。统一源文件随后只包含对应的架构入口；架构入口和 H/O kernel 头对错误宏组合执行预处理报错。进入所选实现后，再通过 key 1/2 选择 V128/V256 的已注册 kernel object；key 不表示 exp/exp2。`useExp2` 只在已选定的架构实现内部选择指数模式，A5 在 `useExp2=false` 时仍使用 `arch35` FwdO；dtype、layout 和 head 维度同样在 object 内继续选择模板路径。
 
@@ -117,14 +117,14 @@ AIV: wait cube3Done[s]
 
 ### 2.4 H 到 O 的 IB handoff
 
-H producer `p in [0,R)` 负责 `2p` 和可选的 `2p+1` 两个 `(batch, value-head)` 任务，O consumer `R+p` 按完全相同的 task/chunk 顺序消费。每个 producer AIV 使用 4 个 event：
+H producer `p in [0,T)` 负责 task `p`，O consumer `T+p` 按相同的 task/chunk 顺序消费。每个 producer AIV 使用 2 个 event：
 
 | event id | 事件 | H 发布时机 | O 等待后允许的操作 |
 | --- | --- | --- | --- |
-| `0 + lane` | `HReady[lane]` | chunk 0 的 H0 写回 GM 后，或 chunk `i-1` 的 Vec2 写回 `H_i` 后 | AIC 启动当前 chunk 的 `Q @ H_i` |
-| `2 + lane` | `VReady[lane]` | 当前 chunk 的 Vec1 写回 `V_new_i` 后 | AIC 启动当前 chunk 的 `masked(QK) @ V_new_i` |
+| `0` | `HReady` | chunk 0 的 H0 写回 GM 后，或 chunk `i-1` 的 Vec2 写回 `H_i` 后 | AIC 启动当前 chunk 的 `Q @ H_i` |
+| `1` | `VReady` | 当前 chunk 的 Vec1 写回 `V_new_i` 后 | AIC 启动当前 chunk 的 `masked(QK) @ V_new_i` |
 
-`lane = taskIdx % 2`。O 根据完整任务索引反推出 `producerCoreIdx=(taskIdx % (2R))/2`，再用相同的 `subBlockIdx` 得到 `producerAivIdx=producerCoreIdx*subBlockNum+subBlockIdx`。因此两个 O AIV 分别等待两个 H AIV 发布的对应 H/V 切片，不会互相代替。
+每个任务固定使用 `taskLane=0`。O 直接使用 `producerCoreIdx=taskIdx`，再用相同的 `subBlockIdx` 得到 `producerAivIdx=producerCoreIdx*subBlockNum+subBlockIdx`，因此两个 O AIV 分别等待对应 H AIV 发布的 H/V 切片，不会互相代替。
 
 IB 槽按 `[eventId][logicalAivIdx][8 x int32]` 编址，其中 `logicalAivNum=activeCoreNum*subBlockNum`。kernel 分流前，所有活动 AIV 分工把全部 event 槽显式写零。本地零值由 `Duplicate` 在 `PIPE_V` 生成，通过配对的 `SetFlag/WaitFlag<HardEvent::V_MTE3>` 交给后续 UB→GM `DataCopy`；全部异步 `DataCopy` 提交后，再用 `SetFlag/WaitFlag<HardEvent::MTE3_MTE2>` 等待 GM 写回完成，确保后续 MTE2 上的 `IBSet/IBWait` 不会读取未落盘的共享槽，随后 AIC/AIV 执行一次 `SyncAll<false>()`，确认初始化完成后才进入 H 或 O。该初始化清零的是 GM event table；传给 `IBSet/IBWait` 的 32-byte UB tensor 是 API 的本地工作区，不是跨 core 共享状态。
 
@@ -132,21 +132,20 @@ IB 槽按 `[eventId][logicalAivIdx][8 x int32]` 编址，其中 `logicalAivNum=a
 
 ### 2.5 调度匹配与无死锁条件
 
-H 的 stream 0/1 初始任务是 `2p/2p+1`，每个 stream 完成该任务的全部 chunk 后再前进 `2R`。O 的次序是同一任务对的 `lane0 chunk0、lane1 chunk0、lane0 chunk1、lane1 chunk1...`，完成全部 chunk 后同样前进 `2R`。这保证同一 producer 的 IB 发布顺序与 consumer 等待顺序一致；最后一个奇数任务不存在时，两侧都会跳过 lane1。
+H 的每个 producer 只处理一个 task，并在两个内部 stream/slot 间处理相邻 chunk。O consumer 使用相同的 task 和 chunk 顺序，因此每个 producer 的 IB 发布顺序与对应 consumer 的等待顺序严格一致。
 
 在下列不变量成立时，当前静态同步图不存在必然环路：
 
-1. `activeCoreNum=2R`，producer/consumer 一一配对，H/O scheduler 使用相同的 `R`、task lane 和 chunk 数。
+1. `activeCoreNum=2T`，producer/consumer 一一配对，H/O scheduler 使用相同的 `T` 和 chunk 数。
 2. 所有 GM IB event 在第一次 `IBSet/IBWait` 前已清零，且 `pipelineSyncWorkspaceOffset`、event 数和实际分配大小一致。
 3. H 的每个有效 `HReady/VReady` 恰好有一个对应 O `IBWait`；无效 lane 和 final chunk 不额外等待不存在的事件。
 4. 两个 AIV 都执行每个 `0x2` 聚合握手；任何一个 AIV 提前退出都会使同 MIX core 的 AIC 永久等待。
 5. 每条 bypass/tail 分支也发布与常规路径相同代次的完成 flag，首轮 free flag 与末轮 drain wait 成对存在。
 6. `IBSet/IBWait` 的 32-byte 本地 UB 工作区与同一时刻的 Vector/Fixpipe UB 区域不重叠。
 
-FwdO chunk-pipeline 与 FwdH 使用相同的欠填充规则：当前 consumer 只有一个有效
-head 时固定使用 stage0，所有 chunk 在该 stage 上串行推进；只有两个有效 head
-时才启用 stage0/stage1。初始 `vec2Done` token 数和 scheduler 的 stage 索引必须
-使用同一个有效 stage 数。
+FwdO 的每个 consumer 固定负责一个 head task，并在 stage0/stage1 之间交替处理
+相邻 chunk，使 `Vec1(chunk i)` 与 `Vec2(chunk i-1)` 重叠。两个 stage 的初始
+`vec2Done` token 都必须预置，否则首轮落入任一 stage 时都可能等待未发布的 free token。
 因此，若注释 IB 后超时消失，优先检查的不是 GM 数值内容，而是上述任一不变量是否在运行时被破坏，尤其是 task/chunk 映射、某个 AIV 分支跳过发布、同步 workspace 越界或初始化 barrier 参与者不一致。`PRINTF` 会改变发射和流水时序，只能暴露或掩盖时序问题，不能作为同步正确性的组成部分。
 
 ### 2.6 IB 通信专用 UB 区域
@@ -168,7 +167,7 @@ A5 H/O kernel 统一使用 `chunk_fwd_h_o_fused_ub_layout.h` 声明 UB 布局。
 
 ## 3. Host tiling 约束
 
-Host 设置 `producerCoreNum=consumerCoreNum=ceil(T/2)`、`activeCoreNum=2*producerCoreNum`、`consumerCoreBase=producerCoreNum` 和 `scheduleMode=1`。进入该路径前必须满足 `ceil(T/2) <= floor(physicalCoreNum/2)`；不满足时当前返回失败，等待后续 saturated-core 路径实现。当前实现仅接受定长输入，且至少需要两个物理 AIC core。提供 `cuSeqlens` 或 `chunkIndices` 时返回失败。
+Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`consumerCoreBase=T` 和 `scheduleMode=1`。进入该路径前必须满足 `T <= floor(physicalCoreNum/2)`；不满足时当前返回失败。当前实现仅接受定长输入，且至少需要两个物理 AIC core。提供 `cuSeqlens` 或 `chunkIndices` 时返回失败。
 
 ## 4. TilingData ABI
 
@@ -232,7 +231,7 @@ H 只解释从 `batch` 到 `numChunksWorkspaceOffset` 的前缀；O 使用显式
 | --- | --- |
 | handoff H | `T * NC * K * V * E` |
 | handoff V | `T * tokens * V * E` |
-| pipeline sync | `A * 2 * 4 * 8 * 4`（每个 task lane 各一个 HReady 和 VReady） |
+| pipeline sync | `A * 2 * 2 * 8 * 4`（每个 task 一个 HReady 和 VReady） |
 | H v/v-update | 各 `R * C * V * F * S` |
 | H k-decay（有 GK） | `R * C * K * F * S` |
 | H state | `R * K * V * F * S` |

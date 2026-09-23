@@ -79,11 +79,8 @@ struct BlockSchedulerGdnFwdO {
     uint32_t batchChunks;
     uint32_t batchTokens;
     uint32_t pipelineHeadIdx{0};
-    uint32_t pipelineLaneIdx{0};
-    uint32_t pipelineHTaskBase{0};
+    uint32_t pipelineHTaskIdx{0};
     uint32_t pipelineChunkIdx{0};
-    uint32_t pipelineLaneCount{0};
-    uint32_t pipelineTaskStride{0};
     uint32_t pipelineStageCount{GDN_FWD_O_PING_PONG_STAGES};
     uint32_t initialStageCount{0};
 
@@ -140,21 +137,13 @@ struct BlockSchedulerGdnFwdO {
                 isRunning = false;
             } else {
                 const uint32_t consumerIdx = cubeCoreIdx - consumerCoreBegin;
-                pipelineLaneIdx = 0;
                 pipelineChunkIdx = 0;
-                pipelineHTaskBase = consumerIdx * GDN_FWD_O_PING_PONG_STAGES;
-                pipelineTaskStride = producerCoreNum * GDN_FWD_O_PING_PONG_STAGES;
+                pipelineHTaskIdx = consumerIdx;
                 workspaceCoreIdx = consumerIdx;
                 const uint32_t hTaskNum = shapeBatch * vNumHead;
-                const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
-                                                    ? hTaskNum - pipelineHTaskBase
-                                                    : 0;
                 // Keep two pipeline slots even when only one head is valid.
                 // The slots represent reusable chunk buffers, not head lanes.
                 pipelineStageCount = GDN_FWD_O_PING_PONG_STAGES;
-                pipelineLaneCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
-                                        ? remainingTasks
-                                        : GDN_FWD_O_PING_PONG_STAGES;
                 // Both ping-pong slots are free before the first task, even
                 // when this consumer owns only one head.  The first task is
                 // scheduled into slot 1 (currStage starts at 1), so limiting
@@ -162,7 +151,7 @@ struct BlockSchedulerGdnFwdO {
                 // deadlock the first AIC handoff for odd task counts.
                 initialStageCount = GDN_FWD_O_PING_PONG_STAGES;
                 currStage = pipelineStageCount - 1;
-                isRunning = pipelineHTaskBase < shapeBatch * vNumHead;
+                isRunning = pipelineHTaskIdx < hTaskNum;
             }
         } else if (taskAffinity) {
             taskIdx = 0;
@@ -236,42 +225,16 @@ struct BlockSchedulerGdnFwdO {
         uint32_t curTaskIdx;
         if (chunkPipeline) {
             const uint32_t hTaskNum = shapeBatch * vNumHead;
-            while (pipelineHTaskBase < hTaskNum && pipelineLaneCount == 0) {
-                pipelineHTaskBase += pipelineTaskStride;
-                pipelineLaneIdx = 0;
-                pipelineChunkIdx = 0;
-                const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
-                                                    ? hTaskNum - pipelineHTaskBase
-                                                    : 0;
-                pipelineLaneCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
-                                        ? remainingTasks
-                                        : GDN_FWD_O_PING_PONG_STAGES;
-            }
-            if (unlikely(pipelineHTaskBase >= hTaskNum)) {
+            if (unlikely(pipelineHTaskIdx >= hTaskNum || pipelineChunkIdx >= numChunks)) {
                 isRunning = false;
                 currStage = (currStage + 1) % pipelineStageCount;
                 return;
             }
-            const uint32_t hTaskIdx = pipelineHTaskBase + pipelineLaneIdx;
-            const uint32_t pipelineBatchIdx = hTaskIdx / vNumHead;
-            pipelineHeadIdx = hTaskIdx % vNumHead;
+            const uint32_t pipelineBatchIdx = pipelineHTaskIdx / vNumHead;
+            pipelineHeadIdx = pipelineHTaskIdx % vNumHead;
             curTaskIdx = pipelineBatchIdx * numChunks * vNumHead +
                          pipelineChunkIdx * vNumHead + pipelineHeadIdx;
-            pipelineLaneIdx += 1;
-            if (pipelineLaneIdx == pipelineLaneCount) {
-                pipelineLaneIdx = 0;
-                pipelineChunkIdx += 1;
-                if (pipelineChunkIdx == numChunks) {
-                    pipelineChunkIdx = 0;
-                    pipelineHTaskBase += pipelineTaskStride;
-                    const uint32_t remainingTasks = hTaskNum > pipelineHTaskBase
-                                                        ? hTaskNum - pipelineHTaskBase
-                                                        : 0;
-                    pipelineLaneCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
-                                            ? remainingTasks
-                                            : GDN_FWD_O_PING_PONG_STAGES;
-                }
-            }
+            pipelineChunkIdx += 1;
         } else if (taskAffinity) {
             taskIdx = FindNextOwnedDenseTask(taskIdx);
             if (unlikely(taskIdx >= taskNum)) {

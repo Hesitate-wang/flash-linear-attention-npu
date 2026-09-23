@@ -666,10 +666,7 @@ public:
             for (uint32_t waveIdx = 0; waveIdx < taskWaveCount; ++waveIdx) {
                 EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
                 EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
-                const uint32_t waveGroup = waveIdx / PING_PONG_STAGES;
-                const uint32_t waveLane = waveIdx % PING_PONG_STAGES;
-                uint32_t taskIdx = waveGroup * coreNum * PING_PONG_STAGES +
-                                   coreIdx * PING_PONG_STAGES + waveLane;
+                uint32_t taskIdx = waveIdx * coreNum + coreIdx;
                 uint32_t pingpongFlag = 1;
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);

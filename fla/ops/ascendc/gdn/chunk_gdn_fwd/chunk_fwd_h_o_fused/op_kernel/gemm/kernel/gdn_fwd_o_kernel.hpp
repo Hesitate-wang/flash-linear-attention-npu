@@ -186,14 +186,11 @@ public:
         if (!chunkPipelineEnabled) {
             return;
         }
-        const uint32_t producerPairIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t producerCoreIdx =
-            (producerPairIdx % (producerCoreNum * GDN_FWD_O_PING_PONG_STAGES)) /
-            GDN_FWD_O_PING_PONG_STAGES;
+        const uint32_t producerTaskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t producerCoreIdx = producerTaskIdx;
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
-        const uint32_t taskLane =
-            producerPairIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        const uint32_t taskLane = 0;
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
                                producerAivIdx, eventBase + taskLane);
     }

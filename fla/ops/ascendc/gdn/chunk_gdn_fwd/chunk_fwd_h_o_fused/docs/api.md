@@ -53,7 +53,7 @@ Python 适配层返回 `(o, final_state)`；未请求最终状态时，`final_st
 ## 当前执行约束
 
 功能 kernel 已为 Atlas A2（`ascend910b` 和 `ascend910_93`）及 Ascend 950
-注册。在 A2 上，令 `P = B * HV`，tiling 要求 `2 * P` 严格小于可用 AIC
+注册。在 A2 上，令 `P = B * HV`，tiling 要求 `2 * P` 小于或等于可用 AIC
 核数。不满足该条件的形状会直接失败，不会回退到串行融合调度。
 
 Ascend 950 的定长自然指数路径与 A2 的功能范围一致：q/k/w/u 使用 FP16 或
