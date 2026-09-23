@@ -49,9 +49,10 @@ The dictionary uses `q`, `k`, `w`, `u` (or `v`), `g`, and optionally
 are accepted for references. When actual input is also supplied, the CPU
 comparison remains enabled and is followed by a second comparison against the
 supplied output; with actual output alone, only the supplied reference is used.
-Every comparison prints one line per element with expected value, actual value,
-absolute difference, relative difference, and PASS/FAIL status, in addition to
-the summary.
+The report uses the existing `data_compare` format. Clean results print only
+the first and last 20 flattened values; failed comparisons print only the
+failing rows, capped at 50. Each displayed row contains expected value, actual
+value, absolute difference, and relative difference, followed by a summary.
 
 Final-state and initial-state coverage can be enabled independently:
 

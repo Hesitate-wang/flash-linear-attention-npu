@@ -426,7 +426,7 @@ def data_compare(
     rtol: float,
     atol: float,
 ) -> None:
-    """Print a data_compare-style per-element report and enforce tolerance."""
+    """Print compact data_compare output and enforce the configured tolerance."""
     actual_cpu = actual.detach().cpu().float()
     expected_cpu = expected.detach().cpu().float()
     if actual_cpu.shape != expected_cpu.shape:
@@ -443,20 +443,52 @@ def data_compare(
     tolerance = atol + rtol * expected_flat.abs()
     passed = torch.isfinite(actual_flat) & torch.isfinite(expected_flat) & (abs_diff <= tolerance)
 
-    print("-" * 120)
-    print(f"{name}: shape={tuple(actual_cpu.shape)}, elements={actual_flat.numel()}")
-    print("index\texpected\tactual\tabs_diff\trel_diff\tresult")
-    for index, (expected_value, actual_value, abs_value, rel_value, ok) in enumerate(
-        zip(expected_flat, actual_flat, abs_diff, relative_diff, passed)
-    ):
-        print(
-            f"{index:08d}\t{float(expected_value):+.8e}\t{float(actual_value):+.8e}\t"
-            f"{float(abs_value):.8e}\t{float(rel_value):.8e}\t{'PASS' if bool(ok) else 'FAIL'}"
-        )
-
+    failed_indices = torch.nonzero(~passed, as_tuple=False).flatten().tolist()
     failed_count = int((~passed).sum().item())
     max_abs = float(abs_diff.max().item()) if abs_diff.numel() else 0.0
     max_relative = float(relative_diff.max().item()) if relative_diff.numel() else 0.0
+
+    # Match the existing PTA data_compare format.  For a clean result print
+    # only the beginning/end of the flattened data; for a failing result print
+    # only failing rows, capped at 50 entries.
+    if failed_indices:
+        display_indices = failed_indices[:50]
+        title = f"{name} error rows ({len(display_indices)}/{len(failed_indices)})"
+        insert_gap = False
+    else:
+        element_count = actual_flat.numel()
+        if element_count <= 40:
+            display_indices = list(range(element_count))
+            insert_gap = False
+        else:
+            display_indices = list(range(20)) + list(range(element_count - 20, element_count))
+            insert_gap = True
+        title = name
+
+    print("-" * 95)
+    print(f"{title}: shape={tuple(actual_cpu.shape)}, elements={actual_flat.numel()}")
+    print("Loop\tExpectOut\tRealOut\tFpDiff\tRateDiff")
+    print("-" * 95)
+    for display_position, index in enumerate(display_indices):
+        if insert_gap and display_position == 20:
+            print("...\t...\t...\t...\t...")
+        expected_value = float(expected_flat[index])
+        actual_value = float(actual_flat[index])
+        abs_value = abs(expected_value - actual_value)
+        # Keep the reference helper's interpretation: small absolute errors
+        # are displayed as absolute values, otherwise display relative error.
+        rate_value = (
+            abs_value
+            if abs_value < atol
+            else abs_value / (max(abs(expected_value), abs(actual_value)) + 1e-10)
+        )
+        print(
+            f"{index + 1:08d}\t{expected_value:.7f}\t{actual_value:.7f}\t"
+            f"{abs_value:.7f}\t{rate_value:.7f}"
+        )
+    if failed_indices and len(failed_indices) > len(display_indices):
+        print(f"... {len(failed_indices) - len(display_indices)} more error rows omitted ...")
+    print("-" * 95)
     print(
         f"{name}: failed={failed_count}/{actual_flat.numel()}, "
         f"max_abs={max_abs:.6e}, max_relative={max_relative:.6e}"
