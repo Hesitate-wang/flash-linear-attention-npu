@@ -197,7 +197,6 @@ public:
         const uint32_t taskLane = 0;
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
                                producerAivIdx, eventBase + taskLane);
-        AscendC::PRINTF("producerCoreIdx %d, taskLane %d, producerAivIdx %d, eventBase %d\n", producerCoreIdx, taskLane, producerAivIdx, eventBase);
     }
 
     __aicore__ inline GDNFwdOKernel() {}
