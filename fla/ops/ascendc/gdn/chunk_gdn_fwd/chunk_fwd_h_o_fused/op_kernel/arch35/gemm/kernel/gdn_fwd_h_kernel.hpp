@@ -935,6 +935,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
             for (uint32_t slot = 0; slot < tasksPerCore; ++slot) {
+                bool firstTaskInSlot = true;
                 for (uint32_t taskIdx = coreIdx * tasksPerCore + slot;
                      taskIdx < taskCount; taskIdx += taskStride) {
                     uint32_t batchIdx = taskIdx / vNumHead;
@@ -986,6 +987,10 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                         pingpongFlag = 1 - pingpongFlag;
                     }
+                    if (firstTaskInSlot && slot < vecBlockScheduler.GetInitialStageCount()) {
+                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[slot]);
+                        firstTaskInSlot = false;
+                    }
                     SignalInitialStateReady(taskIdx);
                 }
             }
@@ -1001,10 +1006,10 @@ public:
                     AscendC::CrossCoreSetFlag<0x4, PIPE_V>(DIRECT_UB_FREE_FLAG_BEGIN + slot);
                 }
             }
-            const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
-            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
-            }
+            // const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
+            // for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+            //     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
+            // }
 
             EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
             EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
@@ -1036,10 +1041,10 @@ public:
             while (vecBlockScheduler.isRunning) {
                 if (currStage == 0) {
                     /* V1:
-                     * gmV = gmU - gmVWorkspace
                      * g_buf = gmG[-1] - gmG
                      * g_buf = exp(g_buf)
-                     * gmVWorkspace = g_buf * gmV
+                     * gmV = gmU - gmVWorkspace
+                     * gmVUpdateWorkspace = g_buf * gmV
                      */
                     vecBlockScheduler.InitTasks();
                     for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {

@@ -746,10 +746,10 @@ public:
                     }
                     if (currStage == 0) {
                     /* V1:
-                     * gmV = gmU - gmVWorkspace
                      * g_buf = gmG[-1] - gmG
                      * g_buf = exp(g_buf)
-                     * gmVWorkspace = g_buf * gmV
+                     * gmV = gmU - gmVWorkspace
+                     * gmVUpdateWorkspace = g_buf * gmV
                      */
                     vecBlockScheduler.InitTasks();
                     for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
