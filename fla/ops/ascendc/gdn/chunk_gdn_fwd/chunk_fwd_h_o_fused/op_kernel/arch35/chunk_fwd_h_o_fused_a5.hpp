@@ -34,40 +34,57 @@ __aicore__ inline uint32_t GetMixedCoreIdx()
 // Initialize every ready/ACK slot before producer and consumer cores take
 // different paths; the user workspace is not guaranteed to be zeroed.
 __aicore__ inline void InitializePipelineSync(
-    GM_ADDR userWorkspace, const ChunkFwdHOFusedTilingData &tiling)
+    GM_ADDR userWorkspace,
+    const ChunkFwdHOFusedTilingData &tiling)
 {
     if ASCEND_IS_AIV {
-        AscendC::TPipe pipe;
-        AscendC::TBuf<AscendC::TPosition::VECCALC> syncBuf;
-        pipe.InitBuffer(syncBuf, CHUNK_FWD_HO_IB_WORDS_PER_EVENT * sizeof(int32_t));
-        AscendC::LocalTensor<int32_t> syncLocal = syncBuf.Get<int32_t>();
-        const AscendC::TEventID zeroReadyEvent =
-            pipe.AllocEventID<AscendC::HardEvent::V_MTE3>();
-        const AscendC::TEventID syncGmReadyEvent =
-            pipe.AllocEventID<AscendC::HardEvent::MTE3_MTE2>();
-        AscendC::Duplicate(syncLocal, static_cast<int32_t>(0), CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
+        Catlass::Arch::Resource<Catlass::Arch::Ascend950> resource;
+
+        AscendC::LocalTensor<int32_t> syncLocal =
+            resource.ubBuf.GetBufferByByte<int32_t>(
+                CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
+
+        constexpr AscendC::TEventID zeroReadyEvent = EVENT_ID0;
+        constexpr AscendC::TEventID syncGmReadyEvent = EVENT_ID0;
+
+        AscendC::Duplicate(
+            syncLocal,
+            static_cast<int32_t>(0),
+            CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
+
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
 
         AscendC::GlobalTensor<int32_t> syncGm;
         syncGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
             userWorkspace + tiling.pipelineSyncWorkspaceOffset));
+
         const uint32_t logicalAivNum =
-            static_cast<uint32_t>(tiling.activeCoreNum) * AscendC::GetSubBlockNum();
+            static_cast<uint32_t>(tiling.activeCoreNum) *
+            AscendC::GetSubBlockNum();
         const uint32_t logicalAivIdx = AscendC::GetBlockIdx();
+
         if (logicalAivIdx < logicalAivNum) {
             for (uint32_t eventId = 0;
-                 eventId < static_cast<uint32_t>(tiling.pipelineEventCount); ++eventId) {
+                 eventId < static_cast<uint32_t>(tiling.pipelineEventCount);
+                 ++eventId) {
                 const uint32_t offset =
-                    (eventId * logicalAivNum + logicalAivIdx) * CHUNK_FWD_HO_IB_WORDS_PER_EVENT;
-                AscendC::DataCopy(syncGm[offset], syncLocal, CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
+                    (eventId * logicalAivNum + logicalAivIdx) *
+                    CHUNK_FWD_HO_IB_WORDS_PER_EVENT;
+
+                AscendC::DataCopy(
+                    syncGm[offset],
+                    syncLocal,
+                    CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
             }
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(syncGmReadyEvent);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(syncGmReadyEvent);
-        pipe.ReleaseEventID<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
-        pipe.ReleaseEventID<AscendC::HardEvent::MTE3_MTE2>(syncGmReadyEvent);
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(
+            syncGmReadyEvent);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(
+            syncGmReadyEvent);
     }
+
     AscendC::SyncAll<false>();
 }
 
