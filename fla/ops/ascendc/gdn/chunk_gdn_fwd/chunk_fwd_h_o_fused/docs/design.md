@@ -245,3 +245,18 @@ O 和 A-prime 临时区按 consumer-local index 编址；H 临时区按 producer
 ## 6. 接口与验证
 
 公开 ACLNN/L0 输入、输出、属性顺序和 kernel ABI 顺序保持现有实现不变。修改后至少静态验证：TilingData 字段顺序/类型/大小一致；A2/A5 key 1/2 均有对应 entry；`activeCoreNum=2*producerCoreNum` 且 producer/consumer 数量相等；handoff workspace 使用任务数 `T`，core-local workspace 使用对应 producer/consumer 数；A5 自然指数路径无 H/O 边界 `SyncAll` 并逐 chunk 执行 IBWait。
+
+## 7. A5 H 主路径编译期分离
+
+A5 H producer 按数据通路实例化三种 `GDNFwdHPath`：
+
+| specialization | 选择条件 | Cube/Vector 中间结果 |
+| --- | --- | --- |
+| `DirectUb` | 定长、无尾 chunk、`16 <= chunkSize <= 64`、`K=V=128` 且任务数覆盖 producer core | Cube Fixpipe 直接写 AIV UB，Vector 通过 direct ready/free flag 消费 |
+| `BoundedGm` | 变长或 `seqlen % chunkSize != 0` | bounded MMAD 写 GM workspace，Vector 由 MTE2 搬入 UB |
+| `StandardGm` | 其余场景 | 普通 MMAD 写 GM workspace；小于 16 token 的任务使用 Vector fallback |
+
+入口只执行一次运行时路径选择；选定后 Cube1/Cube2 循环以及 Vec1/Vec2 epilogue
+均通过 `if constexpr` 删除其他路径的 GM 搬运、direct flag 和收尾代码。首尾 chunk、
+初始/最终状态等随任务变化的条件仍在 specialization 内运行时判断。该调整不改变
+TilingData、workspace 布局、ready/free 代次和数学计算顺序。

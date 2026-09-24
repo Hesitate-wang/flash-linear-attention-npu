@@ -43,6 +43,7 @@ class BlockEpilogue <
     static constexpr bool kGated = KGatedTag::value;
     static constexpr bool scalarGated = KGatedTag::scalarGated;
     static constexpr bool useExp2 = KGatedTag::useExp2;
+    static constexpr bool kUseDirectFp32Ub = KGatedTag::useDirectFp32Ub;
     static constexpr float LN2 = 0.6931471805599453f;
 public:
     using DispatchPolicy = EpilogueAtlasGDNFwdHVnew;
@@ -260,7 +261,6 @@ public:
         bool waitWsFromMte3,
         bool isPing,
         bool cube1AlreadyWaited,
-        bool useDirectFp32Ub,
         uint64_t directUbFreeFlagBegin,
         uint64_t directUbReadyFlagBegin
     )
@@ -281,7 +281,7 @@ public:
         }
         uint32_t pingpongFlag = isPing ? 0 : pongBaseEvent;
         if (rowBegin >= mActual) {
-            if (useDirectFp32Ub) {
+            if constexpr (kUseDirectFp32Ub) {
                 uint32_t directUbSlot = isPing ? 0 : 1;
                 AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                     directUbReadyFlagBegin + directUbSlot);
@@ -317,7 +317,11 @@ public:
             vNewDecayUbTensor = isPing ? wideIoUbTensor_ping : wideIoUbTensor_pong;
         }
 
-        if (rowBegin < rowEnd && nvActual <= 128 && nvActual == inputStride) {
+        // DirectUb is dispatched only for K=V=128, so its generic GM-tiled
+        // path is compile-time unreachable.
+        const bool useContiguousFastPath =
+            kUseDirectFp32Ub || (nvActual <= 128 && nvActual == inputStride);
+        if (useContiguousFastPath) {
             uint32_t mActualThisSubBlock = rowEnd - rowBegin;
             AscendC::GlobalTensor<VElementOutput> vnewOutputThisSubBlock = vnewOutput[rowBegin * inputStride];
             AscendC::GlobalTensor<UElementInput> uInputThisSubBlock = uInput[rowBegin * inputStride];
@@ -342,7 +346,7 @@ public:
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
             }
-            if (useDirectFp32Ub) {
+            if constexpr (kUseDirectFp32Ub) {
                 uint32_t directUbSlot = isPing ? 0 : 1;
                 AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                     directUbReadyFlagBegin + directUbSlot);
@@ -416,7 +420,7 @@ public:
 
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
             }
-            if (useDirectFp32Ub) {
+            if constexpr (kUseDirectFp32Ub) {
                 uint32_t directUbSlot = isPing ? 0 : 1;
                 AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
                     directUbFreeFlagBegin + directUbSlot);

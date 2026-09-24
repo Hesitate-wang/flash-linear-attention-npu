@@ -39,6 +39,7 @@ class BlockEpilogue <
     static constexpr bool kGated = KGatedTag::value;
     static constexpr bool scalarGated = KGatedTag::scalarGated;
     static constexpr bool useExp2 = KGatedTag::useExp2;
+    static constexpr bool kUseDirectFp32Ub = KGatedTag::useDirectFp32Ub;
     static constexpr float LN2 = 0.6931471805599453f;
 public:
     // Type aliases
@@ -214,7 +215,6 @@ public:
         bool useInitialState,
         bool isPing,
         bool cube2AlreadyWaited,
-        bool useDirectFp32Ub,
         uint64_t directUbFreeFlagBegin,
         uint64_t directUbReadyFlagBegin
     )
@@ -232,7 +232,7 @@ public:
             rowEnd = mActual;
         }
         if (rowBegin >= mActual) {
-            if (useDirectFp32Ub) {
+            if constexpr (kUseDirectFp32Ub) {
                 uint32_t directUbSlot = isPing ? 0 : 1;
                 AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                     directUbReadyFlagBegin + directUbSlot);
@@ -289,7 +289,7 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
         }
 
-        if (useDirectFp32Ub) {
+        if constexpr (kUseDirectFp32Ub) {
             uint32_t directUbSlot = isPing ? 0 : 1;
             AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                 directUbReadyFlagBegin + directUbSlot);
@@ -310,9 +310,10 @@ public:
             AscendC::GlobalTensor<HElementInput> hInputThisTile = hInput[rowStart * outputStride];
             AscendC::GlobalTensor<float> hUpdateInputThisTile = hUpdateInput[rowStart * nActual];
             AscendC::GlobalTensor<FinalStateElement> finalStateThisTile = finalState[rowStart * outputStride];
-            AscendC::LocalTensor<float> hUpdateUbTensorThisTile = useDirectFp32Ub
-                ? hUpdateUbTensor[(rowStart - rowBegin) * nActual]
-                : hUpdateUbTensor;
+            AscendC::LocalTensor<float> hUpdateUbTensorThisTile = hUpdateUbTensor;
+            if constexpr (kUseDirectFp32Ub) {
+                hUpdateUbTensorThisTile = hUpdateUbTensor[(rowStart - rowBegin) * nActual];
+            }
 
             if (waitHFromV) {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
@@ -380,7 +381,7 @@ public:
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
             }
-            if (!useDirectFp32Ub) {
+            if constexpr (!kUseDirectFp32Ub) {
                 CopyGmToUb(hUpdateUbTensorThisTile, hUpdateInputThisTile, rowsThisTile, nActual, nActual);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
@@ -467,7 +468,7 @@ public:
         if constexpr (kGated) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
         }
-        if (useDirectFp32Ub) {
+        if constexpr (kUseDirectFp32Ub) {
             uint32_t directUbSlot = isPing ? 0 : 1;
             AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
                 directUbFreeFlagBegin + directUbSlot);

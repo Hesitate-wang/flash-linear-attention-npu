@@ -72,11 +72,18 @@ struct GDNFwdHTileShapes256 {
     using L0TileShape = tla::Shape<_128, _256, _64>;
 };
 
-template <bool KGated, bool ScalarGated, bool UseExp2>
+enum class GDNFwdHPath : uint8_t {
+    StandardGm,
+    BoundedGm,
+    DirectUb,
+};
+
+template <bool KGated, bool ScalarGated, bool UseExp2, GDNFwdHPath Path>
 struct GDNFwdHGateTag {
     static constexpr bool value = KGated;
     static constexpr bool scalarGated = ScalarGated;
     static constexpr bool useExp2 = UseExp2;
+    static constexpr bool useDirectFp32Ub = Path == GDNFwdHPath::DirectUb;
 };
 
 template<
@@ -89,7 +96,8 @@ template<
     bool scalarGated = true,
     bool useExp2 = false,
     bool kChunkPipeline = false,
-    bool kSignalProducerReady = kChunkPipeline
+    bool kSignalProducerReady = kChunkPipeline,
+    GDNFwdHPath kPath = GDNFwdHPath::StandardGm
 >
 class GDNFwdHKernel {
 public:
@@ -140,7 +148,7 @@ public:
 
     // vec 1
     using DispatchPolicyGDNFwdHVnew = Epilogue::EpilogueAtlasGDNFwdHVnew;
-    using GateTag = GDNFwdHGateTag<kGated, scalarGated, useExp2>;
+    using GateTag = GDNFwdHGateTag<kGated, scalarGated, useExp2, kPath>;
     using EpilogueGDNFwdHVnew = Epilogue::Block::BlockEpilogue<DispatchPolicyGDNFwdHVnew, VType, GType, UType, VworkType, VUpdateType, FinalStateType, GateTag>;
 
     // vec 2
@@ -172,6 +180,9 @@ public:
     static constexpr uint64_t DIRECT_UB_FLAG_STRIDE = 16;
     static constexpr uint32_t DIRECT_UB_STAGES = 2;
     static constexpr uint32_t DIRECT_VEC_NUM = 2;
+    static constexpr bool kUseDirectFp32Ub = kPath == GDNFwdHPath::DirectUb;
+    static constexpr bool kUseBoundedMmad = kPath == GDNFwdHPath::BoundedGm;
+    static constexpr bool kUseTailVectorFallback = kPath == GDNFwdHPath::StandardGm;
 
     uint32_t batch;
     uint32_t seqlen;
@@ -191,8 +202,6 @@ public:
     uint32_t numSeqWorkspaceOffset;
     uint32_t numChunksWorkspaceOffset;
     uint32_t kDecayWorkspaceOffset;
-    bool useDirectFp32Ub;
-
     AscendC::GlobalTensor<ElementK> gmK;
     AscendC::GlobalTensor<ElementW> gmW;
     AscendC::GlobalTensor<ElementU> gmU;
@@ -310,13 +319,6 @@ public:
         chunkPipelineEnabled = CanRunChunkPipeline();
         const uint32_t logicalCoreNum = chunkPipelineEnabled ? pipelineProducerCoreNum
                                                              : AscendC::GetBlockNum();
-        uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
-        useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
-                          !isVariedLen && chunkSize <= 64 &&
-                          seqlen % chunkSize == 0 &&
-                          kHeadDim == 128 && vHeadDim == 128 &&
-                          denseTaskCount >= logicalCoreNum;
-
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmW.SetGlobalBuffer((__gm__ ElementW *)w);
         gmU.SetGlobalBuffer((__gm__ ElementU *)u);
@@ -383,13 +385,6 @@ public:
         kDecayWorkspaceOffset = tilingData.kDecayWorkspaceOffset;
         const uint32_t logicalCoreNum = CanRunChunkPipeline() ? batch * vNumHead
                                                               : AscendC::GetBlockNum();
-        uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
-        useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
-                          !isVariedLen && chunkSize <= 64 &&
-                          seqlen % chunkSize == 0 &&
-                          kHeadDim == 128 && vHeadDim == 128 &&
-                          denseTaskCount >= logicalCoreNum;
-
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmW.SetGlobalBuffer((__gm__ ElementW *)w);
         gmU.SetGlobalBuffer((__gm__ ElementU *)u);
@@ -687,8 +682,6 @@ public:
             BlockMmadKV blockMmadKV(resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
             BlockMmadWHTail blockMmadWHTail(resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
             BlockMmadKVTail blockMmadKVTail(resource, chunkSize * cubeBlockScheduler.vBlockSize * sizeof(ElementV) * PING_PONG_STAGES);
-            bool useBoundedMmad = isVariedLen || (seqlen % chunkSize != 0);
-
             auto wLayout = tla::MakeLayout<ElementW, LayoutW>(shapeBatch * kNumHead * cubeBlockScheduler.totalTokens, kHeadDim);
             auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * cubeBlockScheduler.totalChunks * kHeadDim, vHeadDim);
 
@@ -703,9 +696,9 @@ public:
                 if (currStage == 0) {
                     /* C1: v_work = w @ h[i] */
                     cubeBlockScheduler.InitTasks();
-                    if (useDirectFp32Ub) {
+                    if constexpr (kUseDirectFp32Ub) {
                         RunCube1DirectUb(wLayout, hLayout);
-                    } else if (useBoundedMmad) {
+                    } else if constexpr (kUseBoundedMmad) {
                         for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
                             uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
                             const auto& stream = cubeBlockScheduler.GetStream(i);
@@ -787,9 +780,9 @@ public:
                     }
                 } else {
                     /* C2: h[i+1] = k.T @ v_work */
-                    if (useDirectFp32Ub) {
+                    if constexpr (kUseDirectFp32Ub) {
                         RunCube2DirectUb(kLayout);
-                    } else if (useBoundedMmad) {
+                    } else if constexpr (kUseBoundedMmad) {
                         for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
                             uint32_t streamId = cubeBlockScheduler.GetStreamId(i);
                             const auto& stream = cubeBlockScheduler.GetStream(i);
@@ -893,7 +886,7 @@ public:
             for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
                 Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
             }
-            if (useDirectFp32Ub) {
+            if constexpr (kUseDirectFp32Ub) {
                 for (uint32_t slot = 0; slot < DIRECT_UB_STAGES; ++slot) {
                     AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(DIRECT_UB_FREE_FLAG_BEGIN + slot);
                     AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(
@@ -904,7 +897,6 @@ public:
         }
 
         if ASCEND_IS_AIV {
-            bool useBoundedMmad = isVariedLen || (seqlen % chunkSize != 0);
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
             uint32_t coreIdx = AscendC::GetBlockIdx() / subBlockNum;
@@ -1001,7 +993,7 @@ public:
                 AscendC::SyncAll<false>();
             }
 
-            if (useDirectFp32Ub) {
+            if constexpr (kUseDirectFp32Ub) {
                 for (uint32_t slot = 0; slot < DIRECT_UB_STAGES; ++slot) {
                     AscendC::CrossCoreSetFlag<0x4, PIPE_V>(DIRECT_UB_FREE_FLAG_BEGIN + slot);
                 }
@@ -1055,8 +1047,10 @@ public:
                         }
                         const GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
                         AscendC::LocalTensor<ElementV> l1VUpdate = (i == 0) ? l1VUpdatePing : l1VUpdatePong;
-                        bool tailVectorPath =
-                            vec1Offsets.blockTokens < 16 && !useBoundedMmad;
+                        bool tailVectorPath = false;
+                        if constexpr (kUseTailVectorFallback) {
+                            tailVectorPath = vec1Offsets.blockTokens < 16;
+                        }
                         if (tailVectorPath) {
                             Arch::CrossCoreWaitFlag(
                                 vecBlockScheduler.cube1Done[streamId]);
@@ -1065,7 +1059,6 @@ public:
                         }
                         bool waitWsFromMte3 = storeFinalState && std::is_same<ElementFinalState, float>::value &&
                                               event0FromMte3[streamId];
-                        bool useDirectForTask = useDirectFp32Ub && !tailVectorPath;
                         epilogueGDNFwdHVnew(
                             gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset], l1VUpdate,
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
@@ -1073,7 +1066,7 @@ public:
                             vec1Offsets.blockTokens, kHeadDim, vec1Offsets.vBlockDim, vHeadDim,
                             vecBlockScheduler.cube1Done[streamId], vecBlockScheduler.vec1Done[streamId],
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState,
-                            waitWsFromMte3, (i == 0), tailVectorPath, useDirectForTask,
+                            waitWsFromMte3, (i == 0), tailVectorPath,
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
                         SignalProducerSliceReady(
@@ -1092,8 +1085,10 @@ public:
                         }
                         const GDNFwdHOffsets& vec2Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
                         if (vecBlockScheduler.NeedProcessStage2(stream)) {
-                            bool tailVectorPath =
-                                vec2Offsets.blockTokens < 16 && !useBoundedMmad;
+                            bool tailVectorPath = false;
+                            if constexpr (kUseTailVectorFallback) {
+                                tailVectorPath = vec2Offsets.blockTokens < 16;
+                            }
                             if (tailVectorPath) {
                                 Arch::CrossCoreWaitFlag(
                                     vecBlockScheduler.cube2Done[streamId]);
@@ -1117,11 +1112,10 @@ public:
                                 vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, vecBlockScheduler.cube2Done[streamId],
                                 vec2Offsets.isInitialState, vec2Offsets.isFinalState, storeFinalState,
                                 useInitialState, (i == 0), tailVectorPath,
-                                useDirectFp32Ub && !tailVectorPath,
                                 DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                             );
                         } else {
-                            if (!useDirectFp32Ub) {
+                            if constexpr (!kUseDirectFp32Ub) {
                                 Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
                             }
                         }

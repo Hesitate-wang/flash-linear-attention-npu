@@ -151,7 +151,8 @@ __aicore__ inline void FillNaturalOTiling(
 }
 
 template <typename InputT, typename GateT, typename StateT,
-          typename TileShapes, bool UseGk, bool UseExp2>
+          typename TileShapes, bool UseGk, bool UseExp2,
+          Catlass::Gemm::Kernel::GDNFwdHPath Path>
 __aicore__ inline void RunH(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
@@ -159,7 +160,8 @@ __aicore__ inline void RunH(
     GM_ADDR userWorkspace)
 {
     using Kernel = Catlass::Gemm::Kernel::GDNFwdHKernel<
-        InputT, GateT, StateT, float, TileShapes, UseGk, true, UseExp2, true, !UseExp2>;
+        InputT, GateT, StateT, float, TileShapes, UseGk, true, UseExp2, true, !UseExp2,
+        Path>;
     Kernel kernel;
     kernel.Init(k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
                 h, vNew, finalState, tiling, userWorkspace);
@@ -167,7 +169,8 @@ __aicore__ inline void RunH(
 }
 
 template <typename InputT, typename GateT, typename StateT,
-          typename TileShapes, bool UseExp2>
+          typename TileShapes, bool UseExp2,
+          Catlass::Gemm::Kernel::GDNFwdHPath Path>
 __aicore__ inline void DispatchHByGk(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
@@ -175,13 +178,47 @@ __aicore__ inline void DispatchHByGk(
     GM_ADDR userWorkspace, bool useGk)
 {
     if (useGk) {
-        RunH<InputT, GateT, StateT, TileShapes, true, UseExp2>(
+        RunH<InputT, GateT, StateT, TileShapes, true, UseExp2, Path>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
     } else {
-        RunH<InputT, GateT, StateT, TileShapes, false, UseExp2>(
+        RunH<InputT, GateT, StateT, TileShapes, false, UseExp2, Path>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
+    }
+}
+
+template <typename InputT, typename TileShapes, bool UseExp2,
+          Catlass::Gemm::Kernel::GDNFwdHPath Path>
+__aicore__ inline void DispatchHByPath(
+    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
+    GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
+    GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling,
+    GM_ADDR userWorkspace, const ChunkFwdHOFusedTilingData &data)
+{
+    constexpr int64_t DTYPE_FP32 = 2;
+    if (data.stateDataType == DTYPE_FP32) {
+        if (data.gDataType == DTYPE_FP32) {
+            DispatchHByGk<InputT, float, float, TileShapes, UseExp2, Path>(
+                k, w, u, g, gk, initialState,
+                cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
+                userWorkspace, data.useGk);
+        } else {
+            DispatchHByGk<InputT, InputT, float, TileShapes, UseExp2, Path>(
+                k, w, u, g, gk, initialState,
+                cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
+                userWorkspace, data.useGk);
+        }
+    } else if (data.gDataType == DTYPE_FP32) {
+        DispatchHByGk<InputT, float, InputT, TileShapes, UseExp2, Path>(
+            k, w, u, g, gk, initialState,
+            cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
+            userWorkspace, data.useGk);
+    } else {
+        DispatchHByGk<InputT, InputT, InputT, TileShapes, UseExp2, Path>(
+            k, w, u, g, gk, initialState,
+            cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
+            userWorkspace, data.useGk);
     }
 }
 
@@ -192,30 +229,31 @@ __aicore__ inline void DispatchH(
     GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling,
     GM_ADDR userWorkspace, const ChunkFwdHOFusedTilingData &data)
 {
-    constexpr int64_t DTYPE_FP32 = 2;
-    if (data.stateDataType == DTYPE_FP32) {
-        if (data.gDataType == DTYPE_FP32) {
-            DispatchHByGk<InputT, float, float, TileShapes, UseExp2>(
-                k, w, u, g, gk, initialState,
-                cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-                userWorkspace, data.useGk);
-        } else {
-            DispatchHByGk<InputT, InputT, float, TileShapes, UseExp2>(
-                k, w, u, g, gk, initialState,
-                cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-                userWorkspace, data.useGk);
-        }
-    } else if (data.gDataType == DTYPE_FP32) {
-        DispatchHByGk<InputT, float, InputT, TileShapes, UseExp2>(
-            k, w, u, g, gk, initialState,
-            cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-            userWorkspace, data.useGk);
-    } else {
-        DispatchHByGk<InputT, InputT, InputT, TileShapes, UseExp2>(
-            k, w, u, g, gk, initialState,
-            cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-            userWorkspace, data.useGk);
+    using Path = Catlass::Gemm::Kernel::GDNFwdHPath;
+    const uint64_t denseTaskCount = static_cast<uint64_t>(data.shapeBatch) * data.vNumHead;
+    const bool useDirectFp32Ub = data.isVariedLen == 0 &&
+                                 data.chunkSize >= 16 && data.chunkSize <= 64 &&
+                                 data.seqlen % data.chunkSize == 0 &&
+                                 data.kHeadDim == 128 && data.vHeadDim == 128 &&
+                                 denseTaskCount >= static_cast<uint64_t>(data.producerCoreNum);
+    if (useDirectFp32Ub) {
+        DispatchHByPath<InputT, TileShapes, UseExp2, Path::DirectUb>(
+            k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
+            h, vNew, finalState, tiling, userWorkspace, data);
+        return;
     }
+
+    const bool useBoundedMmad = data.isVariedLen != 0 || data.seqlen % data.chunkSize != 0;
+    if (useBoundedMmad) {
+        DispatchHByPath<InputT, TileShapes, UseExp2, Path::BoundedGm>(
+            k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
+            h, vNew, finalState, tiling, userWorkspace, data);
+        return;
+    }
+
+    DispatchHByPath<InputT, TileShapes, UseExp2, Path::StandardGm>(
+        k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
+        h, vNew, finalState, tiling, userWorkspace, data);
 }
 
 template <typename GateT>

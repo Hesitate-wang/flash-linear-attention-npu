@@ -122,3 +122,15 @@
    最终状态的组合，比较融合实现与独立组合实现的 BSND 输出。
 7. 在 Ascend 950 上以自然指数分别运行 FP16/BF16、V=128/256、chunk=64/128、
    BNSD/NTD，并比较融合实现、独立组合实现和 CPU 标杆。
+
+## A5 H 主路径编译期分离（待设备验证）
+
+- `GDNFwdHPath` 已分为 `DirectUb`、`BoundedGm` 和 `StandardGm`；路径选择只保留在
+  A5 H 入口，Cube/Vector 主循环与两个 epilogue 使用编译期常量。
+- Direct 路径限定 `chunkSize >= 16`，原有小于 16 token 的 Vector fallback 统一由
+  `StandardGm` specialization 承担，避免 Direct specialization 内继续逐 task 判断。
+- 静态检查确认不再把运行时 `useDirectFp32Ub` 传入 Vec1/Vec2 epilogue，TilingData
+  和 workspace ABI 未修改，`git diff --check` 通过。
+- 目标环境需要分别覆盖：Direct（V128/chunk64）、Standard（V256/chunk64、
+  V128/chunk128、小于16 token）和 Bounded（非整除尾块或变长内部验证）路径；
+  每条路径均需比较 CPU/compose 精度并确认 ready/free 事件无悬空。
