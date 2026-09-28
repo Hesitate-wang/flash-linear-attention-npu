@@ -12,6 +12,8 @@
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
 | FwdO 架构隔离 | A2 实现在 `op_kernel/gemm/kernel`；A5 kernel、配套 epilogue、exp2 tiling/constants 和 UB layout 全部位于 `op_kernel/arch35` |
+| A5 自然指数 FwdO Vec1/HReady 重排 | qkmask 两条分支均先发射 gate/causal-mask Vector，再在 QK MTE2 前执行 HReady IBWait 并立即 ACK；`chunk=128` 仅首段握手。待设备检查三 chunk 精度、IB/flag 代次以及相同条件下的 profiling 总耗时 |
+| A5 FwdO V128 两段 Vec2 | 新增 `cube2Done[0/1]` 事件 8/9；Cube2 完成后先对整片 H FP32 乘 `exp(g)` 并驻留 UB，Cube3 完成后再 Add、Muls、Cast、写 O。V256 沿用旧融合路径。待设备验证 V128 chunk64/128、两种 gate dtype、三 chunk slot 回绕的精度、同步代次和总耗时 |
 
 ## 已完成的静态检查
 

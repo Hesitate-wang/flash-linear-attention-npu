@@ -83,6 +83,7 @@ O 的两个 stream 使用相同的编号空间，但语义不同：
 | --- | --- | --- |
 | `cube1Done[s]` | AIC→AIV，随后 AIV→AIC | 第一代表示 `Q @ K^T` workspace 可读；同一 flag 的下一代是两个 AIV 在收到 `HReady` 后给 AIC 的 ACK |
 | `vec1Done[s]` | AIV→AIC | masked QK 已写入 workspace，且 `VReady` 已消费，Cube3 的两个输入均可用 |
+| `cube2Done[s]` | AIC→AIV，仅 V128 | `Q @ H_before` 的 FP32 workspace 已可读；允许先计算 `Cube2 * exp(g)` |
 | `cube3Done[s]` | AIC→AIV | `masked(QK) @ V_new` workspace 可读 |
 | `vec2Done[s]` | AIV→AIC | 输出 epilogue 已完成对 H/V workspace 的最终读取，AIC 可以复用该 ping-pong 槽 |
 
@@ -93,9 +94,10 @@ AIV 预置 vec2Done[s]
 
 AIC: Cube1(Q @ K^T) -> set cube1Done[s]
 AIV: wait cube1Done[s]
+     -> 计算 gate 差、指数和 causal mask
      -> IBWait HReady[lane]
      -> set cube1Done[s]                 # 反向 ACK
-     -> 计算 masked(QK)
+     -> 读取 QK，计算并写回 masked(QK)
      -> IBWait VReady[lane]
      -> set vec1Done[s]
 
@@ -103,17 +105,39 @@ AIC: wait cube1Done[s]                   # 等待 HReady ACK
      -> Cube2(Q @ H_before)
      -> wait vec2Done[s]                 # 复用 H/V workspace 前
      -> wait vec1Done[s]
+     -> set cube2Done[s]                 # V128, Cube2 FixPipe 完成
      -> Cube3(masked(QK) @ V_new)
      -> set cube3Done[s]
 
-AIV: wait cube3Done[s]
-     -> 融合 Cube2/Cube3 结果并写 O
+AIV (V128): wait cube2Done[s]
+     -> 整片 FP32 Cube2 * exp(g)，驻留 H UB 槽
+     -> wait cube3Done[s]
+     -> 逐 tile 计算 (gated Cube2 + Cube3) * scale 并写 O
+     -> set vec2Done[s]
+
+AIV (V256): wait cube3Done[s]
+     -> 沿用原融合计算与写回
      -> set vec2Done[s]
 ```
 
 `cube1Done[s]` 是双向、分代复用的握手：AIC 发出第 `2n` 代，两个 AIV 各自等待后发出第 `2n+1` 代 ACK，AIC 必须消费 ACK 后才允许同一 stream 再发下一代 Cube1 完成事件。两个 ping-pong stream 使当前 Cube1 与上一任务的 Cube2/Cube3 重叠，但不能改变同一 stream 的代次顺序。
 
-`QK` 和 `masked(QK)` 在数学上都不依赖 H。当前代码仍按“wait Cube1 → wait HReady → ACK → masked(QK)”执行，因此 `HReady` 会阻塞 mask 计算；这里的 `HReady` 实际用于门控 AIC 的 `Q @ H_before`，不是 mask 的数据依赖。若后续把 `IBWait(HReady)` 下移以扩大并行度，必须同时保留 AIV→AIC 的 ACK，并证明 `cube1Done` 双向代次没有被重排。
+`QK` 和 `masked(QK)` 在数学上都不依赖 H。AIV 在等待 Cube1 结果后先发射
+gate 搬运、差值、指数及 causal mask 的 Vector 工作，再在 qkmask epilogue 内执行
+`IBWait(HReady)`，紧接着向 AIC ACK，之后才读取 QK、乘 mask、转换并写回。
+HReady 仍门控 Cube2 的 `Q @ H_before`；ACK 在 Vec1 的输出 MTE3 之前发出，
+使 Cube2 可与其余 Vec1 操作重叠。`chunk=128` 的双段 epilogue 仅在第一段
+执行一次 HReady/ACK。非 pipeline 路径跳过 IBWait，但保持 ACK 代次。
+IBWait 的内部全 pipe barrier 可能限制实际重叠，且 H 提前 ready 时会延后
+Cube2 的放行，需按目标 shape 对比精度和 profiling 总耗时。
+
+V128 的 Cube2 H workspace 每个 AIV 最多持有 `64 x 128 x 4 = 32 KiB`，
+完整载入已有的 ping/pong H UB 槽后原位乘 `exp(g)`，无需新 GM workspace。
+Cube3 仍使用独立的 attn workspace；`cube2Done` 在 Cube2 的 FixPipe 完成后发布，
+`cube3Done` 在 Cube3 完成后发布。第二段对同一个 FP32 H tile 先 Add 再 Muls，
+保持原融合公式和 cast 顺序。两个 stage 的 H UB 槽不重叠；`vec2Done` 在最后一块
+attn MTE2 结束后通知 AIC 复用 GM workspace。V256 的每 AIV 半片可达 64 KiB，
+超过单个 H UB 槽，保留原单阶段输出流程。
 
 ### 2.4 H 到 O 的 IB handoff
 

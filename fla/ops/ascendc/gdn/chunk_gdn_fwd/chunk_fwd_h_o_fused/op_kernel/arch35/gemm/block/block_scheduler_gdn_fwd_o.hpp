@@ -91,6 +91,7 @@ struct BlockSchedulerGdnFwdO {
     Arch::CrossCoreFlag vec1Done[GDN_FWD_O_PING_PONG_STAGES] = {2, 3};
     Arch::CrossCoreFlag cube3Done[GDN_FWD_O_PING_PONG_STAGES] = {4, 5};
     Arch::CrossCoreFlag vec2Done[GDN_FWD_O_PING_PONG_STAGES] = {6, 7};
+    Arch::CrossCoreFlag cube2Done[GDN_FWD_O_PING_PONG_STAGES] = {8, 9};
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdO() {}

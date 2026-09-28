@@ -424,6 +424,10 @@ public:
                     } else {
                         blockMmadQH256.finalWaitFlags();
                     }
+                    if (cube2Offsets.vBlockDim <= 128) {
+                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(
+                            cubeBlockScheduler.cube2Done[streamId]);
+                    }
 
                     auto tensorVWork = tla::MakeTensor(
                         gmVWorkspace[cube3Offsets.hvWorkOffset], ointerLayout,
@@ -481,12 +485,14 @@ public:
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
-                    WaitProducerSliceReady(
-                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                    // H is visible before this acknowledgement, so Cube2 can
-                    // compute Q @ H_old while Vec1 computes QK * mask.
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
-                        vecBlockScheduler.cube1Done[streamId]);
+                    const uint32_t producerTaskIdx = vec1Offsets.batchIdx * vNumHead +
+                                                     vec1Offsets.headIdx;
+                    const uint32_t producerAivIdx =
+                        producerTaskIdx * subBlockNum + subBlockIdx;
+                    typename EpilogueGDNFwdOQkmask::HReadyHandoff hReady{
+                        chunkPipelineEnabled, gmPipelineSync, GetPipelineSyncLocal(),
+                        producerAivIdx, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE,
+                        vecBlockScheduler.cube1Done[streamId]};
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
                     int64_t vec1OffsetAttn = vec1Offsets.attnWorkOffset;
@@ -495,7 +501,8 @@ public:
                         gmAftermaskWorkspace[vec1OffsetAttnMask],
                         gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
                         chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
-                        vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx
+                        vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx,
+                        hReady
                     );
                     if constexpr (!kFwdOAggregateQkMaskBarrier) {
                         if (isVariedLen != 0) {
@@ -517,17 +524,26 @@ public:
                     int64_t vec2OffsetVWork = vec2Offsets.hvWorkOffset;
                     int64_t vec2OffsetHWork = vec2Offsets.hvWorkOffset;
                     EpilogueGDNFwdOOutput epilogueGDNFwdOOutput(resource);
-                    epilogueGDNFwdOOutput(
-                        gmO[vec2OffsetO],
-                        gmG[vec2OffsetG], gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
-                        scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim,
-                        vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx,
-                        vec2Offsets.chunkIdx
-                        , &vecBlockScheduler.cube3Done[streamId]
-                        , (isVariedLen == 0 || kFwdOAggregateOutputBarrier)
-                              ? &vecBlockScheduler.vec2Done[streamId]
-                              : nullptr
-                    );
+                    Arch::CrossCoreFlag* releaseFlag =
+                        (isVariedLen == 0 || kFwdOAggregateOutputBarrier)
+                            ? &vecBlockScheduler.vec2Done[streamId] : nullptr;
+                    if (vec2Offsets.vBlockDim <= 128) {
+                        epilogueGDNFwdOOutput.ProcessNarrowSplit(
+                            gmO[vec2OffsetO], gmG[vec2OffsetG],
+                            gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
+                            scale, vec2Offsets.blockTokens, vec2Offsets.vBlockDim,
+                            vHeadDim, pingpongFlag,
+                            vecBlockScheduler.cube2Done[streamId],
+                            vecBlockScheduler.cube3Done[streamId], releaseFlag);
+                    } else {
+                        epilogueGDNFwdOOutput(
+                            gmO[vec2OffsetO], gmG[vec2OffsetG],
+                            gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
+                            scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim,
+                            vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx,
+                            vec2Offsets.chunkIdx, &vecBlockScheduler.cube3Done[streamId],
+                            releaseFlag);
+                    }
                     if constexpr (!kFwdOAggregateOutputBarrier) {
                         // Conservative varlen path: join the two AIV
                         // generations, then publish after both MTE3 pipelines

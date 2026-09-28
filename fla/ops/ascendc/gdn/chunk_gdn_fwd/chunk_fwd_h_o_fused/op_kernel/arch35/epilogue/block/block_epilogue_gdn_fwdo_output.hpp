@@ -150,6 +150,58 @@ __simd_vf__ inline void OutputFusedVfWide(
     }
 }
 
+// V128: keep the gated Cube2 half-tile in its existing 32 KiB H UB slot.
+__simd_vf__ inline void OutputGateVf(
+    __ubuf__ float* __restrict__ hAddr,
+    __ubuf__ float* __restrict__ gExpScalarAddr,
+    uint32_t rows,
+    uint32_t cols)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint32_t VL = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+    RegTensor<float> h0, h1, gate;
+    MaskReg full = CreateMask<float, MaskPattern::ALL>();
+    for (uint16_t row = 0; row < static_cast<uint16_t>(rows); ++row) {
+        __ubuf__ float* hRow = hAddr + row * cols;
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(gate, gExpScalarAddr + row);
+        LoadAlign<float, LoadDist::DIST_NORM>(h0, hRow);
+        LoadAlign<float, LoadDist::DIST_NORM>(h1, hRow + VL);
+        Mul(h0, h0, gate, full);
+        Mul(h1, h1, gate, full);
+        StoreAlign(hRow, h0, full);
+        StoreAlign(hRow + VL, h1, full);
+    }
+}
+
+__simd_vf__ inline void OutputAddScaleVf(
+    __ubuf__ float* __restrict__ outAddr,
+    __ubuf__ float* __restrict__ gatedHAddr,
+    __ubuf__ float* __restrict__ attnAddr,
+    uint32_t rows,
+    uint32_t cols,
+    float scale)
+{
+    using namespace AscendC::MicroAPI;
+    constexpr uint32_t VL = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+    RegTensor<float> h0, h1, a0, a1;
+    MaskReg full = CreateMask<float, MaskPattern::ALL>();
+    for (uint16_t row = 0; row < static_cast<uint16_t>(rows); ++row) {
+        __ubuf__ float* hRow = gatedHAddr + row * cols;
+        __ubuf__ float* aRow = attnAddr + row * cols;
+        __ubuf__ float* outRow = outAddr + row * cols;
+        LoadAlign<float, LoadDist::DIST_NORM>(h0, hRow);
+        LoadAlign<float, LoadDist::DIST_NORM>(h1, hRow + VL);
+        LoadAlign<float, LoadDist::DIST_NORM>(a0, aRow);
+        LoadAlign<float, LoadDist::DIST_NORM>(a1, aRow + VL);
+        Add(h0, h0, a0, full);
+        Add(h1, h1, a1, full);
+        Muls(h0, h0, scale, full);
+        Muls(h1, h1, scale, full);
+        StoreAlign(outRow, h0, full);
+        StoreAlign(outRow + VL, h1, full);
+    }
+}
+
 namespace Catlass::Epilogue::Block {
 
 template <
@@ -790,6 +842,119 @@ public:
                 pingpongFlag = 1 - pingpongFlag;
             }
         }
+    }
+
+    CATLASS_DEVICE
+    void ProcessNarrowSplit(
+        AscendC::GlobalTensor<HElementOutput> output,
+        AscendC::GlobalTensor<GElementInput> gateInput,
+        AscendC::GlobalTensor<AElementInput> attnInput,
+        AscendC::GlobalTensor<HElementInput> hInput,
+        float scale,
+        uint32_t rows,
+        uint32_t cols,
+        uint32_t outputStride,
+        uint32_t &pingpongFlag,
+        Arch::CrossCoreFlag cube2Ready,
+        Arch::CrossCoreFlag cube3Ready,
+        Arch::CrossCoreFlag* releaseFlag)
+    {
+        const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
+        const uint32_t rowsPerSubBlock = CeilDiv(rows, AscendC::GetSubBlockNum());
+        const uint32_t rowBegin = subBlockIdx * rowsPerSubBlock;
+        const uint32_t rowEnd = rowBegin + rowsPerSubBlock < rows
+                                    ? rowBegin + rowsPerSubBlock : rows;
+        if (rowBegin >= rowEnd) {
+            Arch::CrossCoreWaitFlag(cube2Ready);
+            Arch::CrossCoreWaitFlag(cube3Ready);
+            if (releaseFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*releaseFlag);
+            return;
+        }
+
+        AscendC::ResetMask();
+        AscendC::LocalTensor<float> gatedH = pingpongFlag == 0 ? hUbTensorPing : hUbTensorPong;
+        AscendC::LocalTensor<float> gateUb = gUbTensorPing;
+        AscendC::LocalTensor<GElementInput> gateLowUb = gUbFPTensorPing;
+        AscendC::DataCopyParams gateParams{
+            1, static_cast<uint16_t>(rows * sizeof(GElementInput)), 0, 0};
+        AscendC::DataCopyPadParams gatePad{false, 0, 0, 0};
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
+        if constexpr (std::is_same<GElementInput, float>::value) {
+            AscendC::DataCopyPad(gateUb, gateInput, gateParams, gatePad);
+        } else {
+            AscendC::DataCopyPad(gateLowUb, gateInput, gateParams, gatePad);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
+        if constexpr (!std::is_same<GElementInput, float>::value) {
+            AscendC::Cast(gateUb, gateLowUb, AscendC::RoundMode::CAST_NONE, rows);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        AscendC::Exp(gateUb, gateUb, rows);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        Arch::CrossCoreWaitFlag(cube2Ready);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
+        AscendC::DataCopy(gatedH, hInput[rowBegin * cols], (rowEnd - rowBegin) * cols);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
+        {
+            auto hAddr = reinterpret_cast<uint64_t>(gatedH.GetPhyAddr());
+            auto gAddr = reinterpret_cast<uint64_t>(gateUb.GetPhyAddr()) +
+                         rowBegin * sizeof(float);
+            OutputGateVf((__ubuf__ float*)hAddr, (__ubuf__ float*)gAddr,
+                         rowEnd - rowBegin, cols);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+
+        Arch::CrossCoreWaitFlag(cube3Ready);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        for (uint32_t row = rowBegin; row < rowEnd;) {
+            const uint32_t tileRows = rowEnd - row < 32 ? rowEnd - row : 32;
+            AscendC::LocalTensor<float> attnUb = pingpongFlag == 0 ? aUbTensorPing : aUbTensorPong;
+            AscendC::LocalTensor<float> outUb = pingpongFlag == 0 ? outUbTensorPing : outUbTensorPong;
+            AscendC::LocalTensor<HElementOutput> outLowUb =
+                pingpongFlag == 0 ? outUbFPTensorPing : outUbFPTensorPong;
+
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
+            AscendC::DataCopy(attnUb, attnInput[row * cols], tileRows * cols);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+            if (releaseFlag && row + tileRows == rowEnd) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*releaseFlag);
+            }
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+            {
+                auto outAddr = reinterpret_cast<uint64_t>(outUb.GetPhyAddr());
+                auto hAddr = reinterpret_cast<uint64_t>(gatedH.GetPhyAddr()) +
+                             (row - rowBegin) * cols * sizeof(float);
+                auto aAddr = reinterpret_cast<uint64_t>(attnUb.GetPhyAddr());
+                OutputAddScaleVf((__ubuf__ float*)outAddr, (__ubuf__ float*)hAddr,
+                                 (__ubuf__ float*)aAddr, tileRows, cols, scale);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
+            if constexpr (std::is_same<HElementOutput, half>::value) {
+                AscendC::Cast(outLowUb, outUb, AscendC::RoundMode::CAST_NONE, tileRows * cols);
+            } else {
+                AscendC::Cast(outLowUb, outUb, AscendC::RoundMode::CAST_RINT, tileRows * cols);
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
+            CopyOutputToGm(output[row * outputStride], outLowUb, tileRows, cols, outputStride);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
+            pingpongFlag = 1 - pingpongFlag;
+            row += tileRows;
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
     }
 
 private:
