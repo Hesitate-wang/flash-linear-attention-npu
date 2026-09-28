@@ -16,7 +16,7 @@
 using ChunkGatedDeltaRuleFwdHTilingData = ChunkFwdHOFusedHStageTilingData;
 
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
-#include "../../../chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
+#include "gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
 #undef CATLASS_ARCH
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
 #include "chunk_fwd_o_a5.h"

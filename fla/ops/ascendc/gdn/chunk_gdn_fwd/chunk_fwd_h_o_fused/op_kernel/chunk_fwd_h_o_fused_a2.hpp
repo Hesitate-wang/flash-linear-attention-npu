@@ -14,7 +14,7 @@
 #include "kernel_operator.h"
 #include "chunk_gated_delta_rule_fwd_h_struct.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
-#include "../../chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
+#include "gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
 #undef CATLASS_ARCH
 #include "chunk_fwd_o_struct.h"
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
