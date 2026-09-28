@@ -28,13 +28,13 @@ extern "C" __global__ __aicore__ void chunk_fwd_h_o_fused(
     if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunChunkFwdHOFused<
-            DTYPE_K, Catlass::Gemm::Kernel::GDNFwdHTileShapes128>(
+            DTYPE_K, Catlass::Gemm::Kernel::GDNFwdHTileShapes128, 128>(
             k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
             o, final_state, workspace, tiling, tilingData);
     } else if (TILING_KEY_IS(2)) {
         KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunChunkFwdHOFused<
-            DTYPE_K, Catlass::Gemm::Kernel::GDNFwdHTileShapes256>(
+            DTYPE_K, Catlass::Gemm::Kernel::GDNFwdHTileShapes256, 256>(
             k, w, u, g, gk, initial_state, q, cu_seqlens, chunk_indices,
             o, final_state, workspace, tiling, tilingData);
     }

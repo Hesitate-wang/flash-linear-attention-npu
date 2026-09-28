@@ -14,6 +14,7 @@
 #include "kernel_operator.h"
 #include "chunk_gated_delta_rule_fwd_h_struct.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
+#include "../../chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
 #undef CATLASS_ARCH
 #include "chunk_fwd_o_struct.h"
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
@@ -106,7 +107,7 @@ __aicore__ inline void FillOTiling(
     dst.activeCoreNum = src.activeCoreNum;
 }
 
-template <typename InputT, typename GateT, typename StateT, typename TileShapes, bool UseGk>
+template <typename InputT, typename GateT, typename StateT, typename TileShapes, bool UseGk, int V_DIM>
 __aicore__ inline void RunH(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR h, GM_ADDR vNew,
@@ -121,23 +122,41 @@ __aicore__ inline void RunH(
 }
 
 template <typename InputT, typename GateT, typename StateT, typename TileShapes>
+__aicore__ inline void RunHPreload(
+    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initialState,
+    GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR h, GM_ADDR vNew,
+    GM_ADDR finalState, GM_ADDR tiling, GM_ADDR userWorkspace)
+{
+    using Kernel = Catlass::Gemm::Kernel::GDNFwdHKernelPreload<
+        InputT, GateT, StateT, float>;
+    Kernel kernel;
+    kernel.Init(k, w, u, g, initialState, cuSeqlens, chunkIndices,
+                h, vNew, finalState, tiling, userWorkspace);
+    kernel.Process();
+}
+
+template <typename InputT, typename GateT, typename StateT, typename TileShapes, int V_DIM>
 __aicore__ inline void DispatchHByGk(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR h, GM_ADDR vNew,
     GM_ADDR finalState, GM_ADDR tiling, GM_ADDR userWorkspace, bool useGk)
 {
     if (useGk) {
-        RunH<InputT, GateT, StateT, TileShapes, true>(
+        RunH<InputT, GateT, StateT, TileShapes, true, V_DIM>(
+            k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
+            h, vNew, finalState, tiling, userWorkspace);
+    } else if constexpr (V_DIM == 128) {
+        RunHPreload<InputT, GateT, StateT, TileShapes>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
     } else {
-        RunH<InputT, GateT, StateT, TileShapes, false>(
+        RunH<InputT, GateT, StateT, TileShapes, false, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
     }
 }
 
-template <typename InputT, typename TileShapes>
+template <typename InputT, typename TileShapes, int V_DIM>
 __aicore__ inline void DispatchH(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR h, GM_ADDR vNew,
@@ -147,20 +166,20 @@ __aicore__ inline void DispatchH(
     constexpr int64_t DTYPE_FP32 = 2;
     if (data.stateDataType == DTYPE_FP32) {
         if (data.gDataType == DTYPE_FP32) {
-            DispatchHByGk<InputT, float, float, TileShapes>(
+            DispatchHByGk<InputT, float, float, TileShapes, V_DIM>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
                 h, vNew, finalState, tiling, userWorkspace, data.useGk);
         } else {
-            DispatchHByGk<InputT, InputT, float, TileShapes>(
+            DispatchHByGk<InputT, InputT, float, TileShapes, V_DIM>(
                 k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
                 h, vNew, finalState, tiling, userWorkspace, data.useGk);
         }
     } else if (data.gDataType == DTYPE_FP32) {
-        DispatchHByGk<InputT, float, InputT, TileShapes>(
+        DispatchHByGk<InputT, float, InputT, TileShapes, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace, data.useGk);
     } else {
-        DispatchHByGk<InputT, InputT, InputT, TileShapes>(
+        DispatchHByGk<InputT, InputT, InputT, TileShapes, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace, data.useGk);
     }
@@ -196,7 +215,7 @@ __aicore__ inline void DispatchO(
     }
 }
 
-template <typename InputT, typename TileShapes>
+template <typename InputT, typename TileShapes, int V_DIM>
 __aicore__ inline void RunChunkFwdHOFused(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initialState,
     GM_ADDR q, GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR o,
@@ -209,7 +228,7 @@ __aicore__ inline void RunChunkFwdHOFused(
 
     InitializePipelineSync(userWorkspace, data);
     if (GetMixedCoreIdx() < static_cast<uint32_t>(data.producerCoreNum)) {
-        DispatchH<InputT, TileShapes>(
+        DispatchH<InputT, TileShapes, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace, data);
     } else {
