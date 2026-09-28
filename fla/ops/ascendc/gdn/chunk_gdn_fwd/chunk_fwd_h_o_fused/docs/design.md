@@ -260,3 +260,11 @@ A5 H producer 按数据通路实例化三种 `GDNFwdHPath`：
 均通过 `if constexpr` 删除其他路径的 GM 搬运、direct flag 和收尾代码。首尾 chunk、
 初始/最终状态等随任务变化的条件仍在 specialization 内运行时判断。该调整不改变
 TilingData、workspace 布局、ready/free 代次和数学计算顺序。
+
+`DirectUb` 的 Vec2 在与独立 FwdH preload 路径相同的 `V=128`、无 GK 条件下，每个
+AIV 一次处理其负责的连续 64 行 state：一次 MTE2 搬入 `64 x 128` 旧 state，一次
+完成 cast、衰减、与 Cube2 FP32 update 相加及回转，再按既有输出语义统一写回。
+未请求 final state 时，每个 AIV 只以一次 MTE3 写回 `64 x 128` 新 state。该路径的
+`calcUbTensor`、Cube2 update UB 和低精度输出 UB 分别占 32 KiB、32 KiB 和 16 KiB，
+均在既有区域内；两个 AIV 的本地 UB 相互独立。带 GK 或非 DirectUb 的场景继续使用
+16 行通用 tile；final-state 分支沿用 fused 已有的 FP32 驻留和写回语义。

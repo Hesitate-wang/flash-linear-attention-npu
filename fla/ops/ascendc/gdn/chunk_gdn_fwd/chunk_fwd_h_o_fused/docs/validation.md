@@ -134,3 +134,18 @@
 - 目标环境需要分别覆盖：Direct（V128/chunk64）、Standard（V256/chunk64、
   V128/chunk128、小于16 token）和 Bounded（非整除尾块或变长内部验证）路径；
   每条路径均需比较 CPU/compose 精度并确认 ready/free 事件无悬空。
+
+## DirectUb Vec2 整 sub-block 搬运（待设备验证）
+
+- 在 `DirectUb && !useGk` specialization 中，Vec2 已与独立
+  FwdH preload 路径对齐：每个 AIV 对自己的 `64 x 128` state 半片执行一次 MTE2、
+  一次完整 Vector 计算，并按既有输出语义统一写回；未请求 final state 时只有一次
+  MTE3，不再按 16 行拆成四轮搬运。
+- `DirectUb` 的入口条件已经保证定长、无尾、`K=V=128`；新增快路径不改变
+  TilingData、workspace、Fixpipe ready/free flag 或 HReady/vec2Done 的代次。
+- `useGk=true`、StandardGm 和 BoundedGm 仍使用原 16 行通用路径。final-state 分支
+  使用相同的 64 行计算粒度，但保留 fused 原有的 FP32 驻留及中间/最终写回语义。
+- 静态容量核算：每个 AIV 的完整半片分别需要 32 KiB FP32 calc、32 KiB FP32
+  update 和 16 KiB BF16/FP16 输出，均落在原有 UB 区域内且不侵入 248 KiB IB 区。
+- 目标环境需用默认三 chunk case 比较 CPU 与 composed 输出，并通过指令 trace
+  确认每个有效 Vec2、每个 AIV 只有一次 state UB-to-GM MTE3 搬运。

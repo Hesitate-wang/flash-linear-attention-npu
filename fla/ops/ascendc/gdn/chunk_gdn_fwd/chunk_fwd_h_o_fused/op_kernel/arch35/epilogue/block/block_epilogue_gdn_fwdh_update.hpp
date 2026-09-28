@@ -219,7 +219,12 @@ public:
         uint64_t directUbReadyFlagBegin
     )
     {
-        static constexpr uint32_t ROW_TILE = 16;
+        // The standalone preload implementation processes one complete V=128
+        // AIV half-state at a time when GK is disabled. DirectUb has the same
+        // K=V=128 constraint, so use the same 64-row granularity here. Other
+        // paths retain the generic 16-row tile.
+        static constexpr uint32_t ROW_TILE =
+            (kUseDirectFp32Ub && !kGated) ? 64 : 16;
         uint32_t mActual = kHeadDim;
         uint32_t nActual = vBlockDim;
         uint32_t outputStride = vHeadDim;
@@ -296,6 +301,7 @@ public:
         } else if (!cube2AlreadyWaited) {
             Arch::CrossCoreWaitFlag(cube2Done);
         }
+
         // fix: need to adapt kGated. issue: A5 do not have vdim128 branch.
         bool waitHFromV = storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value;
         bool waitUpdateFromMte3 = false;
