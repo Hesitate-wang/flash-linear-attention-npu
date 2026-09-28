@@ -59,7 +59,8 @@ template<
     typename INPUT_TYPE,
     typename G_TYPE,
     typename STATE_TYPE,
-    typename WORKSPACE_TYPE
+    typename WORKSPACE_TYPE,
+    bool kChunkPipeline = false
 >
 class GDNFwdHKernelPreload {
 public:
@@ -150,6 +151,10 @@ public:
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
+    AscendC::GlobalTensor<int32_t> gmPipelineSync;
+
+    bool chunkPipelineEnabled{false};
+    uint32_t pipelineProducerCoreNum{0};
 
     AscendC::LocalTensor<ElementHWork> ubHUpdatePing;
     AscendC::LocalTensor<ElementHWork> ubHUpdatePong;
@@ -161,6 +166,45 @@ public:
 
     Arch::Resource<ArchTag> resource;
 
+    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
+    {
+        return resource.ubBuf.template GetBufferByByte<int32_t>(
+            GDN::CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
+    }
+
+    __aicore__ inline uint32_t GetPipelineAivIdx() const
+    {
+        return vecBlockScheduler.cubeCoreIdx * AscendC::GetSubBlockNum() +
+               AscendC::GetSubBlockIdx();
+    }
+
+    __aicore__ inline void SignalProducerSliceReady(
+        const GDNFwdHOffsets &offsets, uint32_t eventBase)
+    {
+        if constexpr (!kChunkPipeline) {
+            return;
+        }
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
+                              GetPipelineAivIdx(), eventBase + taskLane);
+    }
+
+    __aicore__ inline void SignalInitialStateReady()
+    {
+        if constexpr (!kChunkPipeline) {
+            return;
+        }
+        if (!chunkPipelineEnabled) {
+            return;
+        }
+        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
+                              GetPipelineAivIdx(),
+                              GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+    }
 
     __aicore__ inline GDNFwdHKernelPreload() {}
 
@@ -203,17 +247,30 @@ public:
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
         gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));
 
+        uint32_t logicalCoreNum = AscendC::GetBlockNum();
+        if constexpr (kChunkPipeline) {
+            const __gm__ GDN::ChunkFwdHOFusedTilingData *fusedTiling =
+                reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling);
+            pipelineProducerCoreNum = fusedTiling->producerCoreNum;
+            chunkPipelineEnabled = isVariedLen == 0 && pipelineProducerCoreNum > 0;
+            logicalCoreNum = pipelineProducerCoreNum;
+            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
+                user + fusedTiling->pipelineSyncWorkspaceOffset));
+        }
+
         ubHUpdatePing = resource.ubBuf.template GetBufferByByte<ElementHWork>(32 * 1024);
         ubHUpdatePong = resource.ubBuf.template GetBufferByByte<ElementHWork>(96 * 1024);
         ubVWorkPing = resource.ubBuf.template GetBufferByByte<ElementVWork>(32 * 1024);
         ubVWorkPong = resource.ubBuf.template GetBufferByByte<ElementVWork>(96 * 1024);
 
         if ASCEND_IS_AIC {
-            cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
+            cubeBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user,
+                                    logicalCoreNum);
         }
 
         if ASCEND_IS_AIV {
-            vecBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user);
+            vecBlockScheduler.Init(cu_seqlens, chunk_indices, tiling, user,
+                                   logicalCoreNum);
         }
     }
 
@@ -221,7 +278,8 @@ public:
 
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
-            uint32_t coreNum = AscendC::GetBlockNum();
+            uint32_t coreNum = kChunkPipeline ? pipelineProducerCoreNum
+                                               : AscendC::GetBlockNum();
 
             BlockMmadWH blockMmadWH(resource);
             BlockMmadKV blockMmadKV(resource);
@@ -233,7 +291,9 @@ public:
             auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
             auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(kHeadDim, vHeadDim);
 
-            AscendC::SyncAll<false>();
+            if constexpr (!kChunkPipeline) {
+                AscendC::SyncAll<false>();
+            }
             uint32_t currStage = 0; // 0: C1, 1: C2
             blockMmadWH.preSetFlags();
             while (cubeBlockScheduler.isRunning) {
@@ -298,8 +358,10 @@ public:
         }
 
         if ASCEND_IS_AIV {
-            uint32_t coreIdx = AscendC::GetBlockIdx();
-            uint32_t coreNum = AscendC::GetBlockNum();
+            uint32_t coreIdx = kChunkPipeline ? vecBlockScheduler.cubeCoreIdx
+                                               : AscendC::GetBlockIdx();
+            uint32_t coreNum = kChunkPipeline ? pipelineProducerCoreNum
+                                               : AscendC::GetBlockNum();
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
@@ -313,6 +375,15 @@ public:
             uint32_t remainderFlag = isVariedLen ? (((vecBlockScheduler.tokenBatch * vNumHead) % coreNum) != 0): (((shapeBatch * vNumHead) % coreNum) != 0);
             uint32_t step = transferCount + remainderFlag;
             uint32_t stateBlockSize = kHeadDim * vHeadDim;
+            uint32_t rowBegin = 0;
+            uint32_t rowEnd = kHeadDim;
+            if constexpr (kChunkPipeline) {
+                const uint32_t rowsPerSubBlock =
+                    (kHeadDim + subBlockNum - 1) / subBlockNum;
+                rowBegin = subBlockIdx * rowsPerSubBlock;
+                rowEnd = min(rowBegin + rowsPerSubBlock, kHeadDim);
+            }
+            const uint32_t stateCopySize = (rowEnd - rowBegin) * vHeadDim;
             uint32_t pingpongFlag = 1;
             uint32_t start = coreIdx * step;
             uint32_t end = start + step;
@@ -322,7 +393,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
             } else {
-                AscendC::Duplicate(hUbTensorPing, static_cast<ElementH>(0), stateBlockSize);
+                AscendC::Duplicate(hUbTensorPing, static_cast<ElementH>(0), stateCopySize);
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             }
@@ -331,32 +402,35 @@ public:
                 uint32_t batchIdx = initialStateBlockOffset / vNumHead;
                 uint32_t vHeadIdx = initialStateBlockOffset % vNumHead;
                 uint32_t chunkOffset = isVariedLen ? gmNumChunks.GetValue(batchIdx) : 0; 
-                uint64_t initialStateOffset = initialStateBlockOffset * stateBlockSize;
+                uint64_t initialStateOffset = initialStateBlockOffset * stateBlockSize +
+                                              rowBegin * vHeadDim;
                 uint32_t shapeBatchIdx = isVariedLen ? 0 : batchIdx;
-                uint64_t hOffset = (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks + chunkOffset) * stateBlockSize;
+                uint64_t hOffset =
+                    (shapeBatchIdx * vNumHead * totalChunks + vHeadIdx * totalChunks +
+                     chunkOffset) * stateBlockSize + rowBegin * vHeadDim;
                 if (useInitialState) {
                     AscendC::LocalTensor<ElementInitialState> stateUbTensor = pingpongFlag ? stateUbTensorPing : stateUbTensorPong;
                     AscendC::LocalTensor<ElementH> hUbTensor = pingpongFlag ? hUbTensorPing : hUbTensorPong;
                     auto event_id = pingpongFlag ? EVENT_ID1 : EVENT_ID0;
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
                     if constexpr(!std::is_same<ElementInitialState, ElementH>::value) {
-                        AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateBlockSize);
+                        AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateCopySize);
                         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
                         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
-                        AscendC::Cast(hUbTensor, stateUbTensor, AscendC::RoundMode::CAST_RINT, stateBlockSize);
+                        AscendC::Cast(hUbTensor, stateUbTensor, AscendC::RoundMode::CAST_RINT, stateCopySize);
                         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
                         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
-                        AscendC::DataCopy(gmH[hOffset], hUbTensor, stateBlockSize);
+                        AscendC::DataCopy(gmH[hOffset], hUbTensor, stateCopySize);
                     } else {
-                        AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateBlockSize);
+                        AscendC::DataCopy(stateUbTensor, gmInitialState[initialStateOffset], stateCopySize);
                         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
                         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(event_id);
-                        AscendC::DataCopy(gmH[hOffset], stateUbTensor, stateBlockSize);
+                        AscendC::DataCopy(gmH[hOffset], stateUbTensor, stateCopySize);
                     }
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(event_id);
                     pingpongFlag = 1 - pingpongFlag;
                 } else {
-                    AscendC::DataCopy(gmH[hOffset], hUbTensorPing, stateBlockSize);
+                    AscendC::DataCopy(gmH[hOffset], hUbTensorPing, stateCopySize);
                 }
 
 
@@ -371,7 +445,10 @@ public:
             }
             
 
-            AscendC::SyncAll<false>();
+            SignalInitialStateReady();
+            if constexpr (!kChunkPipeline) {
+                AscendC::SyncAll<false>();
+            }
 
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[0]);
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[1]);
@@ -411,6 +488,8 @@ public:
                             vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState, (i == 0)
                         );
+                        SignalProducerSliceReady(
+                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     }
                 } else {
                     /* V2: h[i+1] += h_work if i < num_chunks - 1 else None */
@@ -433,6 +512,10 @@ public:
                             );
                         } else {
                             Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
+                        }
+                        if (!vec2Offsets.isFinalState) {
+                            SignalProducerSliceReady(
+                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[i]);
                     }

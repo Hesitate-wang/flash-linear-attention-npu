@@ -177,7 +177,7 @@ __aicore__ inline void RunHPreload(
     GM_ADDR userWorkspace)
 {
     using Kernel = Catlass::Gemm::Kernel::GDNFwdHKernelPreload<
-        InputT, GateT, StateT, float>;
+        InputT, GateT, StateT, float, true>;
     Kernel kernel;
     kernel.Init(k, w, u, g, initialState, cuSeqlens, chunkIndices,
                 h, vNew, finalState, tiling, userWorkspace);

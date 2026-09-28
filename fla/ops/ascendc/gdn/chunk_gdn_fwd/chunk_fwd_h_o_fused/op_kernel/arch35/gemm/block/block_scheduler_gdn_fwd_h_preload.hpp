@@ -304,6 +304,13 @@ struct BlockSchedulerGdnFwdHPreloadCube : public BlockSchedulerGdnFwdHPreload {
         BlockSchedulerGdnFwdHPreload::Init(cu_seqlens, chunk_indices, tiling, user, AscendC::GetBlockIdx(), AscendC::GetBlockNum());
     }
 
+    CATLASS_DEVICE
+    void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user,
+              uint32_t coreNum) {
+        BlockSchedulerGdnFwdHPreload::Init(
+            cu_seqlens, chunk_indices, tiling, user, AscendC::GetBlockIdx(), coreNum);
+    }
+
 };
 
 struct BlockSchedulerGdnFwdHPreloadVec : public BlockSchedulerGdnFwdHPreload {
@@ -313,6 +320,14 @@ struct BlockSchedulerGdnFwdHPreloadVec : public BlockSchedulerGdnFwdHPreload {
     CATLASS_DEVICE
     void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user) {
         BlockSchedulerGdnFwdHPreload::Init(cu_seqlens, chunk_indices, tiling, user, AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(), AscendC::GetBlockNum());
+    }
+
+    CATLASS_DEVICE
+    void Init(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR tiling, GM_ADDR user,
+              uint32_t coreNum) {
+        BlockSchedulerGdnFwdHPreload::Init(
+            cu_seqlens, chunk_indices, tiling, user,
+            AscendC::GetBlockIdx() / AscendC::GetSubBlockNum(), coreNum);
     }
 
 };
