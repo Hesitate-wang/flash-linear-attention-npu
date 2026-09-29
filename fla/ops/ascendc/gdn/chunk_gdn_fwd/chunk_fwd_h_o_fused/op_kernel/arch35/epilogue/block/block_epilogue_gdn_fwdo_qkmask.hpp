@@ -220,24 +220,6 @@ public:
     static constexpr uint32_t FLOAT_ELENUM_PER_LINE = 128;   // 128
     static constexpr uint32_t MULTIPLIER = 2;
 
-    struct HReadyHandoff {
-        bool enabled;
-        AscendC::GlobalTensor<int32_t> gmSync;
-        AscendC::LocalTensor<int32_t> ubSync;
-        uint32_t producerAivIdx;
-        uint32_t eventId;
-        Arch::CrossCoreFlag ackFlag;
-
-        CATLASS_DEVICE
-        void WaitAndAck()
-        {
-            if (enabled) {
-                AscendC::IBWait<false>(gmSync, ubSync, producerAivIdx, eventId);
-            }
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ackFlag);
-        }
-    };
-
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> &resource)
     {
@@ -327,7 +309,6 @@ public:
         uint32_t vHeadDim,
         uint32_t &pingpongFlag
         , uint32_t batchIdx, uint32_t headIdx, uint32_t chunkIdx,
-        HReadyHandoff &hReady,
         Arch::CrossCoreFlag* waitFlag = nullptr
         )
     {
@@ -436,7 +417,6 @@ public:
             (void)gbrcRealEnd;
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-            hReady.WaitAndAck();
             if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
             if(isContiguousFullTile) AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisSubBlock*nActual);
             else AscendC::DataCopyPad(aUbTensor, attnInputThisSubBlock, aInputUbParams, aInputUbPadParams);
@@ -585,7 +565,6 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
                 if (stage == 0) {
-                    hReady.WaitAndAck();
                     if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
                 }
                 if(isContiguousFullTile) AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisStage*nActual);

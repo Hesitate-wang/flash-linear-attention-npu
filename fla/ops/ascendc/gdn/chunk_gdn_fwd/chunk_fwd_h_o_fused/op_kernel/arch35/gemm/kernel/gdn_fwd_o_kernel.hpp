@@ -485,14 +485,12 @@ public:
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
-                    const uint32_t producerTaskIdx = vec1Offsets.batchIdx * vNumHead +
-                                                     vec1Offsets.headIdx;
-                    const uint32_t producerAivIdx =
-                        producerTaskIdx * subBlockNum + subBlockIdx;
-                    typename EpilogueGDNFwdOQkmask::HReadyHandoff hReady{
-                        chunkPipelineEnabled, gmPipelineSync, GetPipelineSyncLocal(),
-                        producerAivIdx, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE,
-                        vecBlockScheduler.cube1Done[streamId]};
+                    // Gate Vec1 entry on HReady, then acknowledge the AIC so
+                    // Cube2 can read H while this AIV executes Vec1.
+                    WaitProducerSliceReady(
+                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
+                        vecBlockScheduler.cube1Done[streamId]);
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
                     int64_t vec1OffsetAttn = vec1Offsets.attnWorkOffset;
@@ -501,8 +499,7 @@ public:
                         gmAftermaskWorkspace[vec1OffsetAttnMask],
                         gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
                         chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
-                        vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx,
-                        hReady
+                        vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx
                     );
                     if constexpr (!kFwdOAggregateQkMaskBarrier) {
                         if (isVariedLen != 0) {
