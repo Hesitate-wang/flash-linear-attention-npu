@@ -179,7 +179,8 @@ public:
     }
 
     __aicore__ inline void SignalProducerSliceReady(
-        const GDNFwdHOffsets &offsets, uint32_t eventBase)
+        const GDNFwdHOffsets &offsets, uint32_t eventBase,
+        uint32_t readyChunkIdx)
     {
         if constexpr (!kChunkPipeline) {
             return;
@@ -189,8 +190,12 @@ public:
         }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        const uint32_t generation = readyChunkIdx &
+                                    (GDN::CHUNK_FWD_HO_IB_GENERATIONS - 1);
+        const uint32_t eventId = generation * GDN::CHUNK_FWD_HO_READY_EVENT_COUNT +
+                                 eventBase + taskLane;
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(), eventBase + taskLane);
+                              GetPipelineAivIdx(), eventId);
     }
 
     __aicore__ inline void SignalInitialStateReady()
@@ -485,7 +490,8 @@ public:
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState, (i == 0)
                         );
                         SignalProducerSliceReady(
-                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
+                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE,
+                            vec1Offsets.chunkIdx);
                     }
                 } else {
                     /* V2: h[i+1] += h_work if i < num_chunks - 1 else None */
@@ -511,7 +517,8 @@ public:
                         }
                         if (!vec2Offsets.isFinalState) {
                             SignalProducerSliceReady(
-                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE,
+                                vec2Offsets.chunkIdx + 1);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[i]);
                     }

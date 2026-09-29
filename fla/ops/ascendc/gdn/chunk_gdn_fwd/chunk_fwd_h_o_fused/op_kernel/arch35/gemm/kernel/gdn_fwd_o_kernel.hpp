@@ -195,8 +195,12 @@ public:
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane = 0;
+        const uint32_t generation = offsets.chunkIdx &
+                                    (GDN::CHUNK_FWD_HO_IB_GENERATIONS - 1);
+        const uint32_t eventId = generation * GDN::CHUNK_FWD_HO_READY_EVENT_COUNT +
+                                 eventBase + taskLane;
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                               producerAivIdx, eventBase + taskLane);
+                               producerAivIdx, eventId);
     }
 
     __aicore__ inline GDNFwdOKernel() {}
