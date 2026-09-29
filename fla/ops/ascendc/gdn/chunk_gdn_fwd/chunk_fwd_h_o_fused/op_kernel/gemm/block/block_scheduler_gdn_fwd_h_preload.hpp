@@ -102,6 +102,7 @@ struct BlockSchedulerGdnFwdHPreload {
     Arch::CrossCoreFlag vec1Done{1};
     Arch::CrossCoreFlag cube2Done{2};
     Arch::CrossCoreFlag vec2Done[PING_PONG_STAGES] = {3, 4};
+    Arch::CrossCoreFlag initHReady{5};
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdHPreload() {}

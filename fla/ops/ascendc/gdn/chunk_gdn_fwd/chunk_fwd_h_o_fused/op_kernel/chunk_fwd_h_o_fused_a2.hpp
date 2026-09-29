@@ -227,16 +227,11 @@ __aicore__ inline void RunChunkFwdHOFused(
     GM_ADDR vNew = userWorkspace + data.handoffVWorkspaceOffset;
 
     InitializePipelineSync(userWorkspace, data);
-    const bool useHPreload = !data.useGk && V_DIM == 128;
     if (GetMixedCoreIdx() < static_cast<uint32_t>(data.producerCoreNum)) {
         DispatchH<InputT, TileShapes, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace, data);
     } else {
-        // Match the preload producer's AIC/AIV initialization rendezvous.
-        if (useHPreload) {
-            AscendC::SyncAll<false>();
-        }
         DispatchO<InputT>(q, k, vNew, h, g, cuSeqlens, chunkIndices,
                           o, userWorkspace, data);
     }

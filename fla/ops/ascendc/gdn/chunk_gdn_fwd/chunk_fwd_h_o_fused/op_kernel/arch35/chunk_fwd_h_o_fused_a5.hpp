@@ -330,7 +330,6 @@ __aicore__ inline void RunTyped(
     GM_ADDR vNew = userWorkspace + data.handoffVWorkspaceOffset;
 
     InitializePipelineSync(userWorkspace, data);
-    const bool useHPreload = !data.useGk && V_DIM == 128;
     if (GetMixedCoreIdx() < static_cast<uint32_t>(data.producerCoreNum)) {
         DispatchH<InputT, TileShapes, UseExp2, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
@@ -339,12 +338,6 @@ __aicore__ inline void RunTyped(
             AscendC::SyncAll<false>();
         }
         return;
-    }
-
-    // The standalone preload kernel synchronizes its AIC start with AIV state
-    // initialization. Consumer cores must join that same barrier generation.
-    if (useHPreload) {
-        AscendC::SyncAll<false>();
     }
 
     if constexpr (UseExp2) {
