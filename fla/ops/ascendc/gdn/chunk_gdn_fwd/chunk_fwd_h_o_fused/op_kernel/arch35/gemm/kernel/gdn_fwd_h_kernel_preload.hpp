@@ -291,9 +291,7 @@ public:
             auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
             auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(kHeadDim, vHeadDim);
 
-            if constexpr (!kChunkPipeline) {
-                AscendC::SyncAll<false>();
-            }
+            AscendC::SyncAll<false>();
             uint32_t currStage = 0; // 0: C1, 1: C2
             blockMmadWH.preSetFlags();
             while (cubeBlockScheduler.isRunning) {
@@ -445,10 +443,8 @@ public:
             }
             
 
+            AscendC::SyncAll<false>();
             SignalInitialStateReady();
-            if constexpr (!kChunkPipeline) {
-                AscendC::SyncAll<false>();
-            }
 
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[0]);
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[1]);
