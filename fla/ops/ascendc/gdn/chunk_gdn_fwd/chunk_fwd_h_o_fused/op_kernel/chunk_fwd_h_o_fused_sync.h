@@ -216,6 +216,26 @@ struct ChunkFwdHOProducerReadySignal {
     }
 };
 
+// Consumer-side handoff used by the A5 O epilogue.  The epilogue invokes this
+// after issuing independent Vector work, allowing that work to cover the
+// cross-core V_new wait.
+struct ChunkFwdHOConsumerReadyWait {
+    AscendC::GlobalTensor<int32_t> gmWorkspace;
+    AscendC::LocalTensor<int32_t> ubWorkspace;
+    int32_t blockIdx{0};
+    int32_t eventId{0};
+    bool enabled{false};
+
+    __aicore__ inline void Wait() const
+    {
+        if (!enabled) {
+            return;
+        }
+        ActiveChunkFwdHOSync::WaitNoPreBarrier<false>(
+            gmWorkspace, ubWorkspace, blockIdx, eventId);
+    }
+};
+
 } // namespace GDN
 
 #endif // CHUNK_FWD_H_O_FUSED_SYNC_H

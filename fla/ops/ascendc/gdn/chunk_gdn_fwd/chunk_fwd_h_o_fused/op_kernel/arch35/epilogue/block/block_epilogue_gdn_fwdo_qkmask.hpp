@@ -17,6 +17,7 @@
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
 #include "../../chunk_fwd_h_o_fused_ub_layout.h"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 
 // regbase.hpp 自身无 include guard，本算子 kernel 会同时包含 qkmask 与 output 两个
 // epilogue 头，此处用算子私有宏防止同一编译单元内重复包含（重定义 constexpr/inline 符号）
@@ -309,7 +310,9 @@ public:
         uint32_t vHeadDim,
         uint32_t &pingpongFlag
         , uint32_t batchIdx, uint32_t headIdx, uint32_t chunkIdx,
-        Arch::CrossCoreFlag* waitFlag = nullptr
+        Arch::CrossCoreFlag* waitFlag = nullptr,
+        GDN::ChunkFwdHOConsumerReadyWait* hReadyWait = nullptr,
+        Arch::CrossCoreFlag* hReadySetFlag = nullptr
         )
     {
         uint32_t mActual = chunkSize;
@@ -412,6 +415,10 @@ public:
                                        (__ubuf__ float*)maskBase,
                                        mActualThisSubBlock, alignedNActual,
                                        gbrcStart, gbrcEffStart, gbrcRealStart, gbrcRealEnd);
+                if (hReadyWait) hReadyWait->Wait();
+                if (hReadySetFlag) {
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*hReadySetFlag);
+                }
                 AscendC::PipeBarrier<PIPE_V>();
             }
             (void)gbrcRealEnd;
@@ -557,6 +564,10 @@ public:
                                                (__ubuf__ float*)maskBase,
                                                mActualThisStage, alignedNActual,
                                                gbrcStart, gbrcEffStart, gbrcRealStart, gbrcRealEnd);
+                    }
+                    if (hReadyWait && stage == 0) hReadyWait->Wait();
+                    if (hReadySetFlag && stage == 0) {
+                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*hReadySetFlag);
                     }
                     AscendC::PipeBarrier<PIPE_V>();
                 }

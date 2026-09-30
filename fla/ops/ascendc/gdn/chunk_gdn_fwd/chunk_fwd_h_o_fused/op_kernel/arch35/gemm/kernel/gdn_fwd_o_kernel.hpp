@@ -36,7 +36,7 @@
 #include "../../../chunk_fwd_h_o_fused_struct.h"
 #include "../../../chunk_fwd_o_struct.h"
 #include "../../chunk_fwd_h_o_fused_ub_layout.h"
-#include "../../chunk_fwd_h_o_fused_sync.h"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 using namespace Catlass;
 using namespace tla;
 
@@ -199,6 +199,24 @@ public:
         ActiveChunkFwdHOSync::WaitNoPreBarrier<false>(
             gmPipelineSync, GetPipelineSyncLocal(),
             producerAivIdx, eventBase + taskLane);
+    }
+
+    __aicore__ inline GDN::ChunkFwdHOConsumerReadyWait MakeProducerSliceWait(
+        const GDNFwdOOffsets &offsets, uint32_t eventBase)
+    {
+        GDN::ChunkFwdHOConsumerReadyWait wait;
+        if (!chunkPipelineEnabled) {
+            return wait;
+        }
+        const uint32_t producerTaskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t producerAivIdx =
+            producerTaskIdx * AscendC::GetSubBlockNum() + AscendC::GetSubBlockIdx();
+        wait.gmWorkspace = gmPipelineSync;
+        wait.ubWorkspace = GetPipelineSyncLocal();
+        wait.blockIdx = producerAivIdx;
+        wait.eventId = eventBase;
+        wait.enabled = true;
+        return wait;
     }
 
     __aicore__ inline GDNFwdOKernel() {}
@@ -483,6 +501,8 @@ public:
             while (vecBlockScheduler.isRunning) {
                 vecBlockScheduler.InitTask();
                 bool currentVec1Issued = false;
+                GDN::ChunkFwdHOConsumerReadyWait currentHReadyWait;
+                GDN::ChunkFwdHOConsumerReadyWait currentVReadyWait;
 
                 if (vecBlockScheduler.isRunning && coreIdx < coreNum * subBlockNum) {
                     currentVec1Issued = true;
@@ -494,19 +514,21 @@ public:
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
                     int64_t vec1OffsetAttn = vec1Offsets.attnWorkOffset;
+                    // H is needed by O Cube2. The qk-mask epilogue waits for
+                    // H after its independent Vector work has been issued.
+                    currentHReadyWait = MakeProducerSliceWait(
+                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                    currentVReadyWait = MakeProducerSliceWait(
+                        vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
                     epilogueGDNFwdOQkmask(
                         gmAftermaskWorkspace[vec1OffsetAttnMask],
                         gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
                         chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
-                        vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx
+                        vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx,
+                        nullptr, currentVec1Issued ? &currentHReadyWait : nullptr,
+                        currentVec1Issued ? &vecBlockScheduler.cube1Done[streamId] : nullptr
                     );
-                    // H is needed by O Cube2, so acknowledge Cube2 only after
-                    // the non-pre-barrier wait has completed.
-                    WaitProducerSliceReady(
-                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
-                        vecBlockScheduler.cube1Done[streamId]);
                     if constexpr (!kFwdOAggregateQkMaskBarrier) {
                         if (isVariedLen != 0) {
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
@@ -534,7 +556,10 @@ public:
                             scale, vec2Offsets.blockTokens, vec2Offsets.vBlockDim,
                             vHeadDim, pingpongFlag,
                             vecBlockScheduler.cube2Done[streamId],
-                            vecBlockScheduler.cube3Done[streamId], releaseFlag);
+                            vecBlockScheduler.cube3Done[streamId], releaseFlag,
+                            currentVec1Issued ? &currentVReadyWait : nullptr,
+                            currentVec1Issued ? &vecBlockScheduler.vec1Done[
+                                vecBlockScheduler.GetCurStageId()] : nullptr);
                     } else {
                         epilogueGDNFwdOOutput(
                             gmO[vec2OffsetO], gmG[vec2OffsetG],
@@ -542,7 +567,9 @@ public:
                             scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim,
                             vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx,
                             vec2Offsets.chunkIdx, &vecBlockScheduler.cube3Done[streamId],
-                            releaseFlag);
+                            releaseFlag, currentVec1Issued ? &currentVReadyWait : nullptr,
+                            currentVec1Issued ? &vecBlockScheduler.vec1Done[
+                                vecBlockScheduler.GetCurStageId()] : nullptr);
                     }
                     if constexpr (!kFwdOAggregateOutputBarrier) {
                         // Conservative varlen path: join the two AIV
@@ -563,11 +590,11 @@ public:
                     // the first iteration there is no Vec2 work, so this
                     // reduces to a standalone wait before releasing Cube3.
                     uint32_t vec1StreamId = vecBlockScheduler.GetCurStageId();
-                    GDNFwdOOffsets& currentVec1Offsets = vecBlockScheduler.GetVec1Offsets();
-                    WaitProducerSliceReady(
-                        currentVec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
-                        vecBlockScheduler.vec1Done[vec1StreamId]);
+                    if (!needRun) {
+                        currentVReadyWait.Wait();
+                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
+                            vecBlockScheduler.vec1Done[vec1StreamId]);
+                    }
                 }
                 needRun = true;
             }

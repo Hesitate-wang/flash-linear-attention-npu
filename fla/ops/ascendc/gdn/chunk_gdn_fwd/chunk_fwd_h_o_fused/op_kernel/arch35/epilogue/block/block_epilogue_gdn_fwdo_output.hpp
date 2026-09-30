@@ -17,6 +17,7 @@
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
 #include "../../chunk_fwd_h_o_fused_ub_layout.h"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 // regbase.hpp 自身无 include guard，本算子 kernel 会同时包含 qkmask 与 output 两个
 // epilogue 头，此处用算子私有宏防止同一编译单元内重复包含（重定义 constexpr/inline 符号）
 #ifndef FLA_FWD_O_REGBASE_HPP_SEEN
@@ -363,7 +364,9 @@ public:
         uint32_t outputStride,
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag* waitFlag = nullptr,
-        Arch::CrossCoreFlag* setFlag = nullptr
+        Arch::CrossCoreFlag* setFlag = nullptr,
+        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
+        Arch::CrossCoreFlag* vReadySetFlag = nullptr
         )
     {
         static constexpr uint32_t ROW_TILE = 16;
@@ -377,6 +380,10 @@ public:
         }
         if (rowBegin >= mActual) {
             if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
+            if (vReadyWait) vReadyWait->Wait();
+            if (vReadySetFlag) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
+            }
             if (setFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*setFlag);
             return;
         }
@@ -406,6 +413,10 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
         }
         AscendC::Exp(gUbTensor, gUbTensor, mActual);
+        if (vReadyWait) vReadyWait->Wait();
+        if (vReadySetFlag) {
+            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
+        }
         AscendC::PipeBarrier<PIPE_V>();
 
         uint32_t rowStart = rowBegin;
@@ -513,16 +524,22 @@ public:
         uint32_t &pingpongFlag
         , uint32_t batchIdx, uint32_t headIdx, uint32_t chunkIdx,
         Arch::CrossCoreFlag* waitFlag = nullptr,
-        Arch::CrossCoreFlag* setFlag = nullptr
+        Arch::CrossCoreFlag* setFlag = nullptr,
+        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
+        Arch::CrossCoreFlag* vReadySetFlag = nullptr
         )
     {
         uint32_t mActual = chunkSize;
         uint32_t nActual = vBlockDim;
         if (nActual > 128) {
-            ProcessWideOutput(hOutput, gInput, attnInput, hInput, scale, mActual, nActual, vHeadDim, pingpongFlag, waitFlag, setFlag);
+            ProcessWideOutput(hOutput, gInput, attnInput, hInput, scale, mActual,
+                              nActual, vHeadDim, pingpongFlag, waitFlag, setFlag,
+                              vReadyWait, vReadySetFlag);
             return;
         }
-        ProcessOutput(hOutput, gInput, attnInput, hInput, scale, mActual, nActual, vHeadDim, pingpongFlag, waitFlag, setFlag);
+        ProcessOutput(hOutput, gInput, attnInput, hInput, scale, mActual,
+                      nActual, vHeadDim, pingpongFlag, waitFlag, setFlag,
+                      vReadyWait, vReadySetFlag);
     }
 
     /// V128 narrow path, parameterized over the work-input storage class:
@@ -541,7 +558,9 @@ public:
         uint32_t outputStride,
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag* waitFlag = nullptr,
-        Arch::CrossCoreFlag* setFlag = nullptr
+        Arch::CrossCoreFlag* setFlag = nullptr,
+        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
+        Arch::CrossCoreFlag* vReadySetFlag = nullptr
         )
     {
         // l0c2ub: with LocalTensor work inputs the slot IS the a/h buffer — no GM->UB
@@ -646,6 +665,10 @@ public:
             }
 
             AscendC::Exp(gUbTensor, gUbTensor, mActual);
+            if (vReadyWait) vReadyWait->Wait();
+            if (vReadySetFlag) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
+            }
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
@@ -719,6 +742,10 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
             }
             AscendC::Exp(gUbTensor, gUbTensor, mActual);
+            if (vReadyWait) vReadyWait->Wait();
+            if (vReadySetFlag) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
+            }
             AscendC::PipeBarrier<PIPE_V>();
             uint32_t mActualPerStage = CeilDiv(mActualThisSubBlock, 2);
             uint32_t mActualThisStage = 0;
@@ -857,7 +884,9 @@ public:
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag cube2Ready,
         Arch::CrossCoreFlag cube3Ready,
-        Arch::CrossCoreFlag* releaseFlag)
+        Arch::CrossCoreFlag* releaseFlag,
+        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
+        Arch::CrossCoreFlag* vReadySetFlag = nullptr)
     {
         const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         const uint32_t rowsPerSubBlock = CeilDiv(rows, AscendC::GetSubBlockNum());
@@ -866,6 +895,10 @@ public:
                                     ? rowBegin + rowsPerSubBlock : rows;
         if (rowBegin >= rowEnd) {
             Arch::CrossCoreWaitFlag(cube2Ready);
+            if (vReadyWait) vReadyWait->Wait();
+            if (vReadySetFlag) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
+            }
             Arch::CrossCoreWaitFlag(cube3Ready);
             if (releaseFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*releaseFlag);
             return;
@@ -909,6 +942,10 @@ public:
                          rowBegin * sizeof(float);
             OutputGateVf((__ubuf__ float*)hAddr, (__ubuf__ float*)gAddr,
                          rowEnd - rowBegin, cols);
+            if (vReadyWait) vReadyWait->Wait();
+            if (vReadySetFlag) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
+            }
             AscendC::PipeBarrier<PIPE_V>();
         }
 
