@@ -45,6 +45,17 @@ struct ChunkFwdHOSync<ChunkFwdHOSyncArch::ATLAS_A2> {
         AscendC::IBWait<IsAivOnly>(
             gmWorkspace, ubWorkspace, blockIdx, eventId);
     }
+
+    template <bool IsAivOnly>
+    __aicore__ static inline void WaitNoPreBarrier(
+        const AscendC::GlobalTensor<int32_t> &gmWorkspace,
+        const AscendC::LocalTensor<int32_t> &ubWorkspace,
+        int32_t blockIdx,
+        int32_t eventId)
+    {
+        AscendC::IBWait<IsAivOnly>(
+            gmWorkspace, ubWorkspace, blockIdx, eventId);
+    }
 };
 
 using ActiveChunkFwdHOSync =
@@ -141,6 +152,42 @@ struct ChunkFwdHOSync<ChunkFwdHOSyncArch::ASCEND_950> {
     {
         AscendC::IBWait<IsAivOnly>(
             gmWorkspace, ubWorkspace, blockIdx, eventId);
+    }
+
+    template <bool IsAivOnly>
+    __aicore__ static inline void WaitNoPreBarrier(
+        const AscendC::GlobalTensor<int32_t> &gmWorkspace,
+        const AscendC::LocalTensor<int32_t> &ubWorkspace,
+        int32_t blockIdx,
+        int32_t eventId)
+    {
+        if ASCEND_IS_AIC {
+            return;
+        }
+        int32_t blockNum = AscendC::GetBlockNum();
+        if (!IsAivOnly) {
+            blockNum *= 2;
+        }
+        constexpr int32_t syncWords = 32 / sizeof(int32_t);
+        auto localSyncGm =
+            gmWorkspace[blockNum * syncWords * eventId + blockIdx * syncWords];
+        while (true) {
+            AscendC::DataCopy(ubWorkspace, localSyncGm, syncWords);
+            AscendC::TEventID mte2ToScalar =
+                GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_S);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(mte2ToScalar);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(mte2ToScalar);
+            if (ubWorkspace.GetValue(0) == 1) {
+                ubWorkspace.SetValue(0, 0);
+                AscendC::TEventID scalarToMte3 =
+                    GetTPipePtr()->FetchEventID(AscendC::HardEvent::S_MTE3);
+                AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
+                AscendC::DataCopy(localSyncGm, ubWorkspace, syncWords);
+                break;
+            }
+        }
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
 };
 

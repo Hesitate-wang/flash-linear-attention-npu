@@ -36,6 +36,7 @@
 #include "../../../chunk_fwd_h_o_fused_struct.h"
 #include "../../../chunk_fwd_o_struct.h"
 #include "../../chunk_fwd_h_o_fused_ub_layout.h"
+#include "../../chunk_fwd_h_o_fused_sync.h"
 using namespace Catlass;
 using namespace tla;
 
@@ -195,8 +196,9 @@ public:
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane = 0;
-        AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                               producerAivIdx, eventBase + taskLane);
+        ActiveChunkFwdHOSync::WaitNoPreBarrier<false>(
+            gmPipelineSync, GetPipelineSyncLocal(),
+            producerAivIdx, eventBase + taskLane);
     }
 
     __aicore__ inline GDNFwdOKernel() {}
@@ -480,17 +482,15 @@ public:
 
             while (vecBlockScheduler.isRunning) {
                 vecBlockScheduler.InitTask();
+                bool currentVec1Issued = false;
 
                 if (vecBlockScheduler.isRunning && coreIdx < coreNum * subBlockNum) {
+                    currentVec1Issued = true;
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
-                    // Gate Vec1 entry on HReady, then acknowledge the AIC so
-                    // Cube2 can read H while this AIV executes Vec1.
-                    WaitProducerSliceReady(
-                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
-                        vecBlockScheduler.cube1Done[streamId]);
+                    // Vec1 does not consume H. Launch it first so its Vector
+                    // work can overlap the cross-core HReady wait.
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
                     int64_t vec1OffsetAttn = vec1Offsets.attnWorkOffset;
@@ -501,14 +501,17 @@ public:
                         chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
                         vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx
                     );
+                    // H is needed by O Cube2, so acknowledge Cube2 only after
+                    // the non-pre-barrier wait has completed.
+                    WaitProducerSliceReady(
+                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
+                        vecBlockScheduler.cube1Done[streamId]);
                     if constexpr (!kFwdOAggregateQkMaskBarrier) {
                         if (isVariedLen != 0) {
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
-                    WaitProducerSliceReady(
-                        vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done[streamId]);
                 }
 
                 // AscendC::PipeBarrier<PIPE_ALL>();
@@ -552,6 +555,19 @@ public:
                                 vecBlockScheduler.vec2Done[streamId]);
                         }
                     }
+                }
+
+                if (currentVec1Issued) {
+                    // The current chunk's V_new wait is deliberately placed
+                    // after the previous chunk's Vec2 has been launched. On
+                    // the first iteration there is no Vec2 work, so this
+                    // reduces to a standalone wait before releasing Cube3.
+                    uint32_t vec1StreamId = vecBlockScheduler.GetCurStageId();
+                    GDNFwdOOffsets& currentVec1Offsets = vecBlockScheduler.GetVec1Offsets();
+                    WaitProducerSliceReady(
+                        currentVec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
+                        vecBlockScheduler.vec1Done[vec1StreamId]);
                 }
                 needRun = true;
             }
