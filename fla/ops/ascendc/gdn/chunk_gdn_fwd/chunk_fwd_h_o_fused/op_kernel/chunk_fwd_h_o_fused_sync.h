@@ -82,7 +82,7 @@ struct ChunkFwdHOSync<ChunkFwdHOSyncArch::ASCEND_950> {
         while (true) {
             AscendC::DataCopy(ubWorkspace, localSyncGm, syncWords);
             AscendC::TEventID mte2ToScalar =
-                AscendC::GetTPipePtr()->FetchEventID(
+                GetTPipePtr()->FetchEventID(
                     AscendC::HardEvent::MTE2_S);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(mte2ToScalar);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(mte2ToScalar);
@@ -90,7 +90,7 @@ struct ChunkFwdHOSync<ChunkFwdHOSyncArch::ASCEND_950> {
             if (ubWorkspace.GetValue(0) == 0) {
                 ubWorkspace.SetValue(0, 1);
                 AscendC::TEventID scalarToMte3 =
-                    AscendC::GetTPipePtr()->FetchEventID(
+                    GetTPipePtr()->FetchEventID(
                         AscendC::HardEvent::S_MTE3);
                 AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
                 AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(scalarToMte3);
