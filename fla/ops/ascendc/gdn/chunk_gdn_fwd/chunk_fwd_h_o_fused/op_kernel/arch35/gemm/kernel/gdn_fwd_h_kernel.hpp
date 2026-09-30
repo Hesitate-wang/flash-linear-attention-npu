@@ -257,8 +257,7 @@ public:
     }
 
     __aicore__ inline void SignalProducerSliceReady(
-        const GDNFwdHOffsets &offsets, uint32_t eventBase,
-        uint32_t readyChunkIdx)
+        const GDNFwdHOffsets &offsets, uint32_t eventBase)
     {
         if constexpr (!kSignalProducerReady) {
             return;
@@ -268,13 +267,14 @@ public:
         }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        // IBSet waits for a zero slot; the consumer's IBWait clears it after consumption.
-        const uint32_t generation = readyChunkIdx &
-                                    (GDN::CHUNK_FWD_HO_IB_GENERATIONS - 1);
-        const uint32_t eventId = generation * GDN::CHUNK_FWD_HO_READY_EVENT_COUNT +
-                                 eventBase + taskLane;
+        // The two-generation event index is intentionally disabled for the
+        // single-IB communication benchmark.
+        // const uint32_t generation = readyChunkIdx &
+        //     (GDN::CHUNK_FWD_HO_IB_GENERATIONS - 1);
+        // const uint32_t eventId = generation * GDN::CHUNK_FWD_HO_READY_EVENT_COUNT +
+        //                          eventBase + taskLane;
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(), eventId);
+                              GetPipelineAivIdx(), eventBase + taskLane);
     }
 
     __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
@@ -289,6 +289,37 @@ public:
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(),
                               GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+    }
+
+    __aicore__ inline void ProcessSingleIbOnlyBenchmark()
+    {
+        if ASCEND_IS_AIV {
+            if (!chunkPipelineEnabled) {
+                return;
+            }
+
+            const uint32_t taskIdx = vecBlockScheduler.cubeCoreIdx;
+            const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+            const uint32_t producerAivIdx = GetPipelineAivIdx();
+            const uint32_t totalChunks = (seqlen + chunkSize - 1) / chunkSize;
+
+            // Stand in for initial-state HReady(0).  For each chunk publish
+            // VReady(i), then HReady(i + 1).  A single event slot provides the
+            // intended backpressure because IBSet waits until IBWait clears it.
+            AscendC::IBSet<false>(
+                gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
+                GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+            for (uint32_t chunkIdx = 0; chunkIdx < totalChunks; ++chunkIdx) {
+                AscendC::IBSet<false>(
+                    gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
+                    GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE + taskLane);
+                if (chunkIdx + 1 < totalChunks) {
+                    AscendC::IBSet<false>(
+                        gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
+                        GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+                }
+            }
+        }
     }
 
 
@@ -673,6 +704,13 @@ public:
     }
 
     __aicore__ inline void Process() {
+        if constexpr (GDN::CHUNK_FWD_HO_IB_ONLY_BENCHMARK && kSignalProducerReady) {
+            // IB-only profiling configuration: the production Cube, MTE and
+            // Vector business path below is intentionally bypassed.
+            ProcessSingleIbOnlyBenchmark();
+            return;
+        }
+
         // FwdH can run after another stage in a megakernel. Start its AIC/AIV
         // handshake only after every core has retired the preceding stage.
         if constexpr (!kChunkPipeline) {
@@ -1075,8 +1113,7 @@ public:
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
                         SignalProducerSliceReady(
-                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE,
-                            vec1Offsets.chunkIdx);
+                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
                         }
@@ -1129,8 +1166,7 @@ public:
                             // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
                             // AscendC::PRINTF("h generated for next chunk");
                             SignalProducerSliceReady(
-                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE,
-                                vec2Offsets.chunkIdx + 1);
+                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
                     }

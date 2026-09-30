@@ -17,11 +17,18 @@ constexpr int64_t CHUNK_FWD_HO_TASK_LANES_PER_CORE = 1;
 constexpr int64_t CHUNK_FWD_HO_H_READY_EVENT_BASE = 0;
 constexpr int64_t CHUNK_FWD_HO_V_READY_EVENT_BASE = CHUNK_FWD_HO_TASK_LANES_PER_CORE;
 constexpr int64_t CHUNK_FWD_HO_READY_EVENT_COUNT = 2 * CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-constexpr int64_t CHUNK_FWD_HO_IB_GENERATIONS = 2;
-constexpr int64_t CHUNK_FWD_HO_A5_IB_EVENT_COUNT =
-    CHUNK_FWD_HO_IB_GENERATIONS * CHUNK_FWD_HO_READY_EVENT_COUNT;
+// IB-only benchmark uses the original single event slot.  The two-generation
+// allocation used by the production experiment is intentionally disabled:
+// constexpr int64_t CHUNK_FWD_HO_IB_GENERATIONS = 2;
+// constexpr int64_t CHUNK_FWD_HO_A5_IB_EVENT_COUNT =
+//     CHUNK_FWD_HO_IB_GENERATIONS * CHUNK_FWD_HO_READY_EVENT_COUNT;
 constexpr int64_t CHUNK_FWD_HO_IB_EVENT_COUNT = CHUNK_FWD_HO_READY_EVENT_COUNT;
 constexpr int64_t CHUNK_FWD_HO_IB_WORDS_PER_EVENT = 8;
+// Temporary profiling switch: execute only the single-slot IBSet/IBWait
+// producer-consumer handshake on the A5 natural-exp path.  The production
+// GEMM/MTE/Vector bodies remain below their Process() entry points but are
+// intentionally bypassed while this constant is true.
+constexpr bool CHUNK_FWD_HO_IB_ONLY_BENCHMARK = true;
 
 // Plain kernel-side mirror of op_host/chunk_fwd_h_o_fused_tiling.h.
 struct ChunkFwdHOFusedTilingData {
