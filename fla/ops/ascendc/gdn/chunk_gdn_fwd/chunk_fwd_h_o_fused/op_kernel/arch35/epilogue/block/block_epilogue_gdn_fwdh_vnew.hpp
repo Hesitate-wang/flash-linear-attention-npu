@@ -16,6 +16,7 @@
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
 #include "block_epilogue_gdn_fwdh_regbase.hpp"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 
 
 
@@ -214,13 +215,18 @@ public:
         AscendC::LocalTensor<float> rowScale,
         uint32_t rowScaleOffset,
         uint32_t rows,
-        uint32_t cols)
+        uint32_t cols,
+        const GDN::ChunkFwdHOProducerReadySignal &hReadySignal)
     {
         __ubuf__ float *matrixAddr = reinterpret_cast<__ubuf__ float *>(matrix.GetPhyAddr());
         __ubuf__ float *rowScaleAddr = reinterpret_cast<__ubuf__ float *>(rowScale.GetPhyAddr());
+        if (hReadySignal.enabled) {
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
         AscendC::VF_CALL<detail::ApplyRowScaleDualIssue>(
             matrixAddr, rowScaleAddr, rowScaleOffset,
             static_cast<uint16_t>(rows), static_cast<uint16_t>(cols));
+        hReadySignal.Publish<false>();
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -228,13 +234,18 @@ public:
     void ComputeVNew(
         AscendC::LocalTensor<float> workspace,
         AscendC::LocalTensor<UElementInput> uInput,
-        uint32_t count)
+        uint32_t count,
+        const GDN::ChunkFwdHOProducerReadySignal &hReadySignal)
     {
         __ubuf__ float *workspaceAddr = reinterpret_cast<__ubuf__ float *>(workspace.GetPhyAddr());
         __ubuf__ UElementInput *uInputAddr =
             reinterpret_cast<__ubuf__ UElementInput *>(uInput.GetPhyAddr());
+        if (hReadySignal.enabled) {
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
         AscendC::VF_CALL<detail::ComputeVNewRegbaseDualIssue<UElementInput>>(
             workspaceAddr, uInputAddr, count);
+        hReadySignal.Publish<false>();
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -261,6 +272,7 @@ public:
         bool waitWsFromMte3,
         bool isPing,
         bool cube1AlreadyWaited,
+        const GDN::ChunkFwdHOProducerReadySignal &hReadySignal,
         uint64_t directUbFreeFlagBegin,
         uint64_t directUbReadyFlagBegin
     )
@@ -297,6 +309,10 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(
                     EVENT_ID0 + pingpongFlag);
             }
+            if (hReadySignal.enabled) {
+                AscendC::PipeBarrier<PIPE_ALL>();
+            }
+            hReadySignal.Publish<false>();
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
             return;
         }
@@ -364,9 +380,11 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Copy(calcUbTensor, wsUbTensor, mActualThisSubBlock * nvActual);
                 AscendC::PipeBarrier<PIPE_V>();
-                ApplyRowScale(calcUbTensor, gUbTensor, rowBegin, mActualThisSubBlock, nvActual);
+                ApplyRowScale(calcUbTensor, gUbTensor, rowBegin,
+                              mActualThisSubBlock, nvActual, hReadySignal);
             } else {
-                ComputeVNew(wsUbTensor, uUbTensor, mActualThisSubBlock * nvActual);
+                ComputeVNew(wsUbTensor, uUbTensor,
+                            mActualThisSubBlock * nvActual, hReadySignal);
             }
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag);
 
@@ -439,6 +457,7 @@ public:
 
         uint32_t mActualPadded = (mActual + NZ_BLOCK_SIZE - 1) / NZ_BLOCK_SIZE * NZ_BLOCK_SIZE;
         bool waitWsThisTileFromMte3 = waitWsFromMte3;
+        bool hReadyPublished = false;
         for (uint32_t rowStart = rowBegin; rowStart < rowEnd;) {
             uint32_t alignExtra = rowStart & 7;
             uint32_t maxRowsThisTile = ROW_TILE - alignExtra;
@@ -452,6 +471,8 @@ public:
             AscendC::GlobalTensor<UElementInput> uInputThisTile = uInput[rowStart * inputStride];
             AscendC::GlobalTensor<float> wsInputThisTile = wsInput[rowStart * nvActual];
             AscendC::LocalTensor<float> wsUbTensorThisTile = wsUbTensor[localRowStart * nvActual];
+            GDN::ChunkFwdHOProducerReadySignal tileHReadySignal = hReadySignal;
+            tileHReadySignal.enabled = hReadySignal.enabled && !hReadyPublished;
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pingpongFlag);
             CopyGmToUb(uUbTensor, uInputThisTile, rowsThisTile, nvActual, inputStride);
@@ -476,10 +497,13 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Copy(calcUbTensor, wsUbTensorThisTile, rowsThisTile * nvActual);
                 AscendC::PipeBarrier<PIPE_V>();
-                ApplyRowScale(calcUbTensor, gUbTensor, rowStart, rowsThisTile, nvActual);
+                ApplyRowScale(calcUbTensor, gUbTensor, rowStart,
+                              rowsThisTile, nvActual, tileHReadySignal);
             } else {
-                ComputeVNew(wsUbTensorThisTile, uUbTensor, rowsThisTile * nvActual);
+                ComputeVNew(wsUbTensorThisTile, uUbTensor,
+                            rowsThisTile * nvActual, tileHReadySignal);
             }
+            hReadyPublished = true;
 
             uint32_t nvLoops = nvActual / FLOAT_NUM_PER_REPEAT;
             for (uint32_t nLoop = 0; nLoop < nvLoops; nLoop++) {

@@ -12,6 +12,7 @@
 
 #include "chunk_fwd_h_o_fused_struct.h"
 #include "kernel_operator.h"
+#include "chunk_fwd_h_o_fused_sync.h"
 #include "chunk_gated_delta_rule_fwd_h_struct.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "gemm/kernel/gdn_fwd_h_kernel_preload.hpp"

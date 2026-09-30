@@ -195,40 +195,8 @@ public:
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane = 0;
-        // The two-generation event index is intentionally disabled for the
-        // single-IB communication benchmark.
-        // const uint32_t generation = offsets.chunkIdx &
-        //     (GDN::CHUNK_FWD_HO_IB_GENERATIONS - 1);
-        // const uint32_t eventId = generation * GDN::CHUNK_FWD_HO_READY_EVENT_COUNT +
-        //                          eventBase + taskLane;
         AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
                                producerAivIdx, eventBase + taskLane);
-    }
-
-    __aicore__ inline void ProcessSingleIbOnlyBenchmark()
-    {
-        if ASCEND_IS_AIV {
-            if (!chunkPipelineEnabled) {
-                return;
-            }
-
-            const uint32_t subBlockNum = AscendC::GetSubBlockNum();
-            const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
-            const uint32_t consumerCoreIdx = AscendC::GetBlockIdx() / subBlockNum;
-            const uint32_t producerCoreIdx = consumerCoreIdx - producerCoreNum;
-            const uint32_t producerAivIdx = producerCoreIdx * subBlockNum + subBlockIdx;
-            const uint32_t taskLane = 0;
-            const uint32_t totalChunks = (seqlen + chunkSize - 1) / chunkSize;
-
-            for (uint32_t chunkIdx = 0; chunkIdx < totalChunks; ++chunkIdx) {
-                AscendC::IBWait<false>(
-                    gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
-                    GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
-                AscendC::IBWait<false>(
-                    gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
-                    GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE + taskLane);
-            }
-        }
     }
 
     __aicore__ inline GDNFwdOKernel() {}
@@ -285,13 +253,6 @@ public:
     }
 
     __aicore__ inline void Process() {
-        if constexpr (GDN::CHUNK_FWD_HO_IB_ONLY_BENCHMARK && kChunkPipeline) {
-            // IB-only profiling configuration: the production Cube, MTE and
-            // Vector business path below is intentionally bypassed.
-            ProcessSingleIbOnlyBenchmark();
-            return;
-        }
-
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
             uint32_t coreNum = AscendC::GetBlockNum();

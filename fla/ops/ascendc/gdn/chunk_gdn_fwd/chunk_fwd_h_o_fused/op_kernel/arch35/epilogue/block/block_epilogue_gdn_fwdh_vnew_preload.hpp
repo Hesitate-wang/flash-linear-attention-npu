@@ -15,6 +15,7 @@
 #include "catlass/gemm_coord.hpp"
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 
 
 
@@ -207,7 +208,8 @@ public:
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState,
-        bool isPing
+        bool isPing,
+        const GDN::ChunkFwdHOProducerReadySignal &hReadySignal
     )
     {
         uint32_t mActual = chunkSize;
@@ -309,11 +311,15 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
         }
 
+        if (hReadySignal.enabled) {
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
         Vec1CalcVF(
             (__ubuf__ VElementOutput*)vNewDecayUbTensor.GetPhyAddr(), (__ubuf__ VElementOutput*)vNewOutputUbTensor.GetPhyAddr(),
             (__ubuf__ float*)wsUbTensor.GetPhyAddr(), (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)gUbTensor[mOffset].GetPhyAddr(), 
             mActualThisSubBlock, nvActual
         );
+        hReadySignal.Publish<false>();
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1 + pingpongFlag);

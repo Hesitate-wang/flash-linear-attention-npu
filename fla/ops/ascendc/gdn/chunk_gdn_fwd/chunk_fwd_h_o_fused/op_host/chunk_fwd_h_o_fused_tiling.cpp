@@ -323,10 +323,6 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
 
     OP_CHECK_IF(!CheckedMul({static_cast<size_t>(tiling.get_activeCoreNum()),
                              static_cast<size_t>(GDN::CHUNK_FWD_HO_AIV_PER_MIXED_CORE),
-                             // IB-only benchmark: restore the original single
-                             // H/V slot pair.  Double-buffer version used
-                             // useOptimizedO ? CHUNK_FWD_HO_IB_EVENT_COUNT
-                             //               : CHUNK_FWD_HO_A5_IB_EVENT_COUNT.
                              static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT),
                              static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_WORDS_PER_EVENT),
                              sizeof(int32_t)}, bytes) ||
@@ -611,8 +607,6 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     tiling.set_producerCoreNum(static_cast<int64_t>(producerCoreNum));
     tiling.set_consumerCoreBase(static_cast<int64_t>(producerCoreNum));
     tiling.set_activeCoreNum(static_cast<int64_t>(activeCoreNum));
-    // IB-only benchmark: all paths use one H/V event pair.  Double-buffer
-    // version selected A5_IB_EVENT_COUNT for isA5 && !useExp2.
     tiling.set_pipelineEventCount(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT);
 
     OP_CHECK_IF(tiling.GetDataSize() != sizeof(GDN::ChunkFwdHOFusedTilingData),

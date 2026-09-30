@@ -11,6 +11,7 @@
 
 #include "../chunk_gated_delta_rule_fwd_h_struct.h"
 #include "../chunk_fwd_o_struct.h"
+#include "../chunk_fwd_h_o_fused_sync.h"
 #include "chunk_fwd_o_a5_struct.h"
 
 using ChunkGatedDeltaRuleFwdHTilingData = ChunkFwdHOFusedHStageTilingData;

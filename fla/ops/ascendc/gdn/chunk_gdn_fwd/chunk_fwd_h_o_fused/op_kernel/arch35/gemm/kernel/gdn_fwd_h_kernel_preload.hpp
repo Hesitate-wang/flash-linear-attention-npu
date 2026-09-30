@@ -187,16 +187,47 @@ public:
         if (!chunkPipelineEnabled) {
             return;
         }
+        MakeProducerReadySignal(offsets, eventBase).Publish<false>();
+    }
+
+    __aicore__ inline GDN::ChunkFwdHOProducerReadySignal
+    MakeProducerReadySignal(const GDNFwdHOffsets &offsets, uint32_t eventBase)
+    {
+        GDN::ChunkFwdHOProducerReadySignal signal{};
+        if constexpr (!kChunkPipeline) {
+            return signal;
+        }
+        if (!chunkPipelineEnabled) {
+            return signal;
+        }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        // The two-generation event index is intentionally disabled for the
-        // single-IB communication benchmark.
-        // const uint32_t generation = readyChunkIdx &
-        //     (GDN::CHUNK_FWD_HO_IB_GENERATIONS - 1);
-        // const uint32_t eventId = generation * GDN::CHUNK_FWD_HO_READY_EVENT_COUNT +
-        //                          eventBase + taskLane;
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(), eventBase + taskLane);
+        signal.gmWorkspace = gmPipelineSync;
+        signal.ubWorkspace = GetPipelineSyncLocal();
+        signal.blockIdx = GetPipelineAivIdx();
+        signal.eventId = eventBase + taskLane;
+        signal.enabled = true;
+        return signal;
+    }
+
+    __aicore__ inline GDN::ChunkFwdHOProducerReadySignal
+    MakeHReadySignal(const GDNFwdHOffsets &offsets)
+    {
+        GDN::ChunkFwdHOProducerReadySignal signal{};
+        if constexpr (!kChunkPipeline) {
+            return signal;
+        }
+        if (!chunkPipelineEnabled) {
+            return signal;
+        }
+        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
+        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
+        signal.gmWorkspace = gmPipelineSync;
+        signal.ubWorkspace = GetPipelineSyncLocal();
+        signal.blockIdx = GetPipelineAivIdx();
+        signal.eventId = GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane;
+        signal.enabled = true;
+        return signal;
     }
 
     __aicore__ inline void SignalInitialStateReady()
@@ -210,34 +241,6 @@ public:
         AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
                               GetPipelineAivIdx(),
                               GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-    }
-
-    __aicore__ inline void ProcessSingleIbOnlyBenchmark()
-    {
-        if ASCEND_IS_AIV {
-            if (!chunkPipelineEnabled) {
-                return;
-            }
-
-            const uint32_t producerAivIdx = GetPipelineAivIdx();
-            const uint32_t totalChunks = (seqlen + chunkSize - 1) / chunkSize;
-
-            // Stand in for initial-state HReady(0).  For each chunk publish
-            // VReady(i), then HReady(i + 1), reusing one H/V event pair.
-            AscendC::IBSet<false>(
-                gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
-                GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-            for (uint32_t chunkIdx = 0; chunkIdx < totalChunks; ++chunkIdx) {
-                AscendC::IBSet<false>(
-                    gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
-                    GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
-                if (chunkIdx + 1 < totalChunks) {
-                    AscendC::IBSet<false>(
-                        gmPipelineSync, GetPipelineSyncLocal(), producerAivIdx,
-                        GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                }
-            }
-        }
     }
 
     __aicore__ inline GDNFwdHKernelPreload() {}
@@ -309,12 +312,6 @@ public:
     }
 
     __aicore__ inline void Process() {
-        if constexpr (GDN::CHUNK_FWD_HO_IB_ONLY_BENCHMARK && kChunkPipeline) {
-            // IB-only profiling configuration: the production Cube, MTE and
-            // Vector business path below is intentionally bypassed.
-            ProcessSingleIbOnlyBenchmark();
-            return;
-        }
 
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
@@ -502,6 +499,8 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pongBaseEvent);
 
             uint32_t currStage = 0; // 0: V1, 1: V2
+            GDN::ChunkFwdHOProducerReadySignal pendingHReady[PING_PONG_STAGES]{};
+            GDN::ChunkFwdHOProducerReadySignal pendingVReady[PING_PONG_STAGES]{};
             while (vecBlockScheduler.isRunning) {
                 if (currStage == 0) {
                     /* V1:
@@ -522,9 +521,11 @@ public:
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
                             vec1Offsets.blockTokens, kHeadDim, vHeadDim,
                             vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
-                            vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState, (i == 0)
+                            vec1Offsets.isInitialState, vec1Offsets.isFinalState,
+                            storeFinalState, (i == 0), pendingHReady[i]
                         );
-                        SignalProducerSliceReady(
+                        pendingHReady[i].enabled = false;
+                        pendingVReady[i] = MakeProducerReadySignal(
                             vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     }
                 } else {
@@ -544,19 +545,36 @@ public:
                                 gmH[vec2Offsets.hSrcOffset],
                                 gmHWorkspace[vec2Offsets.hWorkOffset],
                                 vec2Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube2Done,
-                                vec2Offsets.isFinalState, (i == 0)
+                                vec2Offsets.isFinalState, (i == 0), pendingVReady[i]
                             );
+                            pendingVReady[i].enabled = false;
                         } else {
                             Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
+                            if (pendingVReady[i].enabled) {
+                                AscendC::PipeBarrier<PIPE_ALL>();
+                                pendingVReady[i].Publish<false>();
+                                pendingVReady[i].enabled = false;
+                            }
                         }
                         if (!vec2Offsets.isFinalState) {
-                            SignalProducerSliceReady(
-                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                            pendingHReady[i] = MakeHReadySignal(vec2Offsets);
+                        } else {
+                            pendingHReady[i].enabled = false;
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[i]);
                     }
                 }
                 currStage ^= 0x01;
+            }
+
+            // A single-chunk task may finish without entering a real V2
+            // stage. Publish the V1 result before leaving the scheduler.
+            for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
+                if (pendingVReady[i].enabled) {
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                    pendingVReady[i].Publish<false>();
+                    pendingVReady[i].enabled = false;
+                }
             }
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);

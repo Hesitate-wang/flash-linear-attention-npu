@@ -15,6 +15,7 @@
 #include "catlass/gemm_coord.hpp"
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 #include "block_epilogue_gdn_fwdh_regbase.hpp"
 
 namespace Catlass::Epilogue::Block {
@@ -215,6 +216,7 @@ public:
         bool useInitialState,
         bool isPing,
         bool cube2AlreadyWaited,
+        const GDN::ChunkFwdHOProducerReadySignal &vReadySignal,
         uint64_t directUbFreeFlagBegin,
         uint64_t directUbReadyFlagBegin
     )
@@ -305,6 +307,7 @@ public:
         // fix: need to adapt kGated. issue: A5 do not have vdim128 branch.
         bool waitHFromV = storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value;
         bool waitUpdateFromMte3 = false;
+        bool vReadyPublished = false;
         uint32_t updateReadyEvent = EVENT_ID3 + pingpongFlag;
         for (uint32_t rowStart = rowBegin; rowStart < rowEnd; rowStart += ROW_TILE) {
             uint32_t rowsThisTile = rowEnd - rowStart;
@@ -392,9 +395,16 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
             }
+            if (vReadySignal.enabled && !vReadyPublished) {
+                AscendC::PipeBarrier<PIPE_ALL>();
+            }
             AscendC::Add<float>(
                 hUpdateUbTensorThisTile, calcUbTensor, hUpdateUbTensorThisTile,
                 rowsThisTile * nActual);
+            if (vReadySignal.enabled && !vReadyPublished) {
+                vReadySignal.Publish<false>();
+                vReadyPublished = true;
+            }
             AscendC::PipeBarrier<PIPE_V>();
             if (storeFinalState && isFinalState && std::is_same<FinalStateElement, float>::value) {
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
