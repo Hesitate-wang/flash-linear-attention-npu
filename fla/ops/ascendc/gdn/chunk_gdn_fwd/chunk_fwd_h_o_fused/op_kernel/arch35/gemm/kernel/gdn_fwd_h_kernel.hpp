@@ -265,7 +265,8 @@ public:
         if (!chunkPipelineEnabled) {
             return;
         }
-        MakeProducerReadySignal(offsets, eventBase).Publish<false>();
+        auto signal = MakeProducerReadySignal(offsets, eventBase);
+        signal.template Publish<false>();
     }
 
     __aicore__ inline GDN::ChunkFwdHOProducerReadySignal
