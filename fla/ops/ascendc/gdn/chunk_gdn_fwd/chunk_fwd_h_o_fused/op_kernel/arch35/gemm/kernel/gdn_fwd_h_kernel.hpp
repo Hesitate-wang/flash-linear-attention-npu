@@ -246,67 +246,6 @@ public:
         return isVariedLen == 0 && pipelineProducerCoreNum > 0;
     }
 
-    __aicore__ inline void SignalProducerSliceReady(
-        const GDNFwdHOffsets &offsets, uint32_t eventBase)
-    {
-        if constexpr (!kSignalProducerReady) {
-            return;
-        }
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        auto signal = MakeProducerReadySignal(offsets, eventBase);
-        signal.Publish();
-    }
-
-    __aicore__ inline GDN::ChunkFwdHOProducerReadySignal
-    MakeProducerReadySignal(const GDNFwdHOffsets &offsets, uint32_t eventBase)
-    {
-        GDN::ChunkFwdHOProducerReadySignal signal{};
-        if constexpr (!kSignalProducerReady) {
-            return signal;
-        }
-        if (!chunkPipelineEnabled) {
-            return signal;
-        }
-        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        signal.eventId = eventBase + taskLane;
-        signal.enabled = true;
-        return signal;
-    }
-
-    __aicore__ inline GDN::ChunkFwdHOProducerReadySignal
-    MakeHReadySignal(const GDNFwdHOffsets &offsets)
-    {
-        GDN::ChunkFwdHOProducerReadySignal signal{};
-        if constexpr (!kSignalProducerReady) {
-            return signal;
-        }
-        if (!chunkPipelineEnabled) {
-            return signal;
-        }
-        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        signal.eventId = GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane;
-        signal.enabled = true;
-        return signal;
-    }
-
-    __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
-    {
-        if constexpr (!kSignalProducerReady) {
-            return;
-        }
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        GDN::ActiveChunkFwdHOSync::Set(
-            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
-        GDN::ActiveChunkFwdHOSync::Wait(
-            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
-    }
 
 
     __aicore__ inline GDNFwdHKernel() {}
@@ -606,6 +545,7 @@ public:
 
             const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+            GDN::ActiveChunkFwdHOSync::AicHReadySetWait(cubeBlockScheduler.cubeCoreIdx);
             if (offsets.blockTokens < 16) {
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.cube1Done[streamId]);
                 continue;
@@ -648,6 +588,7 @@ public:
 
             const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(cubeBlockScheduler.cubeCoreIdx);
             if (!cubeBlockScheduler.NeedProcessStage2(stream)) {
                 continue;
             }
@@ -726,6 +667,7 @@ public:
 
                             const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                            GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
                             auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(
                                 cube1Offsets.blockTokens, cube1Offsets.vBlockDim);
                             auto tensorW = tla::MakeTensor(
@@ -774,6 +716,7 @@ public:
 
                             const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                            GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
                             if (cube1Offsets.blockTokens < 16) {
                                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
                                     cubeBlockScheduler.cube1Done[streamId]);
@@ -810,6 +753,7 @@ public:
                             const GDNFwdHOffsets& cube2Offsets =
                                 cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
                                 int64_t cube2OffsetK = kGated
@@ -870,6 +814,7 @@ public:
                             }
                             const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
                                 if (cube2Offsets.blockTokens < 16) {
@@ -1001,7 +946,6 @@ public:
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[slot]);
                         firstTaskInSlot = false;
                     }
-                    SignalInitialStateReady(taskIdx);
                 }
             }
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
@@ -1048,8 +992,6 @@ public:
             bool event0FromMte3[PING_PONG_STAGES] = {false, false};
             bool event2FromMte3[PING_PONG_STAGES] = {!(storeFinalState && std::is_same<ElementFinalState, float>::value),
                                                       !(storeFinalState && std::is_same<ElementFinalState, float>::value)};
-            GDN::ChunkFwdHOProducerReadySignal pendingHReady[PING_PONG_STAGES]{};
-            GDN::ChunkFwdHOProducerReadySignal pendingVReady[PING_PONG_STAGES]{};
             while (vecBlockScheduler.isRunning) {
                 if (currStage == 0) {
                     /* V1:
@@ -1087,12 +1029,8 @@ public:
                             vecBlockScheduler.cube1Done[streamId], vecBlockScheduler.vec1Done[streamId],
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState,
                             waitWsFromMte3, (i == 0), tailVectorPath,
-                            pendingHReady[i],
                             DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                         );
-                        pendingHReady[i].enabled = false;
-                        pendingVReady[i] = MakeProducerReadySignal(
-                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
                         }
@@ -1134,24 +1072,12 @@ public:
                                 vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim, vecBlockScheduler.cube2Done[streamId],
                                 vec2Offsets.isInitialState, vec2Offsets.isFinalState, storeFinalState,
                                 useInitialState, (i == 0), tailVectorPath,
-                                pendingVReady[i],
                                 DIRECT_UB_FREE_FLAG_BEGIN, DIRECT_UB_READY_FLAG_BEGIN
                             );
-                            pendingVReady[i].enabled = false;
                         } else {
                             if constexpr (!kUseDirectFp32Ub) {
                                 Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
                             }
-                            if (pendingVReady[i].enabled) {
-                                AscendC::PipeBarrier<PIPE_ALL>();
-                                pendingVReady[i].Publish();
-                                pendingVReady[i].enabled = false;
-                            }
-                        }
-                        if (!vec2Offsets.isFinalState) {
-                            pendingHReady[i] = MakeHReadySignal(vec2Offsets);
-                        } else {
-                            pendingHReady[i].enabled = false;
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
                     }
@@ -1159,14 +1085,8 @@ public:
                 currStage ^= 0x01;
             }
 
-            // A single-chunk task may finish without entering a real V2
             // stage. Publish the V1 result before leaving the scheduler.
             for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
-                if (pendingVReady[i].enabled) {
-                    AscendC::PipeBarrier<PIPE_ALL>();
-                    pendingVReady[i].Publish();
-                    pendingVReady[i].enabled = false;
-                }
             }
 
             if (storeFinalState && std::is_same<ElementFinalState, float>::value) {

@@ -8,6 +8,7 @@
 #include "../op_kernel/chunk_fwd_h_o_fused_struct.h"
 #include "tiling/platform/platform_ascendc.h"
 #include <cstring>
+#include <algorithm>
 #include <initializer_list>
 #include <limits>
 #include "tiling_base/data_copy_transpose_tiling.h"
@@ -558,7 +559,12 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     OP_CHECK_IF(physicalCoreNum == 0,
                 OP_LOGE(context->GetNodeName(), "No AIC core is available."),
                 return ge::GRAPH_FAILED);
-    const size_t maxPipelineTaskNum = physicalCoreNum / 2;
+    // Cross-core H/O rendezvous is grouped by seven task pairs.  Each phase
+    // uses one flag per side, so a flag receives at most 14 Set operations.
+    // Keep three groups (21 pairs / 42 mixed cores) in the current ABI.
+    constexpr size_t kMaxHOPipelineTaskNum = 21;
+    const size_t maxPipelineTaskNum = std::min(physicalCoreNum / 2,
+                                               kMaxHOPipelineTaskNum);
     OP_CHECK_IF(maxPipelineTaskNum == 0,
                 OP_LOGE(context->GetNodeName(),
                         "The core pipeline requires at least two physical AIC cores, got %zu.", physicalCoreNum),
@@ -568,8 +574,8 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(taskNum > maxPipelineTaskNum,
                 OP_LOGE(context->GetNodeName(),
-                        "The per-head core pipeline requires 2 * B * HV physical AIC cores; "
-                        "got %zu tasks and %zu physical cores. The saturated-core path is not implemented yet.",
+                        "The H/O core pipeline supports at most 21 task pairs (42 mixed cores) "
+                        "and requires 2 * B * HV physical AIC cores; got %zu tasks and %zu physical cores.",
                         taskNum, physicalCoreNum),
                 return ge::GRAPH_FAILED);
     const size_t producerCoreNum = taskNum;

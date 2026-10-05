@@ -17,71 +17,52 @@ namespace GDN {
 #error "chunk_fwd_h_o_fused_sync.h received multiple architecture macros"
 #endif
 
-// These are mode-0 inter-core flags.  They are deliberately outside the
-// 0..9 mode-2 AIC/AIV flag range used by the H/O local schedulers.
-constexpr uint16_t CHUNK_FWD_HO_H_READY_FLAG = 12;
-constexpr uint16_t CHUNK_FWD_HO_V_READY_FLAG = 13;
+// Mode-0 flags are shared by H/O AICs.  Seven task pairs use one phase flag:
+// seven producer AICs plus seven consumer AICs issue at most 14 Set calls.
+constexpr uint32_t CHUNK_FWD_HO_FLAG_GROUP_SIZE = 7;
+constexpr uint32_t CHUNK_FWD_HO_FLAG_GROUP_COUNT = 3;
+constexpr uint32_t CHUNK_FWD_HO_MAX_TASK_PAIRS =
+    CHUNK_FWD_HO_FLAG_GROUP_SIZE * CHUNK_FWD_HO_FLAG_GROUP_COUNT;
+// Scheduler flags occupy IDs 0..9 (the O scheduler uses five ping-pong
+// pairs). Keep the mode-0 cross-core rendezvous in a separate ID range.
+constexpr uint16_t CHUNK_FWD_HO_H_READY_FLAG_BASE = 10;
+constexpr uint16_t CHUNK_FWD_HO_V_READY_FLAG_BASE = 11;
+static_assert(CHUNK_FWD_HO_V_READY_FLAG_BASE +
+                  2 * (CHUNK_FWD_HO_FLAG_GROUP_COUNT - 1) < 16,
+              "H/O mode-0 flags exceed the 16-entry flag range");
 
-// eventId retains the old H/V lane encoding for call-site stability:
-// H lanes occupy [H_BASE, V_BASE), V lanes occupy [V_BASE, READY_EVENT_COUNT).
-// Do not compare against H_BASE directly, since that misclassifies H lanes
-// other than lane zero as V_READY when more than one task lane is enabled.
-__aicore__ inline uint16_t ChunkFwdHOReadyFlag(int32_t eventId)
+// Logical H/V event IDs share one mode-0 flag per handoff phase.
+__aicore__ inline uint16_t ChunkFwdHOReadyFlag(int32_t eventId, uint32_t pairId)
 {
-    return eventId >= CHUNK_FWD_HO_V_READY_EVENT_BASE
-        ? CHUNK_FWD_HO_V_READY_FLAG : CHUNK_FWD_HO_H_READY_FLAG;
+    const uint32_t group = pairId / CHUNK_FWD_HO_FLAG_GROUP_SIZE;
+    return static_cast<uint16_t>((eventId >= CHUNK_FWD_HO_V_READY_EVENT_BASE
+        ? CHUNK_FWD_HO_V_READY_FLAG_BASE : CHUNK_FWD_HO_H_READY_FLAG_BASE) +
+        2 * group);
 }
 
 struct ActiveChunkFwdHOSync {
-    __aicore__ static inline void Set(int32_t eventId)
+    __aicore__ static inline void Set(int32_t eventId, uint32_t pairId)
     {
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(
-            ChunkFwdHOReadyFlag(eventId));
+            ChunkFwdHOReadyFlag(eventId, pairId));
     }
 
-    __aicore__ static inline void Wait(int32_t eventId)
+    __aicore__ static inline void Wait(int32_t eventId, uint32_t pairId)
     {
-        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE2>(
-            ChunkFwdHOReadyFlag(eventId));
-    }
-};
-
-struct ChunkFwdHOProducerReadySignal {
-    int32_t eventId{0};
-    bool enabled{false};
-
-    __aicore__ inline void Publish() const
-    {
-        if (!enabled) {
-            return;
-        }
-        ActiveChunkFwdHOSync::Set(eventId);
-        ActiveChunkFwdHOSync::Wait(eventId);
-    }
-};
-
-// Consumer-side handoff used by the A5 O epilogue.  The epilogue invokes this
-// after issuing independent Vector work, allowing that work to cover the
-// cross-core V_new wait.
-struct ChunkFwdHOConsumerReadyWait {
-    int32_t eventId{0};
-    bool enabled{false};
-
-    __aicore__ inline void Wait() const
-    {
-        if (!enabled) {
-            return;
-        }
-        ActiveChunkFwdHOSync::Set(eventId);
-        ActiveChunkFwdHOSync::Wait(eventId);
+        AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(
+            ChunkFwdHOReadyFlag(eventId, pairId));
     }
 
-    __aicore__ inline void Participate() const
+    __aicore__ static inline void AicHReadySetWait(uint32_t pairId)
     {
-        if (!enabled) {
-            return;
-        }
-        Wait();
+        Set(CHUNK_FWD_HO_H_READY_EVENT_BASE, pairId);
+        Wait(CHUNK_FWD_HO_H_READY_EVENT_BASE, pairId);
+    }
+
+    __aicore__ static inline void AicVReadySetWait(uint32_t pairId)
+    {
+        Set(CHUNK_FWD_HO_V_READY_EVENT_BASE, pairId);
+        Wait(CHUNK_FWD_HO_V_READY_EVENT_BASE, pairId);
     }
 };
 

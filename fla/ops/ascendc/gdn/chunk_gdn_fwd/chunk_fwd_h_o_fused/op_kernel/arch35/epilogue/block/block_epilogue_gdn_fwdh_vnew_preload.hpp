@@ -209,7 +209,6 @@ public:
         bool isFinalState,
         bool storeFinalState,
         bool isPing,
-        const GDN::ChunkFwdHOProducerReadySignal &hReadySignal
     )
     {
         uint32_t mActual = chunkSize;
@@ -222,13 +221,8 @@ public:
         uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
         uint32_t nOffset = 0;
-        // 褰撳墠鍦烘櫙鍐呴儴涓€瀹氳繛缁?
-        // k [B, H, T, D]
-        // g [B, H, T]
-        // 鍦ㄥ閮╫ffset鐨勫熀纭€涓婅繘涓€姝ffset
-        // 褰撳墠asset kdim == vHeadDim
         int64_t offsetK = mOffset * nvActual + nOffset;
-        int64_t offsetD = 0; // 鍥犱负瑕佺敤鏈€鍚庝竴涓暟鍑忓幓涔嬪墠鎵€鏈夛紝鎵€浠ュ叏閮ㄨ鍏?
+        int64_t offsetD = 0;
 
         uint32_t gbrcStart, gbrcRealStart, gbrcReptime, gbrcEffStart, gbrcEffEnd;
         if(subBlockIdx==0)
@@ -310,16 +304,11 @@ public:
         if (storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
         }
-
-        if (hReadySignal.enabled) {
-            AscendC::PipeBarrier<PIPE_ALL>();
-        }
         Vec1CalcVF(
             (__ubuf__ VElementOutput*)vNewDecayUbTensor.GetPhyAddr(), (__ubuf__ VElementOutput*)vNewOutputUbTensor.GetPhyAddr(),
             (__ubuf__ float*)wsUbTensor.GetPhyAddr(), (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)gUbTensor[mOffset].GetPhyAddr(), 
             mActualThisSubBlock, nvActual
         );
-        hReadySignal.Publish();
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1 + pingpongFlag);

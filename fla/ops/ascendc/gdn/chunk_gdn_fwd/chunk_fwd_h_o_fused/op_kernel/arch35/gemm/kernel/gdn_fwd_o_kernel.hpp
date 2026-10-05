@@ -176,17 +176,6 @@ public:
         return isVariedLen == 0 && producerCoreNum > 0;
     }
 
-    __aicore__ inline GDN::ChunkFwdHOConsumerReadyWait MakeProducerSliceWait(
-        uint32_t eventBase)
-    {
-        GDN::ChunkFwdHOConsumerReadyWait wait;
-        if (!chunkPipelineEnabled) {
-            return wait;
-        }
-        wait.eventId = eventBase;
-        wait.enabled = true;
-        return wait;
-    }
 
     __aicore__ inline GDNFwdOKernel() {}
 
@@ -336,6 +325,8 @@ public:
                     blockMmadQK.waitL0Drained();
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(
                         cubeBlockScheduler.cube1Done[streamId]);
+                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait(
+                        coreIdx - producerCoreNum);
                 }
 
                 if (needRun && coreIdx < coreNum) {
@@ -398,6 +389,8 @@ public:
                     // vec1Done is published only after both AttnMask and V_new
                     // are visible. Cube3 owns L1A events 4/5 and L1B 6/7.
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
+                        coreIdx - producerCoreNum);
                     if (cube3Offsets.vBlockDim <= 128) {
                         blockMmadAttenVNEW128.preSetL1Flags();
                         blockMmadAttenVNEW128.copyGmToL1BOnly(
@@ -464,8 +457,6 @@ public:
             while (vecBlockScheduler.isRunning) {
                 vecBlockScheduler.InitTask();
                 bool currentVec1Issued = false;
-                GDN::ChunkFwdHOConsumerReadyWait currentHReadyWait;
-                GDN::ChunkFwdHOConsumerReadyWait currentVReadyWait;
 
                 if (vecBlockScheduler.isRunning && coreIdx < coreNum * subBlockNum) {
                     currentVec1Issued = true;
@@ -477,20 +468,13 @@ public:
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
                     int64_t vec1OffsetAttn = vec1Offsets.attnWorkOffset;
-                    // H is needed by O Cube2. The qk-mask epilogue waits for
-                    // H after its independent Vector work has been issued.
-                    currentHReadyWait = MakeProducerSliceWait(
-                        GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
-                    currentVReadyWait = MakeProducerSliceWait(
-                        GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
                     epilogueGDNFwdOQkmask(
                         gmAftermaskWorkspace[vec1OffsetAttnMask],
                         gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
                         chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim, pingpongFlag,
                         vec1Offsets.batchIdx, vec1Offsets.headIdx, vec1Offsets.chunkIdx,
-                        nullptr, currentVec1Issued ? &currentHReadyWait : nullptr,
-                        currentVec1Issued ? &vecBlockScheduler.cube1Done[streamId] : nullptr
+                        nullptr
                     );
                     if constexpr (!kFwdOAggregateQkMaskBarrier) {
                         if (isVariedLen != 0) {
@@ -520,7 +504,6 @@ public:
                             vHeadDim, pingpongFlag,
                             vecBlockScheduler.cube2Done[streamId],
                             vecBlockScheduler.cube3Done[streamId], releaseFlag,
-                            currentVec1Issued ? &currentVReadyWait : nullptr,
                             currentVec1Issued ? &vecBlockScheduler.vec1Done[
                                 vecBlockScheduler.GetCurStageId()] : nullptr);
                     } else {
@@ -530,7 +513,7 @@ public:
                             scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim,
                             vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx,
                             vec2Offsets.chunkIdx, &vecBlockScheduler.cube3Done[streamId],
-                            releaseFlag, currentVec1Issued ? &currentVReadyWait : nullptr,
+                            releaseFlag,
                             currentVec1Issued ? &vecBlockScheduler.vec1Done[
                                 vecBlockScheduler.GetCurStageId()] : nullptr);
                     }
@@ -560,7 +543,6 @@ public:
                     // V_READY is a per-chunk global rendezvous.  Keep it out of
                     // the output epilogue so every AIV participates exactly once,
                     // then notify this core's AIC that Cube3 may consume Vec1.
-                    currentVReadyWait.Wait();
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
                         vecBlockScheduler.vec1Done[vec1StreamId]);
                 }

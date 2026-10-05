@@ -186,31 +186,7 @@ public:
         return isVariedLen == 0 && pipelineProducerCoreNum > 0;
     }
 
-    __aicore__ inline void SignalProducerSliceReady(
-        const GDNFwdHOffsets &offsets, uint32_t eventBase)
-    {
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        // All active H/O AIVs join the mode-0 Set→Wait rendezvous for this
-        // chunk; the retained workspace arguments are ABI compatibility only.
-        GDN::ActiveChunkFwdHOSync::Set(eventBase + taskLane);
-        GDN::ActiveChunkFwdHOSync::Wait(eventBase + taskLane);
-    }
 
-    __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
-    {
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        GDN::ActiveChunkFwdHOSync::Set(
-            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
-        GDN::ActiveChunkFwdHOSync::Wait(
-            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
-    }
 
 
     __aicore__ inline GDNFwdHKernel() {}
@@ -537,6 +513,7 @@ public:
 
                         const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                         Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                        GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
                         if (cube1Offsets.blockTokens < 16) {
                             Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
                                 cubeBlockScheduler.cube1Done[streamId]);
@@ -577,6 +554,7 @@ public:
                         }
                         const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                         Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                        GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                         if (cubeBlockScheduler.NeedProcessStage2(stream)) {
                             if (cube2Offsets.blockTokens < 16) {
@@ -708,7 +686,6 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                         pingpongFlag = 1 - pingpongFlag;
                     }
-                    SignalInitialStateReady(taskIdx);
                 }
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
@@ -763,8 +740,6 @@ public:
                         );
                         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-                        SignalProducerSliceReady(
-                            vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                         if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
                             event0FromMte3[streamId] = false;
                         }
@@ -808,8 +783,6 @@ public:
                         }
                         if (!vec2Offsets.isFinalState) {
                             // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.
-                            SignalProducerSliceReady(
-                                vec2Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);
                     }

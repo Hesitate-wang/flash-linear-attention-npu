@@ -310,9 +310,7 @@ public:
         uint32_t vHeadDim,
         uint32_t &pingpongFlag
         , uint32_t batchIdx, uint32_t headIdx, uint32_t chunkIdx,
-        Arch::CrossCoreFlag* waitFlag = nullptr,
-        GDN::ChunkFwdHOConsumerReadyWait* hReadyWait = nullptr,
-        Arch::CrossCoreFlag* hReadySetFlag = nullptr
+        Arch::CrossCoreFlag* waitFlag = nullptr
         )
     {
         uint32_t mActual = chunkSize;
@@ -415,10 +413,6 @@ public:
                                        (__ubuf__ float*)maskBase,
                                        mActualThisSubBlock, alignedNActual,
                                        gbrcStart, gbrcEffStart, gbrcRealStart, gbrcRealEnd);
-                if (hReadyWait) hReadyWait->Wait();
-                if (hReadySetFlag) {
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*hReadySetFlag);
-                }
                 AscendC::PipeBarrier<PIPE_V>();
             }
             (void)gbrcRealEnd;
@@ -564,10 +558,6 @@ public:
                                                (__ubuf__ float*)maskBase,
                                                mActualThisStage, alignedNActual,
                                                gbrcStart, gbrcEffStart, gbrcRealStart, gbrcRealEnd);
-                    }
-                    if (hReadyWait && stage == 0) hReadyWait->Wait();
-                    if (hReadySetFlag && stage == 0) {
-                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*hReadySetFlag);
                     }
                     AscendC::PipeBarrier<PIPE_V>();
                 }

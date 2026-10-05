@@ -95,8 +95,8 @@
 
 ## IB 发布屏障精简
 
-- A2/A5 的 `SignalProducerSliceReadyAfterMte3` 包装函数已删除，四个 V/H ready
-  发布点直接调用 `SignalProducerSliceReady`。
+- HReady/VReady 的跨核发布和等待统一由 H/O 两侧 AIC 代理完成；AIV 仅保留
+  cube/vector 本核事件，已删除旧的 ready signal 兼容对象及其传递链。
 - 初始 H ready 发布前的外部 `PipeBarrier<PIPE_MTE3>` 也已删除；数据可见性由
   CrossCore Set/Wait 的 mode-0 语义与本核 MTE3/MTE2 pipe 顺序共同保证。
 - A2/A5 的启动事件清零由 `Duplicate` 在 `PIPE_V` 生成本地零值，再通过成对的
@@ -150,3 +150,26 @@
   update 和 16 KiB BF16/FP16 输出，均落在原有 UB 区域内且不侵入 248 KiB IB 区。
 - 目标环境需用默认三 chunk case 比较 CPU 与 composed 输出，并通过指令 trace
   确认每个有效 Vec2、每个 AIV 只有一次 state UB-to-GM MTE3 搬运。
+
+## H/O ready 同步精简与静态配对检查（待设备验证）
+
+- mode-0 封装将逻辑 H/V event 0/1 映射为硬件 flag 12/13；发布使用
+  `PIPE_MTE3`，等待使用 `PIPE_MTE2`，与设计中的全体 AIV 逐 chunk 握手一致。
+- A5 两条 H kernel 删除未调用的发布包装函数，并复用同一个 ready signal
+  构造函数生成下一 chunk 的 HReady；同步封装删除未调用的 `Participate()` 别名。
+- 当前 `TASK_LANES_PER_CORE=1`。静态检查确认 H 初始状态或前一 chunk Vec2
+  发布 HReady，O 当前 chunk Vec1 等待；H 当前 chunk Vec1 发布 VReady，O 当前
+  chunk Vec2 后等待。末 chunk 不生成下一轮 HReady，单 chunk 的 VReady 由收尾路径
+  发布。H/O 数据按相同 task 和 chunk 编址，mode-0 flag 本身是全局集合握手。
+- 本环境没有 CANN/NPU，尚未构建和运行。目标设备需覆盖单 chunk、三 chunk、
+  DirectUb/StandardGm、V128/V256，并采集 Set/Wait 代次及精度结果。
+
+## AIC 代理同步重构（待设备验证）
+
+- HReady/VReady 改由 H/O 两侧 AIC 执行双向 `Set/Wait`，AIV 不再承担 mode-0
+  跨核计数；AIV 只保留现有 `cube*Done/vec*Done` 本核通知。
+- 任务按 7 对分组，每组 H/V 使用两个独立 flag；三组覆盖 21 对、42 个 mixed
+  core，每个 phase flag 每轮最多 14 次 Set。
+- H AIC 在 `wait vec2Done` 后执行 HReady，在 `wait vec1Done` 后执行 VReady；
+  O AIC 在 Cube1 后执行 HReady，在 Cube2 和 Vec1 完成后执行 VReady。
+- Host 将任务对上限限制为 21，并继续受物理 AIC 数量约束。

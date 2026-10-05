@@ -364,9 +364,7 @@ public:
         uint32_t outputStride,
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag* waitFlag = nullptr,
-        Arch::CrossCoreFlag* setFlag = nullptr,
-        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
-        Arch::CrossCoreFlag* vReadySetFlag = nullptr
+        Arch::CrossCoreFlag* setFlag = nullptr
         )
     {
         static constexpr uint32_t ROW_TILE = 16;
@@ -516,22 +514,18 @@ public:
         uint32_t &pingpongFlag
         , uint32_t batchIdx, uint32_t headIdx, uint32_t chunkIdx,
         Arch::CrossCoreFlag* waitFlag = nullptr,
-        Arch::CrossCoreFlag* setFlag = nullptr,
-        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
-        Arch::CrossCoreFlag* vReadySetFlag = nullptr
+        Arch::CrossCoreFlag* setFlag = nullptr
         )
     {
         uint32_t mActual = chunkSize;
         uint32_t nActual = vBlockDim;
         if (nActual > 128) {
             ProcessWideOutput(hOutput, gInput, attnInput, hInput, scale, mActual,
-                              nActual, vHeadDim, pingpongFlag, waitFlag, setFlag,
-                              vReadyWait, vReadySetFlag);
+                              nActual, vHeadDim, pingpongFlag, waitFlag, setFlag);
             return;
         }
         ProcessOutput(hOutput, gInput, attnInput, hInput, scale, mActual,
-                      nActual, vHeadDim, pingpongFlag, waitFlag, setFlag,
-                      vReadyWait, vReadySetFlag);
+                      nActual, vHeadDim, pingpongFlag, waitFlag, setFlag);
     }
 
     /// V128 narrow path, parameterized over the work-input storage class:
@@ -550,9 +544,7 @@ public:
         uint32_t outputStride,
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag* waitFlag = nullptr,
-        Arch::CrossCoreFlag* setFlag = nullptr,
-        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
-        Arch::CrossCoreFlag* vReadySetFlag = nullptr
+        Arch::CrossCoreFlag* setFlag = nullptr
         )
     {
         // l0c2ub: with LocalTensor work inputs the slot IS the a/h buffer — no GM->UB
@@ -868,9 +860,7 @@ public:
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag cube2Ready,
         Arch::CrossCoreFlag cube3Ready,
-        Arch::CrossCoreFlag* releaseFlag,
-        GDN::ChunkFwdHOConsumerReadyWait* vReadyWait = nullptr,
-        Arch::CrossCoreFlag* vReadySetFlag = nullptr)
+        Arch::CrossCoreFlag* releaseFlag)
     {
         const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         const uint32_t rowsPerSubBlock = CeilDiv(rows, AscendC::GetSubBlockNum());
