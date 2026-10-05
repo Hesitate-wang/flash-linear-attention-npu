@@ -142,16 +142,14 @@ struct BlockSchedulerGdnFwdO {
                 pipelineHTaskIdx = consumerIdx;
                 workspaceCoreIdx = consumerIdx;
                 const uint32_t hTaskNum = shapeBatch * vNumHead;
-                // Keep two pipeline slots even when only one head is valid.
-                // The slots represent reusable chunk buffers, not head lanes.
-                pipelineStageCount = GDN_FWD_O_PING_PONG_STAGES;
-                // Both ping-pong slots are free before the first task, even
-                // when this consumer owns only one head.  The first task is
-                // scheduled into slot 1 (currStage starts at 1), so limiting
-                // this count to one would leave vec2Done[1] unsignalled and
-                // deadlock the first AIC handoff for odd task counts.
-                initialStageCount = GDN_FWD_O_PING_PONG_STAGES;
-                currStage = pipelineStageCount - 1;
+                // Host tiling assigns one producer/consumer pair per H task.
+                // A task's chunks are strictly serial, so the O pipeline must
+                // use the same single slot as H stream 0.  Reusing two slots
+                // here would make the first vec2Done generation disagree
+                // with the H producer and leave one side waiting forever.
+                pipelineStageCount = 1;
+                initialStageCount = 1;
+                currStage = 0;
                 isRunning = pipelineHTaskIdx < hTaskNum;
             }
         } else if (taskAffinity) {
@@ -235,7 +233,7 @@ struct BlockSchedulerGdnFwdO {
             pipelineHeadIdx = pipelineHTaskIdx % vNumHead;
             curTaskIdx = pipelineBatchIdx * numChunks * vNumHead +
                          pipelineChunkIdx * vNumHead + pipelineHeadIdx;
-            pipelineChunkIdx += 1;
+            ++pipelineChunkIdx;
         } else if (taskAffinity) {
             taskIdx = FindNextOwnedDenseTask(taskIdx);
             if (unlikely(taskIdx >= taskNum)) {

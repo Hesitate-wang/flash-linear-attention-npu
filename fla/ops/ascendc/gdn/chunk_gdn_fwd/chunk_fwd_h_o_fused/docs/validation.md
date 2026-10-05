@@ -153,7 +153,8 @@
 
 ## H/O ready 同步精简与静态配对检查（待设备验证）
 
-- mode-0 封装将逻辑 H/V event 0/1 映射为硬件 flag 12/13；发布使用
+- mode-0 封装将逻辑 H/V event 0/1 映射为硬件 flag 10/11（后续组为
+  12/13、14/15）；发布使用
   `PIPE_MTE3`，等待使用 `PIPE_MTE2`，与设计中的全体 AIV 逐 chunk 握手一致。
 - A5 两条 H kernel 删除未调用的发布包装函数，并复用同一个 ready signal
   构造函数生成下一 chunk 的 HReady；同步封装删除未调用的 `Participate()` 别名。
@@ -173,3 +174,6 @@
 - H AIC 在 `wait vec2Done` 后执行 HReady，在 `wait vec1Done` 后执行 VReady；
   O AIC 在 Cube1 后执行 HReady，在 Cube2 和 Vec1 完成后执行 VReady。
 - Host 将任务对上限限制为 21，并继续受物理 AIC 数量约束。
+- A5 chunk pipeline 的 O scheduler 与 H scheduler 使用同一单 task 串行模型：每个
+  producer/consumer pair 固定使用唯一 active stream/slot，当前 chunk 完成并发布
+  `vec2Done` 后才推进到下一 chunk；不为同一 task 伪造第二个并行 stream。
