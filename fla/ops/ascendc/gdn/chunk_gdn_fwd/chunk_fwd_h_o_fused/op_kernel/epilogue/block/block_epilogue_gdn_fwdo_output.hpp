@@ -277,7 +277,6 @@ public:
         uint32_t vBlockDim,
         uint32_t vHeadDim,
         uint32_t &pingpongFlag
-        , uint32_t batchIdx, uint32_t headIdx, uint32_t chunkIdx
         )
     {
         uint32_t mActual = chunkSize;

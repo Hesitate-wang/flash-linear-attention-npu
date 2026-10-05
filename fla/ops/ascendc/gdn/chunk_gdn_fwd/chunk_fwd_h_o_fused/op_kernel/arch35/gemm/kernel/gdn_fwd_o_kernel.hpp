@@ -503,19 +503,14 @@ public:
                             scale, vec2Offsets.blockTokens, vec2Offsets.vBlockDim,
                             vHeadDim, pingpongFlag,
                             vecBlockScheduler.cube2Done[streamId],
-                            vecBlockScheduler.cube3Done[streamId], releaseFlag,
-                            currentVec1Issued ? &vecBlockScheduler.vec1Done[
-                                vecBlockScheduler.GetCurStageId()] : nullptr);
+                            vecBlockScheduler.cube3Done[streamId], releaseFlag);
                     } else {
                         epilogueGDNFwdOOutput(
                             gmO[vec2OffsetO], gmG[vec2OffsetG],
                             gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
                             scale, vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim,
-                            vHeadDim, pingpongFlag, vec2Offsets.batchIdx, vec2Offsets.headIdx,
-                            vec2Offsets.chunkIdx, &vecBlockScheduler.cube3Done[streamId],
-                            releaseFlag,
-                            currentVec1Issued ? &vecBlockScheduler.vec1Done[
-                                vecBlockScheduler.GetCurStageId()] : nullptr);
+                            vHeadDim, pingpongFlag, &vecBlockScheduler.cube3Done[streamId],
+                            releaseFlag);
                     }
                     if constexpr (!kFwdOAggregateOutputBarrier) {
                         // Conservative varlen path: join the two AIV
