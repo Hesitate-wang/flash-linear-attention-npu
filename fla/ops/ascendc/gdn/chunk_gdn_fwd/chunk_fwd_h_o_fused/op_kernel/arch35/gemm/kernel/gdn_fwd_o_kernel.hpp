@@ -196,7 +196,7 @@ public:
         const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
                                         AscendC::GetSubBlockIdx();
         const uint32_t taskLane = 0;
-        ActiveChunkFwdHOSync::WaitNoPreBarrier<false>(
+        GDN::ActiveChunkFwdHOSync::WaitNoPreBarrier<false>(
             gmPipelineSync, GetPipelineSyncLocal(),
             producerAivIdx, eventBase + taskLane);
     }
