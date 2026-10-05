@@ -34,6 +34,7 @@
 #include "kernel_operator.h"
 #include "../../chunk_fwd_h_o_fused_struct.h"
 #include "../../chunk_fwd_o_struct.h"
+#include "../../chunk_fwd_h_o_fused_sync.h"
 using namespace Catlass;
 using namespace tla;
 
@@ -155,7 +156,6 @@ public:
     AscendC::GlobalTensor<ElementAtten> gmAttnWorkspace;
     AscendC::GlobalTensor<ElementAttenMasked> gmAftermaskWorkspace;
     AscendC::GlobalTensor<ElementMask> gmMask;
-    AscendC::GlobalTensor<int32_t> gmPipelineSync;
 
     bool chunkPipelineEnabled{false};
     bool taskAffinityEnabled{false};
@@ -173,26 +173,6 @@ public:
             return false;
         }
         return isVariedLen == 0 && producerCoreNum > 0;
-    }
-
-    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
-    {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(HO_PIPELINE_SYNC_UB_OFFSET);
-    }
-
-    __aicore__ inline void WaitProducerSliceReady(
-        const GDNFwdOOffsets &offsets, uint32_t eventBase)
-    {
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        const uint32_t producerTaskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t producerCoreIdx = producerTaskIdx;
-        const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
-                                        AscendC::GetSubBlockIdx();
-        const uint32_t taskLane = 0;
-        AscendC::IBWait<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                               producerAivIdx, eventBase + taskLane);
     }
 
     __aicore__ inline GDNFwdOKernel() {}
@@ -232,10 +212,6 @@ public:
 
         chunkPipelineEnabled = CanRunChunkPipeline();
         taskAffinityEnabled = kChunkPipeline && !chunkPipelineEnabled && (isVariedLen == 0);
-        if (chunkPipelineEnabled) {
-            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-                user + tilingData->pipelineSyncWorkspaceOffset));
-        }
 
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tilingData,
@@ -323,6 +299,8 @@ public:
                         blockMmadQH256(tensorBlockQ, tensorBlockH, tensorBlockHWork, cube2Shape);
                         blockMmadQH256.finalWaitFlags();
                     }
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(
+                        cubeBlockScheduler.cube2Done[streamId]);
                 }
 
                 AscendC::PipeBarrier<PIPE_MTE2>();
@@ -414,6 +392,7 @@ public:
                     if (isVariedLen != 0) {
                         Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                     }
+                    Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
                     WaitProducerSliceReady(
                         vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     // In mode2 both AIV subblocks must publish, including a

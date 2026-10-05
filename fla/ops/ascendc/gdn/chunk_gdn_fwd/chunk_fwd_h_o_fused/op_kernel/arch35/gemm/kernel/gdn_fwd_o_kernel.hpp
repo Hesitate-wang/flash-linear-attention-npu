@@ -157,7 +157,6 @@ public:
     AscendC::GlobalTensor<ElementAtten> gmAttnWorkspace;
     AscendC::GlobalTensor<ElementAttenMasked> gmAftermaskWorkspace;
     AscendC::GlobalTensor<ElementMask> gmMask;
-    AscendC::GlobalTensor<int32_t> gmPipelineSync;
 
     bool chunkPipelineEnabled{false};
     bool taskAffinityEnabled{false};
@@ -177,43 +176,13 @@ public:
         return isVariedLen == 0 && producerCoreNum > 0;
     }
 
-    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
-    {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(GDN::CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
-    }
-
-    __aicore__ inline void WaitProducerSliceReady(
-        const GDNFwdOOffsets &offsets, uint32_t eventBase)
-    {
-        if (!chunkPipelineEnabled) {
-            return;
-        }
-        const uint32_t producerTaskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t producerCoreIdx = producerTaskIdx;
-        // IBSet/IBWait are SIMD-side APIs. In MIX mode their block index space
-        // contains the two logical AIVs of every mixed core, so each consumer
-        // AIV waits for the matching producer AIV slice.
-        const uint32_t producerAivIdx = producerCoreIdx * AscendC::GetSubBlockNum() +
-                                        AscendC::GetSubBlockIdx();
-        const uint32_t taskLane = 0;
-        GDN::ActiveChunkFwdHOSync::WaitNoPreBarrier<false>(
-            gmPipelineSync, GetPipelineSyncLocal(),
-            producerAivIdx, eventBase + taskLane);
-    }
-
     __aicore__ inline GDN::ChunkFwdHOConsumerReadyWait MakeProducerSliceWait(
-        const GDNFwdOOffsets &offsets, uint32_t eventBase)
+        uint32_t eventBase)
     {
         GDN::ChunkFwdHOConsumerReadyWait wait;
         if (!chunkPipelineEnabled) {
             return wait;
         }
-        const uint32_t producerTaskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
-        const uint32_t producerAivIdx =
-            producerTaskIdx * AscendC::GetSubBlockNum() + AscendC::GetSubBlockIdx();
-        wait.gmWorkspace = gmPipelineSync;
-        wait.ubWorkspace = GetPipelineSyncLocal();
-        wait.blockIdx = producerAivIdx;
         wait.eventId = eventBase;
         wait.enabled = true;
         return wait;
@@ -256,10 +225,6 @@ public:
 
         chunkPipelineEnabled = CanRunChunkPipeline();
         taskAffinityEnabled = kChunkPipeline && !chunkPipelineEnabled && (isVariedLen == 0);
-        if (chunkPipelineEnabled) {
-            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-                user + tilingData->pipelineSyncWorkspaceOffset));
-        }
 
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tilingData,
@@ -422,6 +387,14 @@ public:
                             tensorBlockHWork, cube2Shape);
                     }
 
+                    if (cube2Offsets.vBlockDim <= 128) {
+                        blockMmadQH128.finalWaitFlags();
+                    } else {
+                        blockMmadQH256.finalWaitFlags();
+                    }
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(
+                        cubeBlockScheduler.cube2Done[streamId]);
+
                     // vec1Done is published only after both AttnMask and V_new
                     // are visible. Cube3 owns L1A events 4/5 and L1B 6/7.
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
@@ -437,16 +410,6 @@ public:
                             tensorBlockV, cube3Shape);
                         blockMmadAttenVNEW256.copyGmToL1AOnly(
                             tensorBlockAttnMask, cube3Shape);
-                    }
-
-                    if (cube2Offsets.vBlockDim <= 128) {
-                        blockMmadQH128.finalWaitFlags();
-                    } else {
-                        blockMmadQH256.finalWaitFlags();
-                    }
-                    if (cube2Offsets.vBlockDim <= 128) {
-                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(
-                            cubeBlockScheduler.cube2Done[streamId]);
                     }
 
                     auto tensorVWork = tla::MakeTensor(
@@ -517,9 +480,9 @@ public:
                     // H is needed by O Cube2. The qk-mask epilogue waits for
                     // H after its independent Vector work has been issued.
                     currentHReadyWait = MakeProducerSliceWait(
-                        vec1Offsets, GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+                        GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
                     currentVReadyWait = MakeProducerSliceWait(
-                        vec1Offsets, GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
+                        GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE);
                     EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
                     epilogueGDNFwdOQkmask(
                         gmAftermaskWorkspace[vec1OffsetAttnMask],
@@ -591,10 +554,15 @@ public:
                     // reduces to a standalone wait before releasing Cube3.
                     uint32_t vec1StreamId = vecBlockScheduler.GetCurStageId();
                     if (!needRun) {
-                        currentVReadyWait.Wait();
-                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
-                            vecBlockScheduler.vec1Done[vec1StreamId]);
+                        Arch::CrossCoreWaitFlag(
+                            vecBlockScheduler.cube2Done[vec1StreamId]);
                     }
+                    // V_READY is a per-chunk global rendezvous.  Keep it out of
+                    // the output epilogue so every AIV participates exactly once,
+                    // then notify this core's AIC that Cube3 may consume Vec1.
+                    currentVReadyWait.Wait();
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
+                        vecBlockScheduler.vec1Done[vec1StreamId]);
                 }
                 needRun = true;
             }

@@ -16,8 +16,9 @@ namespace GDN {
 
 constexpr uint32_t CHUNK_FWD_HO_A5_UB_CAPACITY = 256U * 1024U;
 
-// Keep the final 8 KiB outside every Cube/Fixpipe/Vector data allocation. IBSet
-// and IBWait use the first 32 bytes as their local operand scratch.
+// Keep the final 8 KiB outside every Cube/Fixpipe/Vector data allocation. The
+// reserved region is retained for ABI/layout compatibility with older IB
+// builds; the natural-exp handoff now uses mode-0 CrossCore flags directly.
 constexpr uint32_t CHUNK_FWD_HO_A5_COMM_UB_OFFSET = 248U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_A5_COMM_UB_BYTES = 8U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET = CHUNK_FWD_HO_A5_COMM_UB_OFFSET;

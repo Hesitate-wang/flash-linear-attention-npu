@@ -319,7 +319,7 @@ public:
             (__ubuf__ float*)wsUbTensor.GetPhyAddr(), (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)gUbTensor[mOffset].GetPhyAddr(), 
             mActualThisSubBlock, nvActual
         );
-        hReadySignal.Publish<false>();
+        hReadySignal.Publish();
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1 + pingpongFlag);

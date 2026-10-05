@@ -402,7 +402,7 @@ public:
                 hUpdateUbTensorThisTile, calcUbTensor, hUpdateUbTensorThisTile,
                 rowsThisTile * nActual);
             if (vReadySignal.enabled && !vReadyPublished) {
-                vReadySignal.Publish<false>();
+                vReadySignal.Publish();
                 vReadyPublished = true;
             }
             AscendC::PipeBarrier<PIPE_V>();

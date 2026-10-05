@@ -33,63 +33,6 @@ __aicore__ inline uint32_t GetMixedCoreIdx()
     return AscendC::GetBlockIdx();
 }
 
-// Initialize every ready/ACK slot before producer and consumer cores take
-// different paths; the user workspace is not guaranteed to be zeroed.
-__aicore__ inline void InitializePipelineSync(
-    GM_ADDR userWorkspace,
-    const ChunkFwdHOFusedTilingData &tiling)
-{
-    if ASCEND_IS_AIV {
-        Catlass::Arch::Resource<Catlass::Arch::Ascend950> resource;
-
-        AscendC::LocalTensor<int32_t> syncLocal =
-            resource.ubBuf.GetBufferByByte<int32_t>(
-                CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
-
-        constexpr AscendC::TEventID zeroReadyEvent = EVENT_ID0;
-        constexpr AscendC::TEventID syncGmReadyEvent = EVENT_ID0;
-
-        AscendC::Duplicate(
-            syncLocal,
-            static_cast<int32_t>(0),
-            CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
-
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(zeroReadyEvent);
-
-        AscendC::GlobalTensor<int32_t> syncGm;
-        syncGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-            userWorkspace + tiling.pipelineSyncWorkspaceOffset));
-
-        const uint32_t logicalAivNum =
-            static_cast<uint32_t>(tiling.activeCoreNum) *
-            AscendC::GetSubBlockNum();
-        const uint32_t logicalAivIdx = AscendC::GetBlockIdx();
-
-        if (logicalAivIdx < logicalAivNum) {
-            for (uint32_t eventId = 0;
-                 eventId < static_cast<uint32_t>(tiling.pipelineEventCount);
-                 ++eventId) {
-                const uint32_t offset =
-                    (eventId * logicalAivNum + logicalAivIdx) *
-                    CHUNK_FWD_HO_IB_WORDS_PER_EVENT;
-
-                AscendC::DataCopy(
-                    syncGm[offset],
-                    syncLocal,
-                    CHUNK_FWD_HO_IB_WORDS_PER_EVENT);
-            }
-        }
-
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(
-            syncGmReadyEvent);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(
-            syncGmReadyEvent);
-    }
-
-    AscendC::SyncAll<false>();
-}
-
 static_assert(offsetof(ChunkFwdHOFusedTilingData, useExp2) ==
                   sizeof(::ChunkFwdHOFusedHStageTilingData),
               "The fused A5 tiling H prefix must match the arch35 H kernel view");
@@ -330,7 +273,6 @@ __aicore__ inline void RunTyped(
     GM_ADDR h = userWorkspace + data.handoffHWorkspaceOffset;
     GM_ADDR vNew = userWorkspace + data.handoffVWorkspaceOffset;
 
-    InitializePipelineSync(userWorkspace, data);
     if (GetMixedCoreIdx() < static_cast<uint32_t>(data.producerCoreNum)) {
         DispatchH<InputT, TileShapes, UseExp2, V_DIM>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,

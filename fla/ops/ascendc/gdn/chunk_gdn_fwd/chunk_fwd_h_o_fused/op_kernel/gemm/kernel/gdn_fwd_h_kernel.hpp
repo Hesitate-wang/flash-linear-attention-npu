@@ -37,6 +37,7 @@
 
 #include "kernel_operator.h"
 #include "../../chunk_fwd_h_o_fused_struct.h"
+#include "../../chunk_fwd_h_o_fused_sync.h"
 using namespace Catlass;
 using namespace tla;
 
@@ -166,7 +167,6 @@ public:
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
-    AscendC::GlobalTensor<int32_t> gmPipelineSync;
 
     bool chunkPipelineEnabled{false};
     uint32_t pipelineProducerCoreNum{0};
@@ -186,16 +186,6 @@ public:
         return isVariedLen == 0 && pipelineProducerCoreNum > 0;
     }
 
-    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
-    {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(HO_PIPELINE_SYNC_UB_OFFSET);
-    }
-
-    __aicore__ inline uint32_t GetPipelineAivIdx() const
-    {
-        return vecBlockScheduler.cubeCoreIdx * AscendC::GetSubBlockNum() + AscendC::GetSubBlockIdx();
-    }
-
     __aicore__ inline void SignalProducerSliceReady(
         const GDNFwdHOffsets &offsets, uint32_t eventBase)
     {
@@ -204,9 +194,10 @@ public:
         }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        // IBSet waits for a zero slot; the consumer's IBWait clears it after consumption.
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(), eventBase + taskLane);
+        // All active H/O AIVs join the mode-0 Set→Wait rendezvous for this
+        // chunk; the retained workspace arguments are ABI compatibility only.
+        GDN::ActiveChunkFwdHOSync::Set(eventBase + taskLane);
+        GDN::ActiveChunkFwdHOSync::Wait(eventBase + taskLane);
     }
 
     __aicore__ inline void SignalInitialStateReady(uint32_t taskIdx)
@@ -215,9 +206,10 @@ public:
             return;
         }
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(),
-                              GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+        GDN::ActiveChunkFwdHOSync::Set(
+            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
+        GDN::ActiveChunkFwdHOSync::Wait(
+            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane);
     }
 
 
@@ -270,10 +262,6 @@ public:
         pipelineProducerCoreNum = fusedTiling->producerCoreNum;
         pipelineActiveCoreNum = fusedTiling->activeCoreNum;
         chunkPipelineEnabled = CanRunChunkPipeline();
-        if (chunkPipelineEnabled) {
-            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-                user + fusedTiling->pipelineSyncWorkspaceOffset));
-        }
 
         const uint32_t logicalCoreNum = chunkPipelineEnabled ? pipelineProducerCoreNum
                                                              : AscendC::GetBlockNum();
@@ -838,7 +826,7 @@ public:
 
         }
         if constexpr (kChunkPipeline) {
-            // The dense fused path publishes individual chunks through IBSet/IBWait.
+            // The dense fused path publishes individual chunks through mode-0 flags.
             // Varlen currently uses producer affinity without that handshake, so close
             // H globally before the following O stage consumes h/vNew.
             if (isVariedLen) {

@@ -380,10 +380,6 @@ public:
         }
         if (rowBegin >= mActual) {
             if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
-            if (vReadyWait) vReadyWait->Wait();
-            if (vReadySetFlag) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
-            }
             if (setFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*setFlag);
             return;
         }
@@ -413,10 +409,6 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
         }
         AscendC::Exp(gUbTensor, gUbTensor, mActual);
-        if (vReadyWait) vReadyWait->Wait();
-        if (vReadySetFlag) {
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
-        }
         AscendC::PipeBarrier<PIPE_V>();
 
         uint32_t rowStart = rowBegin;
@@ -665,10 +657,6 @@ public:
             }
 
             AscendC::Exp(gUbTensor, gUbTensor, mActual);
-            if (vReadyWait) vReadyWait->Wait();
-            if (vReadySetFlag) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
-            }
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
@@ -742,10 +730,6 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
             }
             AscendC::Exp(gUbTensor, gUbTensor, mActual);
-            if (vReadyWait) vReadyWait->Wait();
-            if (vReadySetFlag) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
-            }
             AscendC::PipeBarrier<PIPE_V>();
             uint32_t mActualPerStage = CeilDiv(mActualThisSubBlock, 2);
             uint32_t mActualThisStage = 0;
@@ -895,10 +879,6 @@ public:
                                     ? rowBegin + rowsPerSubBlock : rows;
         if (rowBegin >= rowEnd) {
             Arch::CrossCoreWaitFlag(cube2Ready);
-            if (vReadyWait) vReadyWait->Wait();
-            if (vReadySetFlag) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
-            }
             Arch::CrossCoreWaitFlag(cube3Ready);
             if (releaseFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*releaseFlag);
             return;
@@ -942,10 +922,6 @@ public:
                          rowBegin * sizeof(float);
             OutputGateVf((__ubuf__ float*)hAddr, (__ubuf__ float*)gAddr,
                          rowEnd - rowBegin, cols);
-            if (vReadyWait) vReadyWait->Wait();
-            if (vReadySetFlag) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(*vReadySetFlag);
-            }
             AscendC::PipeBarrier<PIPE_V>();
         }
 

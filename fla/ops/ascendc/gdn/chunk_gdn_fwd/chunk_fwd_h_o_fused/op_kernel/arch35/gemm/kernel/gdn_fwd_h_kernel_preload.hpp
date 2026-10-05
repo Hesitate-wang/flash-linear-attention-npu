@@ -15,6 +15,7 @@
 #include "catlass/catlass.hpp"
 #include "catlass/debug.hpp"
 #include "../block/block_scheduler_gdn_fwd_h_preload.hpp"
+#include "../../../chunk_fwd_h_o_fused_sync.h"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_update_preload.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew_preload.hpp"
@@ -151,7 +152,6 @@ public:
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
-    AscendC::GlobalTensor<int32_t> gmPipelineSync;
 
     bool chunkPipelineEnabled{false};
     uint32_t pipelineProducerCoreNum{0};
@@ -166,18 +166,6 @@ public:
 
     Arch::Resource<ArchTag> resource;
 
-    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
-    {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(
-            GDN::CHUNK_FWD_HO_A5_IB_LOCAL_UB_OFFSET);
-    }
-
-    __aicore__ inline uint32_t GetPipelineAivIdx() const
-    {
-        return vecBlockScheduler.cubeCoreIdx * AscendC::GetSubBlockNum() +
-               AscendC::GetSubBlockIdx();
-    }
-
     __aicore__ inline void SignalProducerSliceReady(
         const GDNFwdHOffsets &offsets, uint32_t eventBase)
     {
@@ -188,7 +176,7 @@ public:
             return;
         }
         auto signal = MakeProducerReadySignal(offsets, eventBase);
-        signal.template Publish<false>();
+        signal.Publish();
     }
 
     __aicore__ inline GDN::ChunkFwdHOProducerReadySignal
@@ -203,9 +191,6 @@ public:
         }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        signal.gmWorkspace = gmPipelineSync;
-        signal.ubWorkspace = GetPipelineSyncLocal();
-        signal.blockIdx = GetPipelineAivIdx();
         signal.eventId = eventBase + taskLane;
         signal.enabled = true;
         return signal;
@@ -223,9 +208,6 @@ public:
         }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        signal.gmWorkspace = gmPipelineSync;
-        signal.ubWorkspace = GetPipelineSyncLocal();
-        signal.blockIdx = GetPipelineAivIdx();
         signal.eventId = GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE + taskLane;
         signal.enabled = true;
         return signal;
@@ -239,9 +221,10 @@ public:
         if (!chunkPipelineEnabled) {
             return;
         }
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(),
-                              GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+        GDN::ActiveChunkFwdHOSync::Set(
+            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+        GDN::ActiveChunkFwdHOSync::Wait(
+            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
     }
 
     __aicore__ inline GDNFwdHKernelPreload() {}
@@ -292,8 +275,6 @@ public:
             pipelineProducerCoreNum = fusedTiling->producerCoreNum;
             chunkPipelineEnabled = isVariedLen == 0 && pipelineProducerCoreNum > 0;
             logicalCoreNum = pipelineProducerCoreNum;
-            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-                user + fusedTiling->pipelineSyncWorkspaceOffset));
         }
 
         ubHUpdatePing = resource.ubBuf.template GetBufferByByte<ElementHWork>(32 * 1024);
@@ -553,7 +534,7 @@ public:
                             Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
                             if (pendingVReady[i].enabled) {
                                 AscendC::PipeBarrier<PIPE_ALL>();
-                                pendingVReady[i].Publish<false>();
+                                pendingVReady[i].Publish();
                                 pendingVReady[i].enabled = false;
                             }
                         }
@@ -573,7 +554,7 @@ public:
             for (uint32_t i = 0; i < PING_PONG_STAGES; ++i) {
                 if (pendingVReady[i].enabled) {
                     AscendC::PipeBarrier<PIPE_ALL>();
-                    pendingVReady[i].Publish<false>();
+                    pendingVReady[i].Publish();
                     pendingVReady[i].enabled = false;
                 }
             }
@@ -593,4 +574,3 @@ public:
 };
 
 }
-

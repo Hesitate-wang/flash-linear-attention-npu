@@ -32,6 +32,7 @@
 
 
 #include "kernel_operator.h"
+#include "../../chunk_fwd_h_o_fused_sync.h"
 using namespace Catlass;
 using namespace tla;
 
@@ -135,7 +136,6 @@ public:
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
-    AscendC::GlobalTensor<int32_t> gmPipelineSync;
 
     bool chunkPipelineEnabled{false};
     uint32_t pipelineProducerCoreNum{0};
@@ -144,18 +144,6 @@ public:
     VecScheduler vecBlockScheduler;
 
     Arch::Resource<ArchTag> resource;
-
-    __aicore__ inline AscendC::LocalTensor<int32_t> GetPipelineSyncLocal()
-    {
-        return resource.ubBuf.template GetBufferByByte<int32_t>(
-            HO_PIPELINE_SYNC_UB_OFFSET);
-    }
-
-    __aicore__ inline uint32_t GetPipelineAivIdx() const
-    {
-        return vecBlockScheduler.cubeCoreIdx * AscendC::GetSubBlockNum() +
-               AscendC::GetSubBlockIdx();
-    }
 
     __aicore__ inline void SignalProducerSliceReady(
         const GDNFwdHOffsets &offsets, uint32_t eventBase)
@@ -168,8 +156,8 @@ public:
         }
         const uint32_t taskIdx = offsets.batchIdx * vNumHead + offsets.headIdx;
         const uint32_t taskLane = taskIdx % GDN::CHUNK_FWD_HO_TASK_LANES_PER_CORE;
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(), eventBase + taskLane);
+        GDN::ActiveChunkFwdHOSync::Set(eventBase + taskLane);
+        GDN::ActiveChunkFwdHOSync::Wait(eventBase + taskLane);
     }
 
     __aicore__ inline void SignalInitialStateReady()
@@ -180,9 +168,10 @@ public:
         if (!chunkPipelineEnabled) {
             return;
         }
-        AscendC::IBSet<false>(gmPipelineSync, GetPipelineSyncLocal(),
-                              GetPipelineAivIdx(),
-                              GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+        GDN::ActiveChunkFwdHOSync::Set(
+            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
+        GDN::ActiveChunkFwdHOSync::Wait(
+            GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE);
     }
 
     __aicore__ inline GDNFwdHKernelPreload() {}
@@ -233,8 +222,6 @@ public:
             pipelineProducerCoreNum = fusedTiling->producerCoreNum;
             chunkPipelineEnabled = isVariedLen == 0 && pipelineProducerCoreNum > 0;
             logicalCoreNum = pipelineProducerCoreNum;
-            gmPipelineSync.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-                user + fusedTiling->pipelineSyncWorkspaceOffset));
         }
 
         if ASCEND_IS_AIC {
@@ -520,4 +507,3 @@ public:
 };
 
 }
-

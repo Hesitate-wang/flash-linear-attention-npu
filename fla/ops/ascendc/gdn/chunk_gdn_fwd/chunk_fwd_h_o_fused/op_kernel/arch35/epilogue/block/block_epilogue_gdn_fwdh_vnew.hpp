@@ -226,7 +226,7 @@ public:
         AscendC::VF_CALL<detail::ApplyRowScaleDualIssue>(
             matrixAddr, rowScaleAddr, rowScaleOffset,
             static_cast<uint16_t>(rows), static_cast<uint16_t>(cols));
-        hReadySignal.Publish<false>();
+        hReadySignal.Publish();
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -245,7 +245,7 @@ public:
         }
         AscendC::VF_CALL<detail::ComputeVNewRegbaseDualIssue<UElementInput>>(
             workspaceAddr, uInputAddr, count);
-        hReadySignal.Publish<false>();
+        hReadySignal.Publish();
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -312,7 +312,7 @@ public:
             if (hReadySignal.enabled) {
                 AscendC::PipeBarrier<PIPE_ALL>();
             }
-            hReadySignal.Publish<false>();
+            hReadySignal.Publish();
             Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
             return;
         }

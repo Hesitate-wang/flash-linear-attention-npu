@@ -10,15 +10,12 @@ files are common or A2 implementations.
 
 The fixed-length pipeline uses one H producer and one O consumer per
 `(batch, value-head)` task, with `activeCoreNum == 2 * producerCoreNum`, full-task
-handoff workspace, and per-chunk `IBSet<false>`/`IBWait<false>` synchronization. Two
-ready events provide `HReady` and `VReady` for each task. All chunks of one task
-reuse the corresponding H/V slots: `IBSet` waits until
-its GM event slot is zero before setting it to one, and the matching `IBWait`
-clears the slot after consumption, so slot reuse needs no separate O-to-H ACK.
-The IB implementation's internal `PipeBarrier<Pipe_all>` orders the GM data
-transfer and ready publication, so producer call sites do not add a separate
-MTE3 barrier. The initial `HReady` is published for its batch/head task without
-waiting for the other tasks assigned to the same producer core.
+handoff workspace, and per-chunk mode-0 `CrossCoreSetFlag/CrossCoreWaitFlag`
+rendezvous. Flags 12 and 13 provide `HReady` and `VReady`; local AIC/AIV
+pipeline flags remain in the mode-2 0..9 range. All active H/O AIVs participate
+in the same chunk's `Set` then `Wait`, while mode-2 flags notify the paired AIC
+after the local H/V data is ready. The legacy IB workspace remains allocated for
+ABI compatibility but is not initialized or accessed by natural-exp H/O.
 In MIX mode the IB calls execute on the AIV lanes and use the logical AIV index
 space required by the API. After `HReady`, the O-internal reverse generation of
 `cube1Done` lets the AIC compute `Q * gate @ H_old` while the AIV computes
@@ -26,7 +23,8 @@ space required by the API. After `HReady`, the O-internal reverse generation of
 
 For Ascend 950, the entry selects architecture-local copies of the established
 arch35 H and O implementations. Separate mixed cores run H producers and O
-consumers; natural-exp handoff uses per-chunk `IBSet/IBWait`. The A5 exp2 O
+consumers; natural-exp handoff uses per-chunk mode-0 `H_READY/V_READY`
+`CrossCoreSetFlag/CrossCoreWaitFlag`. The A5 exp2 O
 path temporarily retains an all-core handoff barrier. The exp2 path supports
 BF16 data, BF16/FP32 gates, `chunk=64`, `K=V=128`, `HV/HK` in `[1,4]`, and
 BSND/TND output.

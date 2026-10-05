@@ -6,13 +6,13 @@
 | --- | --- |
 | `T` 对生产者/消费者核 | Host tiling 检查 `T<=floor(P/2)`，并设置相等的 producer/consumer 数、`consumerCoreBase=T` 和 `activeCoreNum=2T` |
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
-| 启动事件初始化 | A2/A5 统一入口 `RunChunkFwdHOFused` 在 H/O 分流前调用各自的 `InitializePipelineSync` |
-| 逐 chunk 的 H 到 O 发布 | H 的 `SignalProducerSliceReady` 为每个 task 发布 `HReady` 和 `VReady`，共 2 个 event；同一 task 的 chunk 串行复用对应 slot，O 的 `WaitProducerSliceReady` 消费并清零；`cube1Done` 在 `HReady` 后放行 O AIC 的 `QH_old` |
-| A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 `IBSet/IBWait`；exp2 专用 O 暂以 `SyncAll<false>()` 保护交接 |
+| 启动事件初始化 | A2/A5 统一入口不再初始化同步区或执行额外启动屏障；自然指数路径不访问 IB event table |
+| 逐 chunk 的 H 到 O 发布 | mode `0x0` 的 `H_READY=12`、`V_READY=13` 按 chunk 执行全体 AIV `Set→Wait`；本核 `cube1Done/cube2Done/vec1Done` 继续使用 mode `0x2` |
+| A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 CrossCore H/V rendezvous；exp2 专用 O 仍使用既有 `SyncAll<false>()` 阶段边界 |
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
 | FwdO 架构隔离 | A2 实现在 `op_kernel/gemm/kernel`；A5 kernel、配套 epilogue、exp2 tiling/constants 和 UB layout 全部位于 `op_kernel/arch35` |
-| A5 自然指数 FwdO Vec1/HReady 重排 | qkmask 两条分支均先发射 gate/causal-mask Vector，再在 QK MTE2 前执行 HReady IBWait 并立即 ACK；`chunk=128` 仅首段握手。待设备检查三 chunk 精度、IB/flag 代次以及相同条件下的 profiling 总耗时 |
+| A5 自然指数 FwdO Vec1/HReady 重排 | qkmask 两条分支均先发射 gate/causal-mask Vector，再在 QK MTE2 前执行 H_READY Set/Wait 并立即 ACK；`chunk=128` 仅首段握手。待设备检查三 chunk 精度、IB/flag 代次以及相同条件下的 profiling 总耗时 |
 | A5 FwdO V128 两段 Vec2 | 新增 `cube2Done[0/1]` 事件 8/9；Cube2 完成后先对整片 H FP32 乘 `exp(g)` 并驻留 UB，Cube3 完成后再 Add、Muls、Cast、写 O。V256 沿用旧融合路径。待设备验证 V128 chunk64/128、两种 gate dtype、三 chunk slot 回绕的精度、同步代次和总耗时 |
 
 ## 已完成的静态检查
@@ -50,20 +50,20 @@
   聚合两个配对 AIV 的 `HReady` 等待结果；`V_new` 由后续 `VReady` 单独约束。
 - A2 和 A5 均在 H/O 分流前由每个逻辑 AIV 清零自身的全部 IB event slot，
   随后由全部活动 AIC/AIV 执行一次启动 rendezvous；A5 不依赖未初始化的
-  ACLNN user workspace 作为 `IBSet/IBWait` 同步状态。Host 同步区容量按
+  ACLNN user workspace 中的旧 IB 同步区仅作 ABI 保留，不再作为自然指数 H/O 同步状态。Host 同步区容量按
   `activeCoreNum * AIV_PER_MIXED_CORE * eventCount * wordsPerEvent` 分配。
 - 自然指数路径为每个 producer AIV 分配 2 个 ready event，分别表示
   `HReady` 和 `VReady`。首 chunk 的 H 来自初始化，后续 `HReady(i+1)` 由 Vec2(i)
   发布，`VReady(i)` 由 Vec1(i) 发布；同一 task 的所有 chunk 串行复用对应 slot。
-  `IBSet` 只在 GM slot 为 0 时置 1，`IBWait` 消费后将 slot 清零，因此下一代同类
-  事件的发布由接口自身反压。
+  mode-0 flag 12/13 按 H_READY→V_READY 代次由所有活动 AIV 执行 Set→Wait；旧 IB
+  slot 不再参与自然指数路径。
 - 已对 `(T,P,A,NC)=(1,32,2,3)`、`(3,32,6,4)` 和 `(9,32,18,5)` 执行
   静态任务/event 映射检查。生产者 `p` 和消费者 `T+p` 对每个
   `(task,chunk)` 得到相同的 producer AIV、固定 task lane 0、event 0 的 HReady 和
   event 1 的 VReady，并完整覆盖全部任务；另检查 `(T,P)=(17,32)` 和 `(5,3)`
   被 Host 拒绝。
 - OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径由
-  arch35 H producer 和 O consumer 并行推进；自然指数使用逐 chunk IB 交接，
+  arch35 H producer 和 O consumer 并行推进；自然指数使用逐 chunk mode-0 H_READY/V_READY 交接，
   exp2 专用 O 暂时保留全核交接屏障。设备侧按 dtype 和 V 维度显式选择 H 模板，
   A5 入口为 Host 下发的 key 1/2 分别声明同为 MIX 1:2 的 kernel task，避免
   object 查找落到不存在的 default key；各路径所需 workspace 区域互不重叠。
@@ -81,8 +81,8 @@
 
 ## A5 IB 通信 UB 隔离修复
 
-- A5 UB 尾部 `[248 KiB, 256 KiB)` 已声明为 IB 通信专用区；`IBSet/IBWait`
-  的 32-byte local tensor 固定使用 `248 KiB`，不再使用会落入 O H-pong
+- A5 UB 尾部 `[248 KiB, 256 KiB)` 作为旧 IB 协议的兼容保留区；自然指数路径不访问它。
+  若后续启用旧协议，其 32-byte local tensor 固定使用 `248 KiB`，不再使用会落入 O H-pong
   Fixpipe 槽的 `188 KiB`。
 - H/O kernel 共用同一布局常量；QK-mask 和 output epilogue 的编译期上界检查
   已改为通信区起点，数据 tensor 若越过 `248 KiB` 将编译失败。
@@ -98,13 +98,12 @@
 - A2/A5 的 `SignalProducerSliceReadyAfterMte3` 包装函数已删除，四个 V/H ready
   发布点直接调用 `SignalProducerSliceReady`。
 - 初始 H ready 发布前的外部 `PipeBarrier<PIPE_MTE3>` 也已删除；数据可见性由
-  `IBSet/IBWait` 内部搬入、搬出前后的 `PipeBarrier<Pipe_all>` 保证。
+  CrossCore Set/Wait 的 mode-0 语义与本核 MTE3/MTE2 pipe 顺序共同保证。
 - A2/A5 的启动事件清零由 `Duplicate` 在 `PIPE_V` 生成本地零值，再通过成对的
   `SetFlag/WaitFlag<HardEvent::V_MTE3>` 交给 UB→GM `DataCopy`；初始化路径不再
   单独使用 `PipeBarrier<PIPE_V>()`。
 - 所有初始化 `DataCopy` 提交后，再通过 `SetFlag/WaitFlag<HardEvent::MTE3_MTE2>`
-  等待异步 MTE3 写回完成，确保后续 MTE2 上的 `IBSet/IBWait` 不会读取未落盘的
-  共享槽，之后才执行跨核 `SyncAll<false>()`。
+  等待异步 MTE3 写回完成，之后进入自然指数 H/O 的 mode-0 chunk 握手；exp2 路径保留其阶段边界同步。
 - FwdO chunk-pipeline 与 FwdH 对齐：单 head consumer 固定使用 stage0，两个有效
   head 才启用两个 stage；初始 `vec2Done` 预置数与 scheduler 的有效 stage 数一致。
 
