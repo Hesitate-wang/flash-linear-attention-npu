@@ -208,7 +208,7 @@ public:
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState,
-        bool isPing,
+        bool isPing
     )
     {
         uint32_t mActual = chunkSize;

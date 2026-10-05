@@ -175,7 +175,7 @@ public:
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube2Done,
         bool isFinalState,
-        bool isPing,
+        bool isPing
     )
     {
         uint32_t mActual = kHeadDim;
