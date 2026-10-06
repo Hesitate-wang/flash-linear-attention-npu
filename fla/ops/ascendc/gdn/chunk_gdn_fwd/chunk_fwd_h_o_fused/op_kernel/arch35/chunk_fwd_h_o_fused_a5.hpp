@@ -135,9 +135,11 @@ __aicore__ inline void DispatchHByGk(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
     GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
     GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling,
-    GM_ADDR userWorkspace, bool useGk)
+    GM_ADDR userWorkspace)
 {
-    if (useGk) {
+    // Host validation keeps useExp2 and gk presence in lockstep.  Make that
+    // invariant compile-time so each mode emits only one H kernel variant.
+    if constexpr (UseExp2) {
         RunH<InputT, GateT, StateT, TileShapes, true, UseExp2, Path>(
             k, w, u, g, gk, initialState, cuSeqlens, chunkIndices,
             h, vNew, finalState, tiling, userWorkspace);
@@ -166,23 +168,23 @@ __aicore__ inline void DispatchHByPath(
             DispatchHByGk<InputT, float, float, TileShapes, UseExp2, V_DIM, Path>(
                 k, w, u, g, gk, initialState,
                 cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-                userWorkspace, data.useGk);
+                userWorkspace);
         } else {
             DispatchHByGk<InputT, InputT, float, TileShapes, UseExp2, V_DIM, Path>(
                 k, w, u, g, gk, initialState,
                 cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-                userWorkspace, data.useGk);
+                userWorkspace);
         }
     } else if (data.gDataType == DTYPE_FP32) {
         DispatchHByGk<InputT, float, InputT, TileShapes, UseExp2, V_DIM, Path>(
             k, w, u, g, gk, initialState,
             cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-            userWorkspace, data.useGk);
+            userWorkspace);
     } else {
         DispatchHByGk<InputT, InputT, InputT, TileShapes, UseExp2, V_DIM, Path>(
             k, w, u, g, gk, initialState,
             cuSeqlens, chunkIndices, h, vNew, finalState, tiling,
-            userWorkspace, data.useGk);
+            userWorkspace);
     }
 }
 
