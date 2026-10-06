@@ -102,7 +102,6 @@ struct BlockSchedulerGdnFwdHPreload {
     Arch::CrossCoreFlag vec1Done{1};
     Arch::CrossCoreFlag cube2Done{2};
     Arch::CrossCoreFlag vec2Done[PING_PONG_STAGES] = {3, 4};
-    Arch::CrossCoreFlag initHReady{5};
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdHPreload() {}
@@ -175,8 +174,8 @@ struct BlockSchedulerGdnFwdHPreload {
             }
         }
         curLoopTaskCnt = taskLoops > 1 ? PING_PONG_STAGES : lastLoopTaskCnt;
-        curLoopIdx = -1; // -1: 绗竴娆″垱寤簍ask鏃朵細灏哻urLoopIdx鍔?
-        taskIdx = curLoopTaskBegin + PING_PONG_STAGES; // 绗竴娆″垱寤簍ask鏃堕噸鏂板垵濮嬪寲taskIdx
+        curLoopIdx = -1; // The first task creation advances curLoopIdx.
+        taskIdx = curLoopTaskBegin + PING_PONG_STAGES; // Reinitialize taskIdx before the first task creation.
         isRunning = curLoopTaskBegin < taskNum;
 
     }
@@ -229,7 +228,7 @@ struct BlockSchedulerGdnFwdHPreload {
             auto& stream = runningQ.streams[streamId];
             stream.chunkIdx += 1;
             if (StreamIsDone(stream)) {
-                // 褰撳墠stream宸插畬鎴愶紝鐢ㄤ竴涓柊stream鏇挎崲瀹?
+                // Replace the completed stream with a new stream.
                 taskIdx += 1;
                 if (taskIdx >= (curLoopTaskBegin + curLoopTaskCnt)) {
                     curLoopIdx += 1;
@@ -256,7 +255,7 @@ struct BlockSchedulerGdnFwdHPreload {
                 if (streamId == runningQ.head) {
                     runningQ.head = (runningQ.head + 1) % PING_PONG_STAGES;
                     if (taskIdx >= taskNum) {
-                        // 娌℃湁鏂皊tream浜嗭紝灏唄ead鎺ㄨ繘鍒颁笅涓€涓湭瀹屾垚鐨剆tream涓?
+                        // No new stream remains; advance head to the next unfinished stream.
                         for (uint32_t j = 0; j < PING_PONG_STAGES && StreamIsDone(runningQ.streams[runningQ.head]); ++j) {
                             runningQ.head = (runningQ.head + 1) % PING_PONG_STAGES;
                         }
@@ -336,4 +335,3 @@ struct BlockSchedulerGdnFwdHPreloadVec : public BlockSchedulerGdnFwdHPreload {
 }  // namespace Catlass::Gemm::Block
 
 #endif  // CATLASS_GEMM_SCHEDULER_GDN_FWD_H_PRELOAD_HPP
-

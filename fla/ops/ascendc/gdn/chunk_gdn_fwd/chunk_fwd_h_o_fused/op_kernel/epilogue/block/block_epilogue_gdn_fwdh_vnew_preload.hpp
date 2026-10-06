@@ -122,13 +122,11 @@ public:
         uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
         uint32_t nOffset = 0;
-        // 褰撳墠鍦烘櫙鍐呴儴涓€瀹氳繛缁?
         // k [B, H, T, D]
         // g [B, H, T]
-        // 鍦ㄥ閮╫ffset鐨勫熀纭€涓婅繘涓€姝ffset
-        // 褰撳墠asset kdim == vHeadDim
+        // The current layout uses contiguous k and v head dimensions.
         int64_t offsetK = mOffset * nvActual + nOffset;
-        int64_t offsetD = 0; // 鍥犱负瑕佺敤鏈€鍚庝竴涓暟鍑忓幓涔嬪墠鎵€鏈夛紝鎵€浠ュ叏閮ㄨ鍏?
+        int64_t offsetD = 0;
 
         uint32_t gbrcStart, gbrcRealStart, gbrcReptime, gbrcEffStart, gbrcEffEnd;
         if(subBlockIdx==0)
@@ -276,4 +274,3 @@ private:
 }
 
 #endif
-
