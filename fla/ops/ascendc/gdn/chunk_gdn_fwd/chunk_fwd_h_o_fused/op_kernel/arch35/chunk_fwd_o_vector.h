@@ -325,7 +325,7 @@ public:
                     LocalTensor<bfloat16_t> aPrimeBf16 =
                         ubBuf_.GetWithOffset<bfloat16_t>(matrixElems,
                                                          ChunkFwdOAPrimeBf16Offset(streamSlot_));
-                    Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                    Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
                     WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
                     if (loc.chunkLen == bt) {
                         AscendC::VF_CALL<Stage3Gate64VF<true>>(
@@ -363,7 +363,7 @@ public:
                     SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
                     streamSlot_ ^= 1U;
                 } else {
-                    Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                    Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
                 }
                 Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
             }
@@ -374,7 +374,7 @@ public:
             for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                 const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                 const int64_t hv = hvBase + headOffset;
-                Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
+                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
                 if (ownerSubBlock != subBlockIdx) {
                     continue;
                 }

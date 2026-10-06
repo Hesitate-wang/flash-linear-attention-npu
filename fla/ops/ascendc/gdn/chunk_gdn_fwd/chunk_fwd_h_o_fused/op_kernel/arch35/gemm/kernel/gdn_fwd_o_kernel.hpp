@@ -291,9 +291,6 @@ public:
                 // RAW/WAR ordering for the overlapping physical buffers.
                 if (needRun && coreIdx < coreNum) {
                     const uint32_t streamId = cubeBlockScheduler.GetPrevStageId();
-                    // Both consumer AIVs acknowledge cube1Done only after
-                    // HReady. V_new has its own later dependency.
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.cube1Done[streamId]);
                     GDNFwdOOffsets &cube2Offsets = cubeBlockScheduler.GetCube23Offsets();
                     auto tensorQ = tla::MakeTensor(
                         gmQ[cube2Offsets.qkOffset], qLayout, Catlass::Arch::PositionGM{});
@@ -336,7 +333,7 @@ public:
 
                     // H/V workspaces are ping-pong slots. Delay this wait until
                     // the first operation that can overwrite the previous slot.
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.vec2Done[streamId]);
 
                     auto tensorHWork = tla::MakeTensor(
                         gmHWorkspace[cube2Offsets.hvWorkOffset], ointerLayout,
@@ -388,7 +385,7 @@ public:
 
                     // vec1Done is published only after both AttnMask and V_new
                     // are visible. Cube3 owns L1A events 4/5 and L1B 6/7.
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
                     GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
                         coreIdx - producerCoreNum);
                     if (cube3Offsets.vBlockDim <= 128) {
@@ -429,7 +426,7 @@ public:
             }
             const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
             for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.vec2Done[stage]);
             }
         }
 
@@ -462,7 +459,7 @@ public:
                     currentVec1Issued = true;
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
-                    Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(vecBlockScheduler.cube1Done[streamId]);
                     // Vec1 does not consume H. Launch it first so its Vector
                     // work can overlap the cross-core HReady wait.
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
@@ -532,7 +529,7 @@ public:
                     // reduces to a standalone wait before releasing Cube3.
                     uint32_t vec1StreamId = vecBlockScheduler.GetCurStageId();
                     if (!needRun) {
-                        Arch::CrossCoreWaitFlag(
+                        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(
                             vecBlockScheduler.cube2Done[vec1StreamId]);
                     }
                     // V_READY is a per-chunk global rendezvous.  Keep it out of

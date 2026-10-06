@@ -544,7 +544,7 @@ public:
             }
 
             const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec2Done[streamId]);
             GDN::ActiveChunkFwdHOSync::AicHReadySetWait(cubeBlockScheduler.cubeCoreIdx);
             if (offsets.blockTokens < 16) {
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.cube1Done[streamId]);
@@ -587,7 +587,7 @@ public:
             }
 
             const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
             GDN::ActiveChunkFwdHOSync::AicVReadySetWait(cubeBlockScheduler.cubeCoreIdx);
             if (!cubeBlockScheduler.NeedProcessStage2(stream)) {
                 continue;
@@ -666,7 +666,7 @@ public:
                             }
 
                             const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec2Done[streamId]);
                             GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
                             auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(
                                 cube1Offsets.blockTokens, cube1Offsets.vBlockDim);
@@ -715,7 +715,7 @@ public:
                             }
 
                             const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec2Done[streamId]);
                             GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
                             if (cube1Offsets.blockTokens < 16) {
                                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
@@ -752,7 +752,7 @@ public:
                             }
                             const GDNFwdHOffsets& cube2Offsets =
                                 cubeBlockScheduler.GetCurTaskOffsets(stream);
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
                             GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
@@ -813,7 +813,7 @@ public:
                                 continue;
                             }
                             const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
                             GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
@@ -847,7 +847,7 @@ public:
             }
             const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
             for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec2Done[stage]);
             }
             if constexpr (kUseDirectFp32Ub) {
                 for (uint32_t slot = 0; slot < DIRECT_UB_STAGES; ++slot) {
@@ -1014,8 +1014,8 @@ public:
                             tailVectorPath = vec1Offsets.blockTokens < 16;
                         }
                         if (tailVectorPath) {
-                            Arch::CrossCoreWaitFlag(
-                                vecBlockScheduler.cube1Done[streamId]);
+                                AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(
+                                    vecBlockScheduler.cube1Done[streamId]);
                             ComputeTailVWorkspace(
                                 vec1Offsets, EVENT_ID3 + (i == 0 ? 0 : pongBaseEvent));
                         }
@@ -1050,7 +1050,7 @@ public:
                                 tailVectorPath = vec2Offsets.blockTokens < 16;
                             }
                             if (tailVectorPath) {
-                                Arch::CrossCoreWaitFlag(
+                                AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(
                                     vecBlockScheduler.cube2Done[streamId]);
                                 ComputeTailHWorkspace(
                                     vec2Offsets, EVENT_ID3 + (i == 0 ? 0 : pongBaseEvent));
@@ -1076,7 +1076,7 @@ public:
                             );
                         } else {
                             if constexpr (!kUseDirectFp32Ub) {
-                                Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
+                                AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(vecBlockScheduler.cube2Done[streamId]);
                             }
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[streamId]);

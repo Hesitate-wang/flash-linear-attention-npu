@@ -204,7 +204,7 @@ public:
         AscendC::Exp(gUbTensor, gUbTensor, mActual);
         AscendC::PipeBarrier<PIPE_V>();
 
-        Arch::CrossCoreWaitFlag(cube1Done);
+        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube1Done);
 
         if (storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);

@@ -158,7 +158,7 @@ public:
         AscendC::Muls(calcUbTensor, calcUbTensor, muls, mActualThisSubBlock * nActual);
         AscendC::PipeBarrier<PIPE_V>();
 
-        Arch::CrossCoreWaitFlag(cube2Done);
+        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube2Done);
 
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
         AscendC::DataCopy(hUpdateUbTensor, hUpdateInputThisSubBlock, mActualThisSubBlock * nActual);

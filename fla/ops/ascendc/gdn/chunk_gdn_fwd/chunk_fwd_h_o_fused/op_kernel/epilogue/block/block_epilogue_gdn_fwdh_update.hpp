@@ -178,7 +178,7 @@ public:
         }
         if (rowBegin >= mActual) {
             if (!cube2AlreadyWaited) {
-                Arch::CrossCoreWaitFlag(cube2Done);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube2Done);
             }
             return;
         }
@@ -306,7 +306,7 @@ public:
             }
 
             if (!cube2AlreadyWaited) {
-                Arch::CrossCoreWaitFlag(cube2Done);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube2Done);
             }
 
             if constexpr (kGated) {
@@ -370,7 +370,7 @@ public:
         }
 
         if (!cube2AlreadyWaited) {
-            Arch::CrossCoreWaitFlag(cube2Done);
+            AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube2Done);
         }
 
         bool waitHFromV = storeFinalState && isInitialState && std::is_same<FinalStateElement, float>::value;

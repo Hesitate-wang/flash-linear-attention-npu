@@ -276,7 +276,7 @@ public:
                 if (needRun && coreIdx < coreNum) {
                     uint32_t streamId = cubeBlockScheduler.GetPrevStageId();
                     // vec2Done protects the H/V workspace consumed by Cube2/3; Cube1 uses a separate slot.
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.vec2Done[streamId]);
                     GDNFwdOOffsets& cube2Offsets = cubeBlockScheduler.GetCube23Offsets();
                     int64_t cube2OffsetQ = cube2Offsets.qkOffset;
                     int64_t cube2OffsetH = cube2Offsets.hOffset;
@@ -308,7 +308,7 @@ public:
                     uint32_t streamId = cubeBlockScheduler.GetPrevStageId();
                     // Unlike H/V, attnMask is produced by Vec1. Keep its
                     // original dependency immediately before Cube3 consumes it.
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
                     GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
                         coreIdx - producerCoreNum);
                     GDNFwdOOffsets& cube3Offsets = cubeBlockScheduler.GetCube23Offsets();
@@ -340,7 +340,7 @@ public:
             }
             const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
             for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.vec2Done[stage]);
             }
         }
 
@@ -370,7 +370,7 @@ public:
 
                 if (vecBlockScheduler.isRunning && coreIdx < coreNum * subBlockNum) {
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
-                    Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(vecBlockScheduler.cube1Done[streamId]);
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
@@ -385,7 +385,7 @@ public:
                     if (isVariedLen != 0) {
                         Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                     }
-                    Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(vecBlockScheduler.cube2Done[streamId]);
                     // In mode2 both AIV subblocks must publish, including a
                     // zero-row tail subblock. FFTS aggregates the pair for the
                     // AIC's single wait when the aggregate output barrier is enabled.

@@ -512,7 +512,7 @@ public:
                         }
 
                         const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                        Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
+                        AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec2Done[streamId]);
                         GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
                         if (cube1Offsets.blockTokens < 16) {
                             Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
@@ -553,7 +553,7 @@ public:
                             continue;
                         }
                         const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
-                        Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
+                        AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
                         GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                         if (cubeBlockScheduler.NeedProcessStage2(stream)) {
@@ -597,7 +597,7 @@ public:
                 }
             const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
             for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
-                Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[stage]);
+                AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec2Done[stage]);
             }
             }
 
@@ -756,7 +756,7 @@ public:
                         if (vecBlockScheduler.NeedProcessStage2(stream)) {
                             bool tailVectorPath = vec2Offsets.blockTokens < 16;
                             if (tailVectorPath) {
-                                Arch::CrossCoreWaitFlag(
+                                AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(
                                     vecBlockScheduler.cube2Done[streamId]);
                                 ComputeTailHWorkspace(vec2Offsets);
                             }
@@ -779,7 +779,7 @@ public:
                             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                         } else {
-                            Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[streamId]);
+                            AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(vecBlockScheduler.cube2Done[streamId]);
                         }
                         if (!vec2Offsets.isFinalState) {
                             // Vec2 of chunk i has written H_{i+1}; release FwdO chunk i+1.

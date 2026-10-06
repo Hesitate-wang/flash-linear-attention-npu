@@ -418,7 +418,7 @@ public:
             (void)gbrcRealEnd;
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-            if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
+            if (waitFlag) AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(*waitFlag);
             if(isContiguousFullTile) AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisSubBlock*nActual);
             else AscendC::DataCopyPad(aUbTensor, attnInputThisSubBlock, aInputUbParams, aInputUbPadParams);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
@@ -566,7 +566,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
                 if (stage == 0) {
-                    if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
+                    if (waitFlag) AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(*waitFlag);
                 }
                 if(isContiguousFullTile) AscendC::DataCopy(aUbTensor, attnInputThisSubBlock, mActualThisStage*nActual);
                 else AscendC::DataCopyPad(aUbTensor, attnInputThisSubBlock, aInputUbParams, aInputUbPadParams);

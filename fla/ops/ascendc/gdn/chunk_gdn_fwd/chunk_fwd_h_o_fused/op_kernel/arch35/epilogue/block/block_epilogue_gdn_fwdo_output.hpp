@@ -377,7 +377,7 @@ public:
             rowEnd = mActual;
         }
         if (rowBegin >= mActual) {
-            if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
+            if (waitFlag) AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(*waitFlag);
             if (setFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*setFlag);
             return;
         }
@@ -440,7 +440,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-            if (waitFlag && rowStart == rowBegin) Arch::CrossCoreWaitFlag(*waitFlag);
+            if (waitFlag && rowStart == rowBegin) AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(*waitFlag);
             AscendC::DataCopy(hUbTensor, hInputThisTile, rowsThisTile * nActual);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
 
@@ -623,7 +623,7 @@ public:
             }
 
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-            if (waitFlag) Arch::CrossCoreWaitFlag(*waitFlag);
+            if (waitFlag) AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(*waitFlag);
             if constexpr (!kWorkFromUb) {
                 AscendC::DataCopy(hUbTensor, hInputThisSubBlock, mActualThisSubBlock * nActual);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
@@ -770,7 +770,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
 
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-                if (waitFlag && stage == 0) Arch::CrossCoreWaitFlag(*waitFlag);
+                if (waitFlag && stage == 0) AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(*waitFlag);
                 if constexpr (!kWorkFromUb) {
                     AscendC::DataCopy(hUbTensor, hInputThisSubBlock, mActualThisStage * nActual);
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
@@ -867,8 +867,8 @@ public:
         const uint32_t rowEnd = rowBegin + rowsPerSubBlock < rows
                                     ? rowBegin + rowsPerSubBlock : rows;
         if (rowBegin >= rowEnd) {
-            Arch::CrossCoreWaitFlag(cube2Ready);
-            Arch::CrossCoreWaitFlag(cube3Ready);
+            AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube2Ready);
+            AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube3Ready);
             if (releaseFlag) Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*releaseFlag);
             return;
         }
@@ -899,7 +899,7 @@ public:
         AscendC::Exp(gateUb, gateUb, rows);
         AscendC::PipeBarrier<PIPE_V>();
 
-        Arch::CrossCoreWaitFlag(cube2Ready);
+        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube2Ready);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
         AscendC::DataCopy(gatedH, hInput[rowBegin * cols], (rowEnd - rowBegin) * cols);
@@ -914,7 +914,7 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
         }
 
-        Arch::CrossCoreWaitFlag(cube3Ready);
+        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(cube3Ready);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
         for (uint32_t row = rowBegin; row < rowEnd;) {
