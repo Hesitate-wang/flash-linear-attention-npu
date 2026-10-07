@@ -162,7 +162,7 @@ public:
                     }
 
                     const uint32_t computeHead = loadHead - 1U;
-                    Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
+                    Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
                     const uint32_t ownerSubBlock = computeHead % 2U;
                     const uint32_t localSlot = computeHead / 2U;
                     ProcessStage4Head(loc, ownerSubBlock, localSlot,
@@ -171,7 +171,7 @@ public:
 
                 if (stage4TaskCount > 0U) {
                     const uint32_t computeHead = stage4TaskCount - 1U;
-                    Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
+                    Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
                     const uint32_t ownerSubBlock = computeHead % 2U;
                     const uint32_t localSlot = computeHead / 2U;
                     ProcessStage4Head(loc, ownerSubBlock, localSlot, computeHead);
@@ -181,7 +181,7 @@ public:
         }
         if ASCEND_IS_AIC {
             if (stage5GroupPending) {
-                Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
+                Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
             }
             for (uint32_t eventIdx = 0; eventIdx < kL1EventCount; ++eventIdx) {
                 WaitFlag<HardEvent::MTE1_MTE2>(L1Event(eventIdx));
@@ -363,7 +363,7 @@ private:
         // Let the next task's independent Q/K/H transfers overlap the previous
         // task's Stage 5. Consume the ordered group token before touching L0/UB.
         if (waitPreviousStage5) {
-            Catlass::Arch::CrossCoreWaitFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
+            Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
         }
 
         if (loadQK) {
