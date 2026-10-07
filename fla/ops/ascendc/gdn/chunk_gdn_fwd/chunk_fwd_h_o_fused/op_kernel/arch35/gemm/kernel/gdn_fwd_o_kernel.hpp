@@ -257,7 +257,6 @@ public:
                 // Phase 1a: launch Cube1, then release only the L1 producer
                 // events. Its MMAD/FIX pipeline remains in flight.
                 if (cubeBlockScheduler.isRunning && coreIdx < coreNum) {
-                    uint32_t streamId = cubeBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets &cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
                     auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(
                         coreNum * chunkSize * GDN_FWD_O_PING_PONG_STAGES,
@@ -283,7 +282,6 @@ public:
                     blockMmadQK.preSetFlags();
                     blockMmadQK(tensorBlockQ, tensorBlockK, tensorBlockAttn, cube1Shape);
                     blockMmadQK.waitL1Drained();
-                    (void)streamId;
                 }
 
                 // Phase 1b: Cube2 reuses Cube1's Q in L1 and preloads H while
@@ -424,8 +422,7 @@ public:
                 }
                 needRun = true;
             }
-            const uint32_t initialStageCount = cubeBlockScheduler.GetInitialStageCount();
-            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+            for (uint32_t stage = 0; stage < GDN_FWD_O_PING_PONG_STAGES; ++stage) {
                 AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.vec2Done[stage]);
             }
         }
@@ -437,8 +434,7 @@ public:
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
-            const uint32_t initialStageCount = vecBlockScheduler.GetInitialStageCount();
-            for (uint32_t stage = 0; stage < initialStageCount; ++stage) {
+            for (uint32_t stage = 0; stage < GDN_FWD_O_PING_PONG_STAGES; ++stage) {
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[stage]);
             }
 
@@ -453,10 +449,8 @@ public:
 
             while (vecBlockScheduler.isRunning) {
                 vecBlockScheduler.InitTask();
-                bool currentVec1Issued = false;
 
                 if (vecBlockScheduler.isRunning && coreIdx < coreNum * subBlockNum) {
-                    currentVec1Issued = true;
                     uint32_t streamId = vecBlockScheduler.GetCurStageId();
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(vecBlockScheduler.cube1Done[streamId]);
@@ -478,6 +472,11 @@ public:
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
+                    // Vec1 has finished publishing the current slot's masked QK
+                    // workspace. Cube3 may now consume this slot; keep this
+                    // notification in the same valid-task branch.
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
+                        vecBlockScheduler.vec1Done[streamId]);
                 }
 
                 // AscendC::PipeBarrier<PIPE_ALL>();
@@ -522,22 +521,6 @@ public:
                     }
                 }
 
-                if (currentVec1Issued) {
-                    // The current chunk's V_new wait is deliberately placed
-                    // after the previous chunk's Vec2 has been launched. On
-                    // the first iteration there is no Vec2 work, so this
-                    // reduces to a standalone wait before releasing Cube3.
-                    uint32_t vec1StreamId = vecBlockScheduler.GetCurStageId();
-                    if (!needRun) {
-                        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(
-                            vecBlockScheduler.cube2Done[vec1StreamId]);
-                    }
-                    // V_READY is a per-chunk global rendezvous.  Keep it out of
-                    // the output epilogue so every AIV participates exactly once,
-                    // then notify this core's AIC that Cube3 may consume Vec1.
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
-                        vecBlockScheduler.vec1Done[vec1StreamId]);
-                }
                 needRun = true;
             }
         }

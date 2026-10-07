@@ -104,8 +104,10 @@
   单独使用 `PipeBarrier<PIPE_V>()`。
 - 所有初始化 `DataCopy` 提交后，再通过 `SetFlag/WaitFlag<HardEvent::MTE3_MTE2>`
   等待异步 MTE3 写回完成，之后进入自然指数 H/O 的 mode-0 chunk 握手；exp2 路径保留其阶段边界同步。
-- FwdO chunk-pipeline 与 FwdH 对齐：单 head consumer 固定使用 stage0，两个有效
-  head 才启用两个 stage；初始 `vec2Done` 预置数与 scheduler 的有效 stage 数一致。
+- FwdO chunk-pipeline 的计算 workspace 固定使用两个 stage；两个 stage 的
+  `vec2Done` free token 均在启动时预置。H/`v_new` 交接地址仍按与 FwdH 相同的
+  `(batch, head, chunk)` 映射计算，不引入 stage 偏移；只有 O 的 attention/HV
+  计算 workspace 按 stage 分配独立物理区域。
 
 ## 环境限制与待补充的设备证据
 

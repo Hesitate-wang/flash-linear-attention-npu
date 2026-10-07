@@ -81,8 +81,6 @@ struct BlockSchedulerGdnFwdO {
     uint32_t pipelineHeadIdx{0};
     uint32_t pipelineHTaskIdx{0};
     uint32_t pipelineChunkIdx{0};
-    uint32_t pipelineStageCount{GDN_FWD_O_PING_PONG_STAGES};
-    uint32_t initialStageCount{0};
 
     AscendC::GlobalTensor<int64_t> gmSeqlen;
     AscendC::GlobalTensor<int64_t> gmChunkOffsets;
@@ -90,8 +88,9 @@ struct BlockSchedulerGdnFwdO {
     Arch::CrossCoreFlag cube1Done[GDN_FWD_O_PING_PONG_STAGES] = {0, 1};
     Arch::CrossCoreFlag vec1Done[GDN_FWD_O_PING_PONG_STAGES] = {2, 3};
     Arch::CrossCoreFlag cube3Done[GDN_FWD_O_PING_PONG_STAGES] = {4, 5};
-    Arch::CrossCoreFlag vec2Done[GDN_FWD_O_PING_PONG_STAGES] = {6, 7};
     Arch::CrossCoreFlag cube2Done[GDN_FWD_O_PING_PONG_STAGES] = {8, 9};
+    Arch::CrossCoreFlag vec2Done[GDN_FWD_O_PING_PONG_STAGES] = {6, 7};
+    
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdO() {}
@@ -134,7 +133,6 @@ struct BlockSchedulerGdnFwdO {
             const uint32_t consumerCoreEnd = consumerCoreBegin + producerCoreNum;
             if (cubeCoreIdx < consumerCoreBegin || cubeCoreIdx >= consumerCoreEnd) {
                 taskIdx = taskNum;
-                initialStageCount = 0;
                 isRunning = false;
             } else {
                 const uint32_t consumerIdx = cubeCoreIdx - consumerCoreBegin;
@@ -142,26 +140,17 @@ struct BlockSchedulerGdnFwdO {
                 pipelineHTaskIdx = consumerIdx;
                 workspaceCoreIdx = consumerIdx;
                 const uint32_t hTaskNum = shapeBatch * vNumHead;
-                // Host tiling assigns one producer/consumer pair per H task.
-                // A task's chunks are strictly serial, so the O pipeline must
-                // use the same single slot as H stream 0.  Reusing two slots
-                // here would make the first vec2Done generation disagree
-                // with the H producer and leave one side waiting forever.
-                pipelineStageCount = 1;
-                initialStageCount = 1;
+                // H and V_new handoff addresses follow the producer's
+                // task/chunk mapping. Only O's compute workspaces are
+                // ping-ponged, so both compute slots start free.
                 currStage = 0;
                 isRunning = pipelineHTaskIdx < hTaskNum;
             }
         } else if (taskAffinity) {
             taskIdx = 0;
-            initialStageCount = GDN_FWD_O_PING_PONG_STAGES;
             isRunning = taskNum > 0 && cubeCoreNum > 0;
         } else {
             taskIdx = cubeCoreIdx * GDN_FWD_O_PING_PONG_STAGES;
-            const uint32_t remainingTasks = taskNum > taskIdx ? taskNum - taskIdx : 0;
-            initialStageCount = remainingTasks < GDN_FWD_O_PING_PONG_STAGES
-                                    ? remainingTasks
-                                    : GDN_FWD_O_PING_PONG_STAGES;
             isRunning = taskIdx < taskNum;
         }
 
@@ -226,7 +215,7 @@ struct BlockSchedulerGdnFwdO {
             const uint32_t hTaskNum = shapeBatch * vNumHead;
             if (unlikely(pipelineHTaskIdx >= hTaskNum || pipelineChunkIdx >= numChunks)) {
                 isRunning = false;
-                currStage = (currStage + 1) % pipelineStageCount;
+                currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
                 return;
             }
             const uint32_t pipelineBatchIdx = pipelineHTaskIdx / vNumHead;
@@ -278,6 +267,8 @@ struct BlockSchedulerGdnFwdO {
         const int64_t hBlockOffset = (static_cast<int64_t>(shapeBatchIdx) * vNumHead * numChunks +
                                       static_cast<int64_t>(vHeadIdx) * numChunks + chunkIdx) *
                                      kHeadDim;
+        // H and V_new are full handoff tensors indexed by the logical task and
+        // chunk. The O-only workspaces use independent physical ping-pong slots.
         const int64_t workStageOffset =
             static_cast<int64_t>(chunkPipeline ? workspaceCoreIdx : cubeCoreIdx) *
                 GDN_FWD_O_PING_PONG_STAGES + currStage;
@@ -302,24 +293,17 @@ struct BlockSchedulerGdnFwdO {
             }
         }
 
-        currStage = (currStage + 1) % pipelineStageCount;
+        currStage = (currStage + 1) % GDN_FWD_O_PING_PONG_STAGES;
     }
 
     CATLASS_DEVICE
     uint32_t GetCurStageId() const {
-        return (currStage + pipelineStageCount - 1) % pipelineStageCount;
-    }
-
-    CATLASS_DEVICE
-    uint32_t GetInitialStageCount() const {
-        return initialStageCount;
+        return (currStage + GDN_FWD_O_PING_PONG_STAGES - 1) % GDN_FWD_O_PING_PONG_STAGES;
     }
 
     CATLASS_DEVICE
     uint32_t GetPrevStageId() const {
-        return pipelineStageCount == 1
-                   ? 0
-                   : (currStage + pipelineStageCount - 2) % pipelineStageCount;
+        return (currStage + GDN_FWD_O_PING_PONG_STAGES - 2) % GDN_FWD_O_PING_PONG_STAGES;
     }
 
 
