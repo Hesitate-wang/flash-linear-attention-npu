@@ -12,9 +12,9 @@ The fixed-length pipeline uses one H producer and one O consumer per
 `(batch, value-head)` task, with `activeCoreNum == 2 * producerCoreNum`, full-task
 handoff workspace, and per-chunk mode-0 `CrossCoreSetFlag/CrossCoreWaitFlag`
 rendezvous. Flags 12 and 13 provide `HReady` and `VReady`; local AIC/AIV
-pipeline flags remain in the mode-2 0..9 range. All active H/O AIVs participate
-in the same chunk's `Set` then `Wait`, while mode-2 flags notify the paired AIC
-after the local H/V data is ready. The legacy IB workspace remains allocated for
+pipeline flags remain in the mode-2 0..9 range. On the A5 V128 preload path,
+H AIV publishes VReady only after the V_new GM write and O AIV waits for it
+before publishing local vec1Done to Cube3. The legacy IB workspace remains allocated for
 ABI compatibility but is not initialized or accessed by natural-exp H/O.
 In MIX mode the IB calls execute on the AIV lanes and use the logical AIV index
 space required by the API. After `HReady`, the O-internal reverse generation of

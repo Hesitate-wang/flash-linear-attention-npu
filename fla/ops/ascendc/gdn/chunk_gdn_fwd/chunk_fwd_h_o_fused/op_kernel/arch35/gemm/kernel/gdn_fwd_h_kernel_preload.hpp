@@ -304,13 +304,9 @@ public:
                             auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
                             auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
                             blockMmadKV(tensorBlockK, tensorBlockVwork, tensorHwork, cube2Shape,
-                                        cubeBlockScheduler.vec1Done,
-                                        static_cast<int32_t>(GDN::ChunkFwdHOReadyFlag(
-                                            GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE,
-                                            cubeBlockScheduler.cubeCoreIdx)));
+                                        cubeBlockScheduler.vec1Done);
                         } else {
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
-                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(cubeBlockScheduler.cubeCoreIdx);
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
                     }
@@ -447,6 +443,7 @@ public:
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
                             vec1Offsets.blockTokens, kHeadDim, vHeadDim,
                             vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
+                            vecBlockScheduler.cubeCoreIdx,
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState,
                             storeFinalState, (i == 0)
                         );

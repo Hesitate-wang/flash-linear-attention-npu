@@ -17,8 +17,9 @@ namespace GDN {
 #error "chunk_fwd_h_o_fused_sync.h received multiple architecture macros"
 #endif
 
-// Mode-0 flags are shared by H/O AICs.  Seven task pairs use one phase flag:
-// seven producer AICs plus seven consumer AICs issue at most 14 Set calls.
+// Mode-0 flags are shared by paired H/O mixed cores. Seven task pairs use one
+// phase flag; H_READY retains the AIC rendezvous, while the A5 V128 V_READY
+// handoff is published and consumed by the corresponding AIV lanes.
 constexpr uint32_t CHUNK_FWD_HO_FLAG_GROUP_SIZE = 7;
 constexpr uint32_t CHUNK_FWD_HO_FLAG_GROUP_COUNT = 3;
 constexpr uint32_t CHUNK_FWD_HO_MAX_TASK_PAIRS =

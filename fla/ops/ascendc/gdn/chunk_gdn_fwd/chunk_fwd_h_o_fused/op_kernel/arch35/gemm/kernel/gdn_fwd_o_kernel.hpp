@@ -288,6 +288,8 @@ public:
                 // Cube1 drains its MMAD pipeline. Shared L1 events enforce the
                 // RAW/WAR ordering for the overlapping physical buffers.
                 if (needRun && coreIdx < coreNum) {
+                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait(
+                        coreIdx - producerCoreNum);
                     const uint32_t streamId = cubeBlockScheduler.GetPrevStageId();
                     GDNFwdOOffsets &cube2Offsets = cubeBlockScheduler.GetCube23Offsets();
                     auto tensorQ = tla::MakeTensor(
@@ -320,8 +322,6 @@ public:
                     blockMmadQK.waitL0Drained();
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(
                         cubeBlockScheduler.cube1Done[streamId]);
-                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait(
-                        coreIdx - producerCoreNum);
                 }
 
                 if (needRun && coreIdx < coreNum) {
@@ -384,8 +384,8 @@ public:
                     // vec1Done is published only after both AttnMask and V_new
                     // are visible. Cube3 owns L1A events 4/5 and L1B 6/7.
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
-                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
-                        coreIdx - producerCoreNum);
+                    // GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
+                    //     coreIdx - producerCoreNum);
                     if (cube3Offsets.vBlockDim <= 128) {
                         blockMmadAttenVNEW128.preSetL1Flags();
                         blockMmadAttenVNEW128.copyGmToL1BOnly(
@@ -472,9 +472,10 @@ public:
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
+                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
+                        coreIdx - producerCoreNum);
                     // Vec1 has finished publishing the current slot's masked QK
-                    // workspace. Cube3 may now consume this slot; keep this
-                    // notification in the same valid-task branch.
+                    // workspace and V_new is ready for Cube3.
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
                         vecBlockScheduler.vec1Done[streamId]);
                 }
