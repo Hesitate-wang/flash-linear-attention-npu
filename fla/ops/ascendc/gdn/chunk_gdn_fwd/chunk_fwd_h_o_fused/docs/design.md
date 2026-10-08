@@ -141,14 +141,14 @@ attn MTE2 结束后通知 AIC 复用 GM workspace。V256 的每 AIV 半片可达
 
 ### 2.4 H 到 O 的 CrossCore handoff
 
-H producer `p in [0,T)` 负责 task `p`，O consumer `T+p` 按相同的 task/chunk 顺序消费。自然指数路径使用 mode `0x0` 的 H_READY/V_READY flag，与每个 MIX core 内部使用的 mode `0x2` flag 分离。A5 V128 preload 路径的 V_READY 是单向数据就绪通知：H AIV `Set`，O AIV `Wait`；H_READY 和其他路径保留原有 rendezvous。
+H producer `p in [0,T)` 负责 task `p`，O consumer `T+p` 按相同的 task/chunk 顺序消费。自然指数路径使用 mode `0x0` 的 H_READY/V_READY flag，与每个 MIX core 内部使用的 mode `0x2` flag 分离。A5 V128 preload 路径的 V_READY 由 H/O 两侧对应 AIV 执行 mode-0 `Set/Wait`；H_READY 保留 AIC rendezvous。H_READY 按七个 MIX task pair 一组映射到 flag `0/2/4`。V_READY 使用本侧相对 AIV block index，按六个 AIV 一组连续映射到 flag `0..6`；O AIV 先减去 `producerCoreNum * subBlockNum`，再与 H AIV 使用相同的相对编号。
 
 | flag | 事件 | 生产方 | 消费方 |
 | --- | --- | --- | --- |
-| `12` | `HReady` | H 初始状态或 Vec2 写回 `H_i`；O Vec1 完成独立 gate/mask 计算后 | 双方等待完成后，O AIV 通过 `cube1Done` 通知 O AIC 读取 H |
-| `13` | `VReady` | H Vec1 完成 `V_new_i` 的 GM 写回后发布 | O Vec1 完成 masked QK 后等待，随后通过 `vec1Done` 通知 O AIC 执行 Cube3 |
+| `0/2/4` | `HReady` | H 初始状态或 Vec2 写回 `H_i`；O Vec1 完成独立 gate/mask 计算后 | 每七个 MIX task pair 一组；双方等待完成后，O AIV 通过 `cube1Done` 通知 O AIC 读取 H |
+| `0..6` | `VReady` | H Vec1 完成 `V_new_i` 的 GM 写回后；O Vec1 完成 masked QK 后 | 每六个相对 AIV block index 一组；随后 O AIV 通过 `vec1Done` 通知 O AIC 执行 Cube3 |
 
-每个任务固定使用 `taskLane=0`。O 直接使用 `producerCoreIdx=taskIdx`，再用相同的 `subBlockIdx` 得到 `producerAivIdx=producerCoreIdx*subBlockNum+subBlockIdx`，因此两个 O AIV 分别等待对应 H AIV 发布的 H/V 切片，不会互相代替。
+每个任务固定使用 `taskLane=0`。V_READY 的 H 侧相对 AIV 编号为原始 AIV `blockIdx`；O 侧相对编号为 `blockIdx - producerCoreNum * subBlockNum`。因此同一 task 的两个 H/O AIV 分别得到相同编号，并映射到相同的 V_READY flag group。
 
 `pipelineSyncWorkspaceOffset` 和原有 IB workspace allocation 保持 ABI 兼容，但自然指数 H/O 不再初始化或访问其中的 event 槽；入口不再执行同步区初始化或额外启动屏障。mode `0x0` flag 不携带 task id，正确性依赖所有活动 H/O AIV 按相同 chunk 顺序参与集合握手。
 

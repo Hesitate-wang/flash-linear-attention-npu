@@ -155,27 +155,28 @@
 
 ## H/O ready 同步精简与静态配对检查（待设备验证）
 
-- mode-0 封装将逻辑 H/V event 0/1 映射为硬件 flag 10/11（后续组为
-  12/13、14/15）；发布使用
-  `PIPE_MTE3`，等待使用 `PIPE_MTE2`，与设计中的全体 AIV 逐 chunk 握手一致。
+- H_READY 保持每七个 MIX task pair 一组并映射到 mode-0 flag `0/2/4`；
+  V_READY 改为每六个本侧相对 AIV block index 一组并映射到 flag `0..6`。
+  两类 ready 都从 flag ID 0 开始映射。
 - A5 两条 H kernel 删除未调用的发布包装函数，并复用同一个 ready signal
   构造函数生成下一 chunk 的 HReady；同步封装删除未调用的 `Participate()` 别名。
-- 当前 `TASK_LANES_PER_CORE=1`。静态检查确认 H 初始状态或前一 chunk Vec2
+- 当前 `TASK_LANES_PER_CORE=1`。A5 V128 preload 的 H AIV 直接使用原始
+  `blockIdx`，O AIV 使用 `blockIdx - producerCoreNum * subBlockNum`。静态枚举
+  `1..21` 个 task pair，确认两侧 V_READY flag 完全一致，单个 V flag 最多
+  12 次 Set；H_READY 单 flag 最多 14 次 Set。静态检查同时确认 H 初始状态或前一 chunk Vec2
   发布 HReady，O 当前 chunk Vec1 等待；H 当前 chunk Vec1 发布 VReady，O 当前
   chunk Vec2 后等待。末 chunk 不生成下一轮 HReady，单 chunk 的 VReady 由收尾路径
   发布。H/O 数据按相同 task 和 chunk 编址，mode-0 flag 本身是全局集合握手。
 - 本环境没有 CANN/NPU，尚未构建和运行。目标设备需覆盖单 chunk、三 chunk、
   DirectUb/StandardGm、V128/V256，并采集 Set/Wait 代次及精度结果。
 
-## AIC 代理同步重构（待设备验证）
+## AIC/AIV ready 分工（待设备验证）
 
-- HReady/VReady 改由 H/O 两侧 AIC 执行双向 `Set/Wait`，AIV 不再承担 mode-0
-  跨核计数；AIV 只保留现有 `cube*Done/vec*Done` 本核通知。
-- 任务按 7 对分组，每组 H/V 使用两个独立 flag；三组覆盖 21 对、42 个 mixed
-  core，每个 phase flag 每轮最多 14 次 Set。
-- H AIC 在 `wait vec2Done` 后执行 HReady，在 `wait vec1Done` 后执行 VReady；
-  O AIC 在 Cube1 后执行 HReady，在 Cube2 和 Vec1 完成后执行 VReady。
-- Host 将任务对上限限制为 21，并继续受物理 AIC 数量约束。
+- H_READY 继续由 H/O 两侧 AIC 执行双向 `Set/Wait`；A5 V128 preload 的
+  V_READY 由 H/O 两侧对应 AIV 执行双向 `Set/Wait`。
+- H_READY 每七对任务一组，每轮最多 14 次 Set；V_READY 每六个相对 AIV
+  编号一组，每轮最多 12 次 Set。当前 flag 范围覆盖 Host 的 21 个 task pair
+  上限。
 - A5 chunk pipeline 的 O scheduler 与 H scheduler 使用同一单 task 串行模型：每个
   producer/consumer pair 固定使用唯一 active stream/slot，当前 chunk 完成并发布
   `vec2Done` 后才推进到下一 chunk；不为同一 task 伪造第二个并行 stream。

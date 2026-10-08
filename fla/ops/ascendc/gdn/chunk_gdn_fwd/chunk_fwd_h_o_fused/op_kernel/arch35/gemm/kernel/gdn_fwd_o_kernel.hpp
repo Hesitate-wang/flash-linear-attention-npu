@@ -473,7 +473,7 @@ public:
                         }
                     }
                     GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
-                        coreIdx - producerCoreNum);
+                        coreIdx - producerCoreNum * subBlockNum);
                     // Vec1 has finished publishing the current slot's masked QK
                     // workspace and V_new is ready for Cube3.
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(

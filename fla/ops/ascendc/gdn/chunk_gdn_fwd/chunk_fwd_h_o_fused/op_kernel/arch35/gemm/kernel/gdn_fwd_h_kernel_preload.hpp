@@ -443,7 +443,7 @@ public:
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
                             vec1Offsets.blockTokens, kHeadDim, vHeadDim,
                             vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
-                            vecBlockScheduler.cubeCoreIdx,
+                            AscendC::GetBlockIdx(),
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState,
                             storeFinalState, (i == 0)
                         );
