@@ -667,7 +667,7 @@ public:
 
                             const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
-                            GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
+                            GDN::ActiveChunkFwdHOSync::AicHReadySetWait();
                             auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(
                                 cube1Offsets.blockTokens, cube1Offsets.vBlockDim);
                             auto tensorW = tla::MakeTensor(
@@ -716,7 +716,7 @@ public:
 
                             const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
-                            GDN::ActiveChunkFwdHOSync::AicHReadySetWait(coreIdx);
+                            GDN::ActiveChunkFwdHOSync::AicHReadySetWait();
                             if (cube1Offsets.blockTokens < 16) {
                                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(
                                     cubeBlockScheduler.cube1Done[streamId]);
@@ -753,7 +753,6 @@ public:
                             const GDNFwdHOffsets& cube2Offsets =
                                 cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
-                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
                                 int64_t cube2OffsetK = kGated
@@ -814,7 +813,6 @@ public:
                             }
                             const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
-                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(coreIdx);
 
                             if (cubeBlockScheduler.NeedProcessStage2(stream)) {
                                 if (cube2Offsets.blockTokens < 16) {

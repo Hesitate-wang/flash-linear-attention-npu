@@ -511,6 +511,7 @@ public:
             if constexpr (!kGated) {
                 if (rowStart + rowsThisTile >= rowEnd) {
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait();
                 }
             }
 
