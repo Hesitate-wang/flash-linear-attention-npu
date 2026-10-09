@@ -545,7 +545,7 @@ public:
 
             const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done[streamId]);
-            GDN::ActiveChunkFwdHOSync::AicHReadySetWait(cubeBlockScheduler.cubeCoreIdx);
+            GDN::ActiveChunkFwdHOSync::AicHReadySetWait();
             if (offsets.blockTokens < 16) {
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(cubeBlockScheduler.cube1Done[streamId]);
                 continue;
@@ -588,7 +588,6 @@ public:
 
             const GDNFwdHOffsets& offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
-            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(cubeBlockScheduler.cubeCoreIdx);
             if (!cubeBlockScheduler.NeedProcessStage2(stream)) {
                 continue;
             }
