@@ -328,7 +328,7 @@ public:
     /// Perform a block-scoped matrix multiply-accumulate
     template <class TensorA, class TensorB, class TensorC, class TensorBias = EmptyClass>
     CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape, Arch::CrossCoreFlag vecDone,
-        int32_t readyFlagId = -1,
+        int32_t readyFlagId = 0,
         TensorBias const &tensorBias = {})
     {
         // Check L1TileShape
@@ -394,9 +394,9 @@ public:
         Arch::CrossCoreWaitFlag(vecDone);
         // Fused H/O kernels pass the mode-0 H_READY/V_READY flag id computed by
         // ChunkFwdHOReadyFlag; the default -1 skips the rendezvous entirely.
-        if (readyFlagId >= 0) {
-            AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(static_cast<uint16_t>(readyFlagId));
-            AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(static_cast<uint16_t>(readyFlagId));
+        if (readyFlagId >= 1) {
+            AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(readyFlagId);
+            AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(readyFlagId);
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListId]);
 

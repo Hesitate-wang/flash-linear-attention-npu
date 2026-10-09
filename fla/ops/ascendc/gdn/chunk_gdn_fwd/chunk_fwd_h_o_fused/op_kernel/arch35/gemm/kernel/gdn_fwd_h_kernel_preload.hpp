@@ -277,9 +277,7 @@ public:
                         blockMmadWH(
                             tensorBlockW, tensorBlockH, tensorV, cube1Shape,
                             cubeBlockScheduler.vec2Done[i],
-                            static_cast<int32_t>(GDN::ChunkFwdHOReadyFlag(
-                                GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE,
-                                cubeBlockScheduler.cubeCoreIdx)));
+                            GDN::CHUNK_FWD_HO_H_READY_FLAG_BASE);
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
                     }
                 } else {
@@ -443,7 +441,6 @@ public:
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
                             vec1Offsets.blockTokens, kHeadDim, vHeadDim,
                             vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
-                            AscendC::GetBlockIdx(),
                             vec1Offsets.isInitialState, vec1Offsets.isFinalState,
                             storeFinalState, (i == 0)
                         );

@@ -288,8 +288,7 @@ public:
                 // Cube1 drains its MMAD pipeline. Shared L1 events enforce the
                 // RAW/WAR ordering for the overlapping physical buffers.
                 if (needRun && coreIdx < coreNum) {
-                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait(
-                        coreIdx - producerCoreNum);
+                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait();
                     const uint32_t streamId = cubeBlockScheduler.GetPrevStageId();
                     GDNFwdOOffsets &cube2Offsets = cubeBlockScheduler.GetCube23Offsets();
                     auto tensorQ = tla::MakeTensor(
@@ -472,8 +471,7 @@ public:
                             Catlass::Arch::CrossCoreBarrier<0x1, PIPE_MTE3>();
                         }
                     }
-                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
-                        coreIdx - producerCoreNum * subBlockNum);
+                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait();
                     // Vec1 has finished publishing the current slot's masked QK
                     // workspace and V_new is ready for Cube3.
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(
