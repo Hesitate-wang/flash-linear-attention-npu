@@ -4,12 +4,13 @@
 
 ## 1. 架构
 
-定义任务数 `T = shapeBatch * vNumHead`、物理 MIX core 数 `P`。当前路径要求 `T <= floor(P / 2)`，活动 MIX core 数恒为 `A = 2T`。A2 (`DAV_2201`) 与 A5 (`DAV_3510`) 使用相同的 core 分区：前 `T` 个 core 是 H producer，从 `consumerCoreBase=T` 开始的 `T` 个 core 是一一对应的 O consumer。每个逻辑 MIX core 只处理一个 `(batch, value-head)` 任务；同一任务的不同 chunk 在两个 ping-pong slot 间流水。不满足核数前提时当前直接返回失败。
+定义任务数 `T = shapeBatch * vNumHead`、物理 MIX core 数 `P`。MODE1 要求 `T <= floor(P / 2)`，活动 MIX core 数为 `A = 2T`：前 `T` 个 core 是 H producer，后 `T` 个 core 是一一对应的 O consumer；同一任务的 chunk 在两个 slot 间流水。A5 自然指数 MODE2 覆盖 `floor(P / 2) < T <= P`，活动 MIX core 数为 `A = T`，每个 core 拥有一个 `(batch, value-head)` task，并在一个单槽上按 chunk 串行执行 H/O。其余核数范围继续返回失败。
 
 | SoC | Tiling key | blockDim | H/O 调度 | 同步 |
 | --- | --- | --- | --- | --- |
 | Atlas A2 | V128/V256 | `2 * T` | 一任务一 producer H + 一 consumer O | mode `0x0` `H_READY/V_READY` Set→Wait |
 | Ascend 950 A5 | V128/V256 | `2 * T` | 一任务一 producer H + 一 consumer O | mode `0x0` `H_READY/V_READY` Set→Wait |
+| Ascend 950 A5 MODE2 | V128 | `T` | 一任务一 MIX core，chunk-serial H/O | 仅 mode `0x2` 核内 AIC/AIV 同步 |
 
 入口先由 `chunk_fwd_h_o_fused_arch.h` 根据编译目标定义且仅定义一个架构宏：A2 使用 `CHUNK_FWD_HO_ARCH_A2`，A5 使用 `CHUNK_FWD_HO_ARCH35`。统一源文件随后只包含对应的架构入口；架构入口和 H/O kernel 头对错误宏组合执行预处理报错。进入所选实现后，再通过 key 1/2 选择 V128/V256 的已注册 kernel object；key 不表示 exp/exp2。`useExp2` 只在已选定的架构实现内部选择指数模式，A5 在 `useExp2=false` 时仍使用 `arch35` FwdO；dtype、layout 和 head 维度同样在 object 内继续选择模板路径。
 
@@ -191,7 +192,9 @@ A5 H/O kernel 统一使用 `chunk_fwd_h_o_fused_ub_layout.h` 声明 UB 布局。
 
 ## 3. Host tiling 约束
 
-Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`consumerCoreBase=T` 和 `scheduleMode=1`。进入该路径前必须满足 `T <= floor(physicalCoreNum/2)`；不满足时当前返回失败。当前实现仅接受定长输入，且至少需要两个物理 AIC core。提供 `cuSeqlens` 或 `chunkIndices` 时返回失败。
+MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`consumerCoreBase=T` 和 `scheduleMode=1`，要求 `T <= floor(P/2)`。A5 MODE2 在 `floor(P/2) < T <= P` 时设置 `activeCoreNum=T`、`executionMode=2` 和 `singleCoreTaskNum=T`，producer/consumer 分区字段置零以避免误入 MODE1 handoff。当前 MODE2 限定自然指数、定长、V=128、无 gk；不支持的 saturated-range 输入显式失败。两种路径均拒绝变长 `cuSeqlens`/`chunkIndices`。
+
+MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `slotFree`（供 HC1 消费）及独立的 `HV2DoneForOC2` token；之后每个 HV2 完成重新发布两者。每 chunk 的依赖为：AIC `OC1 -> HC1(wait slotFree) -> OC2(wait HV2DoneForOC2) -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。`slotFree` 与 `HV2DoneForOC2` 分开，防止 HC1 和 OC2 对同一个 token 重复消费。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
 ## 4. TilingData ABI
 
@@ -242,6 +245,8 @@ TILING_DATA_FIELD_DEF(int64_t, oAttnWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, oAfterMaskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, oMaskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, oAPrimeWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, executionMode);
+TILING_DATA_FIELD_DEF(int64_t, singleCoreTaskNum);
 END_TILING_DATA_DEF;
 ```
 
@@ -268,7 +273,7 @@ O 和 A-prime 临时区按 consumer-local index 编址；H 临时区按 producer
 
 ## 6. 接口与验证
 
-公开 ACLNN/L0 输入、输出、属性顺序和 kernel ABI 顺序保持现有实现不变。修改后至少静态验证：TilingData 字段顺序/类型/大小一致；A2/A5 key 1/2 均有对应 entry；`activeCoreNum=2*producerCoreNum` 且 producer/consumer 数量相等；handoff workspace 使用任务数 `T`，core-local workspace 使用对应 producer/consumer 数；A5 自然指数路径无 H/O 边界 `SyncAll`，并逐 chunk 执行 mode-0 H_READY/V_READY Set→Wait。
+公开 ACLNN/L0 输入、输出、属性顺序和 kernel ABI 顺序保持现有实现不变。新增 MODE2 字段追加在 H 前缀之后，`offsetof(useExp2)` 与 H stage struct 的静态断言保持成立。验证需覆盖：MODE1 原路径配置不变；MODE2 满足 `activeCoreNum=T` 且只有同核 mode-0x2 同步；MODE2 的首轮预置、每 chunk token 代次和 AIC/AIV 等待闭环正确。
 
 ## 7. A5 H 主路径编译期分离
 

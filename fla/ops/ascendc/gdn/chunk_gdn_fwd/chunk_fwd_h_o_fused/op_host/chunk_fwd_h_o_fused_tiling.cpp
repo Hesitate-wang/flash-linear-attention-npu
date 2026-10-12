@@ -279,6 +279,9 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
     size_t offset = 0;
     size_t bytes = 0;
     int64_t regionOffset = 0;
+    const bool singleCoreChunkFused = tiling.get_executionMode() == static_cast<int64_t>(
+        GDN::ChunkFwdHOFusedExecutionMode::SINGLE_CORE_CHUNK_FUSED);
+    const size_t workspaceStages = singleCoreChunkFused ? 1 : PING_PONG_STAGES;
 
     OP_CHECK_IF(!CheckedMul({taskNum, static_cast<size_t>(tiling.get_numChunksPerBatch()),
                              static_cast<size_t>(tiling.get_kHeadDim()),
@@ -293,7 +296,7 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
     tiling.set_handoffVWorkspaceOffset(regionOffset);
 
     OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
-                             static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
+                             static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), workspaceStages}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
     tiling.set_vWorkspaceOffset(regionOffset);
@@ -303,14 +306,14 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
     tiling.set_kDecayWorkspaceOffset(static_cast<int64_t>(offset));
     if (useGk) {
         OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
-                                 static_cast<size_t>(tiling.get_kHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
+                                 static_cast<size_t>(tiling.get_kHeadDim()), sizeof(float), workspaceStages}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
                     , return ge::GRAPH_FAILED);
         tiling.set_kDecayWorkspaceOffset(regionOffset);
     }
 
     OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_kHeadDim()),
-                             static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
+                             static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), workspaceStages}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
     tiling.set_hWorkspaceOffset(regionOffset);
@@ -322,13 +325,17 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
     OP_CHECK_IF(!AllocateRegion(bytes, offset, regionOffset), , return ge::GRAPH_FAILED);
     tiling.set_numChunksWorkspaceOffset(regionOffset);
 
-    OP_CHECK_IF(!CheckedMul({static_cast<size_t>(tiling.get_activeCoreNum()),
-                             static_cast<size_t>(GDN::CHUNK_FWD_HO_AIV_PER_MIXED_CORE),
-                             static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT),
-                             static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_WORDS_PER_EVENT),
-                             sizeof(int32_t)}, bytes) ||
-                    !AllocateRegion(bytes, offset, regionOffset),
-                , return ge::GRAPH_FAILED);
+    if (!singleCoreChunkFused) {
+        OP_CHECK_IF(!CheckedMul({static_cast<size_t>(tiling.get_activeCoreNum()),
+                                 static_cast<size_t>(GDN::CHUNK_FWD_HO_AIV_PER_MIXED_CORE),
+                                 static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT),
+                                 static_cast<size_t>(GDN::CHUNK_FWD_HO_IB_WORDS_PER_EVENT),
+                                 sizeof(int32_t)}, bytes) ||
+                        !AllocateRegion(bytes, offset, regionOffset),
+                    , return ge::GRAPH_FAILED);
+    } else {
+        regionOffset = static_cast<int64_t>(offset);
+    }
     tiling.set_pipelineSyncWorkspaceOffset(regionOffset);
     if (useOptimizedO) {
         OP_CHECK_IF(!CheckedMul({consumerCoreNum,
@@ -344,7 +351,7 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
     } else {
         OP_CHECK_IF(!CheckedMul({consumerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                                  static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float),
-                                 PING_PONG_STAGES}, bytes) ||
+                                 workspaceStages}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
                     , return ge::GRAPH_FAILED);
         tiling.set_oVWorkspaceOffset(regionOffset);
@@ -352,7 +359,7 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
         tiling.set_oHWorkspaceOffset(regionOffset);
         OP_CHECK_IF(!CheckedMul({consumerCoreNum, static_cast<size_t>(tiling.get_chunkSize()),
                                  static_cast<size_t>(tiling.get_chunkSize()), sizeof(float),
-                                 PING_PONG_STAGES}, bytes) ||
+                                 workspaceStages}, bytes) ||
                         !AllocateRegion(bytes, offset, regionOffset),
                     , return ge::GRAPH_FAILED);
         tiling.set_oAttnWorkspaceOffset(regionOffset);
@@ -572,7 +579,25 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     OP_CHECK_IF(taskNum == 0,
                 OP_LOGE(context->GetNodeName(), "The core pipeline requires at least one task."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(taskNum > maxPipelineTaskNum,
+    // Saturated core range: P/2 < T <= P can no longer afford two cores per
+    // task, so one MIX core owns one task and runs both FwdH and FwdO.
+    const bool saturatedCoreRange = isA5 && taskNum > physicalCoreNum / 2 &&
+                                    taskNum <= physicalCoreNum && !useExp2 && !isVarlen;
+    // First version of the fused single-core schedule: A5 natural-exp V128
+    // without q/k gating.  A partial final chunk of any length is supported:
+    // 16 <= tail < chunkSize uses the bounded tail MMAD, a shorter tail is
+    // computed by the AIV Vector fallback.  Every other shape in the saturated
+    // range keeps failing explicitly instead of falling back to the split
+    // pipeline.
+    const bool singleCoreChunkFused = saturatedCoreRange && vDim == SUPPORTED_V128 &&
+                                      gkDesc == nullptr;
+    OP_CHECK_IF(saturatedCoreRange && !singleCoreChunkFused,
+                OP_LOGE(context->GetNodeName(),
+                        "The fused single-core schedule supports A5, exp mode, non-varlen, "
+                        "V=128 and no gk; got V=%ld, gk=%d, seqlen=%ld, chunk=%ld.",
+                        vDim, gkDesc != nullptr ? 1 : 0, seqlen, chunkSize),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(taskNum > maxPipelineTaskNum && !singleCoreChunkFused,
                 OP_LOGE(context->GetNodeName(),
                         "The H/O core pipeline supports at most 21 task pairs (42 mixed cores) "
                         "and requires 2 * B * HV physical AIC cores; got %zu tasks and %zu physical cores.",
@@ -580,7 +605,8 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                 return ge::GRAPH_FAILED);
     const size_t producerCoreNum = taskNum;
     const size_t consumerCoreNum = producerCoreNum;
-    const size_t activeCoreNum = producerCoreNum + consumerCoreNum;
+    const size_t activeCoreNum = singleCoreChunkFused ? taskNum
+                                                      : producerCoreNum + consumerCoreNum;
 
     OP_CHECK_IF(ValidateTensorContracts(context, batch, seqlen, kHeads, vHeads, kDim, vDim,
                                         outputLayout) != ge::GRAPH_SUCCESS,
@@ -610,9 +636,17 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     tiling.set_numChunksPerBatch((seqlen + chunkSize - 1) / chunkSize);
     tiling.set_hvPerHk(vHeads / kHeads);
     tiling.set_taskGroupSize(vHeads / kHeads == 3 ? 3 : 4);
-    tiling.set_producerCoreNum(static_cast<int64_t>(producerCoreNum));
-    tiling.set_consumerCoreBase(static_cast<int64_t>(producerCoreNum));
+    // In the fused single-core schedule every MIX core owns the full [0, T) task
+    // range; the zero producer count keeps the legacy split-pipeline mapping of
+    // the H/O kernels disabled, and the real task count travels in
+    // singleCoreTaskNum.
+    tiling.set_producerCoreNum(singleCoreChunkFused ? 0 : static_cast<int64_t>(producerCoreNum));
+    tiling.set_consumerCoreBase(singleCoreChunkFused ? 0 : static_cast<int64_t>(producerCoreNum));
     tiling.set_activeCoreNum(static_cast<int64_t>(activeCoreNum));
+    tiling.set_executionMode(static_cast<int64_t>(
+        singleCoreChunkFused ? GDN::ChunkFwdHOFusedExecutionMode::SINGLE_CORE_CHUNK_FUSED
+                             : GDN::ChunkFwdHOFusedExecutionMode::SPLIT_CORE_PIPELINE));
+    tiling.set_singleCoreTaskNum(singleCoreChunkFused ? static_cast<int64_t>(taskNum) : 0);
     tiling.set_pipelineEventCount(GDN::CHUNK_FWD_HO_IB_EVENT_COUNT);
 
     OP_CHECK_IF(tiling.GetDataSize() != sizeof(GDN::ChunkFwdHOFusedTilingData),

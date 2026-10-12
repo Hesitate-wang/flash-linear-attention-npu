@@ -83,9 +83,11 @@ python test_fwd_h_o_fused.py --output-layout NTD --compare-composed
 Useful shape and dtype switches include `--tokens`, `--chunk-size`,
 `--value-dim`, `--dtype`, `--gate-dtype`, `--batch`, `--k-heads`, and
 `--v-heads`. Atlas A2 accepts exp mode with `K=128`, `V=128/256`, chunk size
-`64/128`. The kernel uses one H producer and one O consumer per head task, with
-blockDim equal to `2 * batch * v_heads`. The current path requires all pairs to fit on
-the physical AIC cores; the saturated-core path is not implemented yet.
+`64/128`. For `T = batch * v_heads <= floor(P/2)`, the kernel uses one H producer
+and one O consumer per task, with blockDim `2*T`. On A5 natural-exp V=128 without
+`gk`, the saturated range `floor(P/2) < T <= P` uses MODE2: one MIX core per
+task, chunk-serial H/O and blockDim `T`. Validate on A5 around the `P/2` boundary
+and at `T=P`; A2 and unsupported A5 saturated-range shapes remain rejected.
 Ascend 950 natural-exp mode accepts the same matrix. Ascend 950 `--use-exp2`
 still requires BF16 data, BF16/FP32 gates, `K=V=128`, chunk size 64, and
 `v_heads/k_heads` in `[1,4]`. Use `--output-layout` to select the layout allowed

@@ -12,6 +12,20 @@ namespace GDN {
 enum class ChunkFwdHOFusedDtype : int64_t { FP16 = 0, BF16 = 1, FP32 = 2 };
 enum class ChunkFwdHOFusedOutputLayout : int64_t { BNSD = 0, BSND = 1, TND = 2, NTD = 3 };
 enum class ChunkFwdHOFusedTilingKey : uint64_t { V128_EXP = 1, V256_EXP = 2 };
+enum class ChunkFwdHOFusedExecutionMode : int64_t {
+    // T FwdH producers + T FwdO consumers on split physical cores, two on-chip
+    // slots per core (ping-pong), cross-core H/O handoff per chunk.
+    SPLIT_CORE_PIPELINE = 0,
+    // One MIX core per logical task (blockDim = T): FwdH and FwdO run on the
+    // same core, every chunk is processed serially and inside one chunk the
+    // FwdH/FwdO stages alternate on the single on-chip slot (no ping-pong).
+    SINGLE_CORE_CHUNK_FUSED = 2,
+};
+
+// SINGLE_CORE_CHUNK_FUSED schedule constants.
+constexpr int64_t CHUNK_FWD_HO_FUSED_SLOT_COUNT = 1;
+constexpr int64_t CHUNK_FWD_HO_FUSED_UB_DATA_LIMIT = 248 * 1024;
+constexpr int64_t CHUNK_FWD_HO_FUSED_UB_RESERVED_TAIL = 8 * 1024;
 constexpr int64_t CHUNK_FWD_HO_AIV_PER_MIXED_CORE = 2;
 constexpr int64_t CHUNK_FWD_HO_TASK_LANES_PER_CORE = 1;
 constexpr int64_t CHUNK_FWD_HO_H_READY_EVENT_BASE = 0;
@@ -65,6 +79,11 @@ struct ChunkFwdHOFusedTilingData {
     int64_t oAfterMaskWorkspaceOffset;
     int64_t oMaskWorkspaceOffset;
     int64_t oAPrimeWorkspaceOffset;
+    // 0: split H/O core pipeline; 2: one MIX core per logical task with the
+    // chunk-serial fused H/O schedule.
+    int64_t executionMode;
+    // Number of logical tasks owned by the single-core schedule (T = B * HV).
+    int64_t singleCoreTaskNum;
 };
 
 } // namespace GDN

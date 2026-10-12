@@ -1,10 +1,23 @@
 # 开发阶段验证记录
 
+## MODE2 saturated-core path
+
+- A5 natural-exp, fixed-length, V=128 and no-gk only: `floor(P/2) < T <= P`
+  selects one MIX core per task (`blockDim=T`); `T<=floor(P/2)` retains MODE1.
+- Dedicated MODE2 kernel/helper/epilogue files contain the single-slot path;
+  MODE1 H/O kernels and shared MODE1 epilogues remain unchanged.
+- The local mode-`0x2` graph seeds `slotFree` and `HV2DoneForOC2` before chunk 0.
+  Each HV2 republishes both; OV2 waits for OC2/OC3; chunk completion is signaled
+  after OV2. Device checks still required: CANN build, one-/multi-chunk CPU and
+  composed precision, initial/final-state combinations, and T boundary cases.
+- Local environment has no `ccec`/CANN toolchain or Ascend device; only static
+  source checks are available here.
+
 ## 设计追踪
 
 | 设计项 | 实现位置 |
 | --- | --- |
-| `T` 对生产者/消费者核 | Host tiling 检查 `T<=floor(P/2)`，并设置相等的 producer/consumer 数、`consumerCoreBase=T` 和 `activeCoreNum=2T` |
+| `T` 对生产者/消费者核 | Host tiling 对 MODE1 检查 `T<=floor(P/2)`，对受限 A5 MODE2 检查 `floor(P/2)<T<=P` 并设置 `activeCoreNum=T` |
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
 | 启动事件初始化 | A2/A5 统一入口不再初始化同步区或执行额外启动屏障；自然指数路径不访问 IB event table |
 | 逐 chunk 的 H 到 O 发布 | mode `0x0` 的 `H_READY=12`、`V_READY=13` 按 chunk 执行全体 AIV `Set→Wait`；本核 `cube1Done/cube2Done/vec1Done` 继续使用 mode `0x2` |
@@ -24,10 +37,9 @@
   TilingData 管理对象，因此首个 `set_batch` 不会访问空的内部存储。
 - Workspace 偏移均相对于用户 workspace，所有区域都按 512 字节对齐；返回的
   workspace 大小只累加一次平台系统 workspace。
-- A2 和 A5 的当前路径均要求 `B * HV <= floor(physical AIC cores / 2)`，
-  `blockDim=2*B*HV`。producer 与 consumer 数量相等且一一配对；每个逻辑 MIX core
-  只负责一个 `(batch, value-head)` 任务。核数不足的 saturated-core
-  路径尚未实现，tiling 会明确返回失败。
+- A2 和 A5 MODE1 要求 `B * HV <= floor(physical AIC cores / 2)`，
+  `blockDim=2*B*HV`。A5 MODE2 在限定的 saturated range 使用 `blockDim=B*HV`，
+  每个逻辑 MIX core 负责一个 `(batch, value-head)` 任务，临时 workspace 只分配一槽。
 - 已接受 Atlas A2 和 Ascend 950 的定长自然指数路径。两者均支持 FP16/BF16、
   FP32 或输入类型门控、chunk 64/128、K=128、V=128/256 及 BNSD/NTD。
   Ascend 950 的 exp2 专用路径仍限制为 BF16、BF16/FP32 门控、chunk 64、

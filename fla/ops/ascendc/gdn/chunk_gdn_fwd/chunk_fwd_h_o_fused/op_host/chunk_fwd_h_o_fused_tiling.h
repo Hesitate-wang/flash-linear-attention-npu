@@ -56,6 +56,10 @@ TILING_DATA_FIELD_DEF(int64_t, oAttnWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, oAfterMaskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, oMaskWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, oAPrimeWorkspaceOffset);
+// 0: split H/O core pipeline; 2: one MIX core per logical task with the
+// chunk-serial fused H/O schedule.
+TILING_DATA_FIELD_DEF(int64_t, executionMode);
+TILING_DATA_FIELD_DEF(int64_t, singleCoreTaskNum);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkFwdHOFused, ChunkFwdHOFusedTilingData)

@@ -20,6 +20,7 @@ using ChunkGatedDeltaRuleFwdHTilingData = ChunkFwdHOFusedHStageTilingData;
 #include "gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
 #undef CATLASS_ARCH
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
+#include "gemm/kernel/gdn_fwd_ho_fused_kernel.hpp"
 #include "chunk_fwd_o_a5.h"
 #include <cstddef>
 
@@ -263,6 +264,50 @@ __aicore__ inline void DispatchNaturalO(
     }
 }
 
+// SINGLE_CORE_CHUNK_FUSED (executionMode = 2): one MIX core per task with the
+// chunk-serial FwdH/FwdO alternation.  Gate and state element types follow the
+// tiling, exactly like the split-mode H dispatch.
+template <typename InputT, typename GateT, typename StateT>
+__aicore__ inline void RunSingleCoreChunkFused(
+    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR initialState,
+    GM_ADDR q, GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR o,
+    GM_ADDR tiling, GM_ADDR userWorkspace)
+{
+    Catlass::Gemm::Kernel::GDNFwdHOFusedKernel<InputT, GateT, StateT, float, false>
+        kernel;
+    kernel.Init(k, w, u, g, initialState, q, h, vNew, finalState, o,
+                tiling, userWorkspace);
+    kernel.Process();
+}
+
+template <typename InputT>
+__aicore__ inline void DispatchSingleCoreChunkFused(
+    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR initialState,
+    GM_ADDR q, GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR o,
+    GM_ADDR tiling, GM_ADDR userWorkspace, const ChunkFwdHOFusedTilingData &data)
+{
+    constexpr int64_t DTYPE_FP32 = 2;
+    if (data.stateDataType == DTYPE_FP32) {
+        if (data.gDataType == DTYPE_FP32) {
+            RunSingleCoreChunkFused<InputT, float, float>(
+                k, w, u, g, initialState, q, h, vNew, finalState, o, tiling,
+                userWorkspace);
+        } else {
+            RunSingleCoreChunkFused<InputT, InputT, float>(
+                k, w, u, g, initialState, q, h, vNew, finalState, o, tiling,
+                userWorkspace);
+        }
+    } else if (data.gDataType == DTYPE_FP32) {
+        RunSingleCoreChunkFused<InputT, float, InputT>(
+            k, w, u, g, initialState, q, h, vNew, finalState, o, tiling,
+            userWorkspace);
+    } else {
+        RunSingleCoreChunkFused<InputT, InputT, InputT>(
+            k, w, u, g, initialState, q, h, vNew, finalState, o, tiling,
+            userWorkspace);
+    }
+}
+
 template <typename InputT, typename TileShapes, bool UseExp2, int V_DIM>
 __aicore__ inline void RunTyped(
     GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk,
@@ -274,6 +319,16 @@ __aicore__ inline void RunTyped(
     GM_ADDR userWorkspace = AscendC::GetUserWorkspace(workspace);
     GM_ADDR h = userWorkspace + data.handoffHWorkspaceOffset;
     GM_ADDR vNew = userWorkspace + data.handoffVWorkspaceOffset;
+
+    // Saturated core range (P / 2 < T <= P): one MIX core per logical task runs
+    // both FwdH and FwdO, chunk by chunk, with a single on-chip slot.
+    if (data.executionMode == static_cast<int64_t>(
+            ChunkFwdHOFusedExecutionMode::SINGLE_CORE_CHUNK_FUSED)) {
+        DispatchSingleCoreChunkFused<InputT>(
+            k, w, u, g, initialState, q, h, vNew, finalState, o, tiling,
+            userWorkspace, data);
+        return;
+    }
 
     if (GetMixedCoreIdx() < static_cast<uint32_t>(data.producerCoreNum)) {
         DispatchH<InputT, TileShapes, UseExp2, V_DIM>(
