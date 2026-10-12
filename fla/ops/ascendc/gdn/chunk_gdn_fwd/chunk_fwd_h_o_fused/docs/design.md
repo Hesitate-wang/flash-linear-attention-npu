@@ -196,6 +196,8 @@ MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`c
 
 MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `slotFree`（供 HC1 消费）及独立的 `HV2DoneForOC2` token；之后每个 HV2 完成重新发布两者。每 chunk 的依赖为：AIC `OC1 -> HC1(wait slotFree) -> OC2(wait HV2DoneForOC2) -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。`slotFree` 与 `HV2DoneForOC2` 分开，防止 HC1 和 OC2 对同一个 token 重复消费。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
+MODE2 完整 chunk 使用私有 single-slot preload epilogue；尾块使用独立的 `*_gm_mode2.hpp` 和 GM dispatch policy。两类 epilogue 的模板参数及调用签名分别匹配，不能互换。尾块 GM epilogue 的 ping/pong 地址映射到同一个槽，并省去 MODE1 的 V-ready 跨核发布，由 driver 发布本核 `oAiv1Done`。
+
 ## 4. TilingData ABI
 
 以下字段顺序不可改变：

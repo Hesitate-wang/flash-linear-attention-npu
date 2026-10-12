@@ -11,7 +11,7 @@
 #define CATLASS_EPILOGUE_BLOCK_BLOCK_EPILOGUE_GDN_FWDH_VNEW_PRELOAD_SS_HPP
 #include "catlass/catlass.hpp"
 #include "catlass/arch/resource.hpp"
-#include "../gdn_fwd_h_epilogue_policies.hpp"
+#include "../gdn_fwd_h_epilogue_policies_mode2.hpp"
 #include "catlass/gemm_coord.hpp"
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"

@@ -12,6 +12,14 @@
   composed precision, initial/final-state combinations, and T boundary cases.
 - Local environment has no `ccec`/CANN toolchain or Ascend device; only static
   source checks are available here.
+- MODE2 compile-error review: defined `LayoutVNEW`; replaced the mismatched
+  preload-policy GM aliases with private GM tail epilogues; checked all six
+  driver/helper epilogue template arities and all four H epilogue call arities
+  against their declarations. The GM tail variants use one shared slot and
+  omit the MODE1 V-ready rendezvous. Added direct includes for the preload
+  helper's tile-copy and H-offset types and for private epilogue policies.
+  Local type-alias, relative-include, GDN-constant and whitespace checks pass;
+  these checks do not substitute for a CANN kernel build.
 
 ## 设计追踪
 

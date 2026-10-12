@@ -60,6 +60,8 @@
 #include "catlass/debug.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 #include "../../epilogue/gdn_fwd_h_epilogue_policies_mode2.hpp"
+#include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew_gm_mode2.hpp"
+#include "../../epilogue/block/block_epilogue_gdn_fwdh_update_gm_mode2.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew_preload_ss.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_update_preload_ss.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdo_qkmask.hpp"
@@ -141,16 +143,22 @@ public:
         DispatchPolicyHTail, L1TileShapeH, L0TileShapeH, INPUT_TYPE, INPUT_TYPE,
         WORKSPACE_TYPE, void, TileCopyKV>;
 
-    using DispatchPolicyHVnew = Epilogue::EpilogueAtlasGDNFwdHVnewPreloadSingleSlot;
-    using DispatchPolicyHUpdate = Epilogue::EpilogueAtlasGDNFwdHUpdatePreloadSingleSlot;
+    using DispatchPolicyHVnew = Epilogue::EpilogueAtlasGDNFwdHVnewGmMode2;
+    using DispatchPolicyHUpdate = Epilogue::EpilogueAtlasGDNFwdHUpdateGmMode2;
 
     // GM variants of the same epilogues for tail chunks, which never use the
     // DirectUb slot.  Both share the single-slot UB layout.
+    struct GateTagGm {
+        static constexpr bool value = false;
+        static constexpr bool scalarGated = true;
+        static constexpr bool useExp2 = false;
+        static constexpr bool useDirectFp32Ub = false;
+    };
     using EpilogueHVnewGm = Epilogue::Block::BlockEpilogue<
         DispatchPolicyHVnew, VType, GType, UType, VworkType, VUpdateType,
-        FinalStateType>;
+        FinalStateType, GateTagGm>;
     using EpilogueHUpdateGm = Epilogue::Block::BlockEpilogue<
-        DispatchPolicyHUpdate, HType, GType, HType, HworkType, FinalStateType>;
+        DispatchPolicyHUpdate, HType, GType, HType, HworkType, FinalStateType, GateTagGm>;
 
     // ------------------------------------------------------------------
     // FwdO building blocks
@@ -218,6 +226,7 @@ public:
     using LayoutW = Catlass::layout::RowMajor;
     using LayoutH = Catlass::layout::RowMajor;
     using LayoutV = Catlass::layout::RowMajor;
+    using LayoutVNEW = typename VType::Layout;
     using LayoutK = Catlass::layout::ColumnMajor;
     using LayoutVUpdate = typename VUpdateType::Layout;
     using LayoutQ = Catlass::layout::RowMajor;
@@ -343,9 +352,7 @@ public:
         } else {
             mixedCoreIdx = AscendC::GetBlockIdx();
         }
-        scheduler.Init(
-            reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling),
-            mixedCoreIdx);
+        scheduler.Init(tiling, mixedCoreIdx);
         hPreload.Init(k, w, u, g, initialState, hHandoff, vNewHandoff,
                       finalState, tiling, user);
     }

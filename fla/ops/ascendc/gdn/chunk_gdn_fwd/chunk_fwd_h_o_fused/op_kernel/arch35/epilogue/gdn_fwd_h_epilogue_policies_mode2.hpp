@@ -9,6 +9,14 @@
 
 namespace Catlass::Epilogue {
 
+struct EpilogueAtlasGDNFwdHVnewGmMode2 {
+    using ArchTag = Arch::Ascend950;
+};
+
+struct EpilogueAtlasGDNFwdHUpdateGmMode2 {
+    using ArchTag = Arch::Ascend950;
+};
+
 struct EpilogueAtlasGDNFwdHVnewPreloadSingleSlot {
     using ArchTag = Arch::Ascend950;
 };

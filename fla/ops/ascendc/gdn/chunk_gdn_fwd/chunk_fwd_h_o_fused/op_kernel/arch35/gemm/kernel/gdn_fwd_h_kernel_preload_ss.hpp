@@ -53,6 +53,7 @@
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_update_preload_ss.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"
 #include "kernel_utils/block/block_mmad_pingpong_tla_preload.hpp"
+#include "kernel_utils/tile/copy_l0c_to_ub.hpp"
 #include "catlass/gemm/dispatch_policy.hpp"
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/layout/layout.hpp"
@@ -62,6 +63,7 @@
 #include "kernel_operator.h"
 #include "../../../chunk_fwd_h_o_fused_struct.h"
 #include "../../chunk_fwd_ho_fused_a5_single_slot_ub_layout.h"
+#include "../block/block_scheduler_gdn_fwd_h.hpp"
 
 using namespace Catlass;
 using namespace tla;
@@ -288,7 +290,7 @@ public:
     __aicore__ inline void StageV2(const HOffsets &off, bool needStage2)
     {
         if (needStage2) {
-                epilogueUpdate(
+            epilogueUpdate(
                 gmH[off.hDstOffset], gmFinalState[off.finalStateOffset],
                 gmInitialState[off.initialStateOffset],
                 gmG[off.gOffset], gmH[off.hSrcOffset], gmHWorkspace[off.hWorkOffset],
