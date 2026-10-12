@@ -196,7 +196,7 @@ MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`c
 
 MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `hv2HReadyForHc1`（供 HC1 消费）；之后每个 HV2 完成重新发布该信号。每 chunk 的依赖为：AIC `OC1 -> HC1(wait hv2HReadyForHc1) -> OC2 -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。HC1 已在加载 H 前消费 H-ready 信号，顺序执行的 OC2 使用同一份 H，无需再次等待。尾块 HC1/OC2 由上一 chunk 的完成信号保护。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
-MODE2 完整 chunk 使用私有 single-slot preload epilogue；尾块使用独立的 `*_gm_mode2.hpp` 和 GM dispatch policy。两类 epilogue 的模板参数及调用签名分别匹配，不能互换。尾块 GM epilogue 的 ping/pong 地址映射到同一个槽，并省去 MODE1 的 V-ready 跨核发布，由 driver 发布本核 `ov1MaskAndHv1VNewReadyForOc3`。
+MODE2 完整 chunk 使用私有 single-slot preload epilogue；AIC 的 HC1 使用 L1 [0,128 KiB)，OC2 使用 [128,256 KiB)，OC3 保持 [192,320 KiB)；OC2 完成后 OC3 才复用重叠地址及事件 4–7，OC2 在 HC1 发射后先执行 GM→L1 预取，再等待共享 L0 资源释放。尾块使用独立的 `*_gm_mode2.hpp` 和 GM dispatch policy。两类 epilogue 的模板参数及调用签名分别匹配，不能互换。尾块 GM epilogue 的 ping/pong 地址映射到同一个槽，并省去 MODE1 的 V-ready 跨核发布，由 driver 发布本核 `ov1MaskAndHv1VNewReadyForOc3`。
 
 ## 4. TilingData ABI
 

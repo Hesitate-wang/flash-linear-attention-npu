@@ -5,28 +5,13 @@
  * A5 L1 layout for the ChunkFwdHOFused SINGLE_CORE_CHUNK_FUSED schedule
  * (executionMode = 2, blockDim = T).
  *
- * The fused AIC walks one chunk at a time and runs the FwdH and FwdO Cube
- * stages strictly serially:
- *
- *   OC1 -> HC1 -> OC2 -> OC3 -> HC2
- *
- * Two properties hold for every AIC stage and are what makes a single L1 window
- * legal here:
- *   L1. Every stage stages its own operands from GM (preSetFlags / copyGmToL1)
- *       and drains them (finalWaitFlags / waitL1Drained / waitL0Drained) before
- *       the next stage starts.
- *   L2. No L1 tensor survives a stage boundary.  All Cube-to-Vector and
- *       Vector-to-Cube exchanges of this schedule use GM workspaces:
- *         W @ h        -> H v workspace   -> HV1 (MTE2)
- *         VUpdate      -> H vUpdate ws    -> HC2 (MTE2)
- *         K^T @ VUpdate-> H h workspace   -> HV2 (MTE2)
- *         masked QK    -> O aftermask ws  -> OC3 (MTE2)
- *         Q @ h        -> O h workspace   -> OV2 (MTE2)
- *         maskedQK@V   -> O v workspace   -> OV2 (MTE2)
- *       Consequently the per-stage bases below may alias.
- *
- * L1_O_CUBE3_BASE keeps the split-mode value because BlockMmadAttenVNEW* owns
- * its L1A/L1B slots relative to that offset with the dedicated event ids.
+ * AIC compute order: OC1 -> HC1 -> OC2 -> HC2 -> OC3.
+ * H stages and OC1 use [0,128 KiB), with L1 event ids 0..3.
+ * OC2 uses [128,256 KiB), with L1 event ids 4..7. Its GM->L1
+ * prefetch is issued after HC1, before HC1's resource-drain waits.
+ * OC3 uses [192,320 KiB), with L1 event ids 4..7. OC2 is fully
+ * drained before OC3, so their address and event reuse is intentional.
+ * L0 is shared: HC1 releases its L0 events before OC2 initializes them.
  */
 
 #ifndef CHUNK_FWD_HO_FUSED_A5_SINGLE_SLOT_L1_LAYOUT_H
@@ -38,15 +23,30 @@ namespace GDN {
 
 // FwdH Cube stages: HC1 stages W and h, HC2 stages K and the VUpdate tile.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_H_STAGE_BASE = 0U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_H_STAGE_BYTES = 128U * 1024U;
 
 // FwdO Cube stages: OC1 stages Q and K, OC2 stages Q and h.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE1_BASE = 0U;
-constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE = 0U;
+// OC2 is prefetched while HC1 is computing, so it must not overwrite HC1's
+// two L1 stages.  Each 128x128 FP16/BF16 operand pair occupies 128 KiB.
+constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE =
+    CHUNK_FWD_HO_FUSED_L1_H_STAGE_BASE + CHUNK_FWD_HO_FUSED_L1_H_STAGE_BYTES;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE2_L1A_EVENT = 4U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE2_L1B_EVENT = 6U;
 
-// OC3 (maskedQK @ V_new) keeps the split-mode reservation and event ids.
+// OC3 keeps its original address and reuses the drained OC2 L1 events.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE = 192U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE3_L1A_EVENT = 4U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_L1_O_CUBE3_L1B_EVENT = 6U;
+
+static_assert(CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE >=
+                  CHUNK_FWD_HO_FUSED_L1_H_STAGE_BASE + CHUNK_FWD_HO_FUSED_L1_H_STAGE_BYTES,
+              "OC2 L1 window overlaps the HC1 window");
+// OC2 is fully drained before OC3 starts, so they may overlap in address
+// range and reuse L1 events 4..7. Neither overlaps the H window [0,128 KiB).
+static_assert(CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE >=
+                  CHUNK_FWD_HO_FUSED_L1_H_STAGE_BASE + CHUNK_FWD_HO_FUSED_L1_H_STAGE_BYTES,
+              "OC3 L1 window overlaps the H window");
 
 // The FwdH V-new epilogue takes an L1 VUpdate operand, but the arch35 body only
 // declares it (no read and no write); see block_epilogue_gdn_fwdh_vnew.hpp.

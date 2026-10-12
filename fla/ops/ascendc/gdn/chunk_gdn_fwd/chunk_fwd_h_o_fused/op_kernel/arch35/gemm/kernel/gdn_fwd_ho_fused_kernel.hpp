@@ -179,9 +179,7 @@ public:
         DispatchPolicyO, L1TileShapeO, L0TileShapeO, INPUT_TYPE, INPUT_TYPE,
         WORKSPACE_TYPE, void, TileCopyQK>;
 
-    // OC2 shares neither L1A nor L1B with OC1: HC1 runs in between and reuses
-    // the L1 window, so Q has to be staged again for Q @ h[i].  This is the
-    // device-verification item of the fused schedule.
+    // OC2 owns a separate L1 window so Q/H prefetch can overlap HC1 MMAD.
     using TileCopyQH = Catlass::Gemm::Tile::PackedTileCopyTla<
         ArchTag, INPUT_TYPE, layout::RowMajor, INPUT_TYPE, layout::RowMajor,
         WORKSPACE_TYPE, layout::RowMajor>;
@@ -195,6 +193,11 @@ public:
     using BlockMmadAttenVNEW = Gemm::Block::BlockMmadTlaPipelined<
         DispatchPolicyO, L1TileShapeO, L0TileShapeO, INPUT_TYPE, INPUT_TYPE,
         WORKSPACE_TYPE, void, TileCopyAttenVNEW>;
+
+    static_assert(GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE +
+                      BlockMmadQH::L1A_TILE_SIZE * BlockMmadQH::L1A_STAGES +
+                      BlockMmadQH::L1B_TILE_SIZE * BlockMmadQH::L1B_STAGES <= ArchTag::L1_SIZE,
+                  "OC2 L1 allocation exceeds the architecture capacity");
 
     using DispatchPolicyOQkmask = Epilogue::EpilogueAtlasGDNFwdOQkmask;
     using EpilogueOQkmask = Epilogue::Block::BlockEpilogue<
@@ -380,7 +383,10 @@ private:
         const uint32_t coreNum = AscendC::GetBlockNum();
 
         BlockMmadQK blockMmadQK(resource);
-        BlockMmadQH blockMmadQH(resource);
+        BlockMmadQH blockMmadQH(
+            resource, GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE,
+            GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_L1A_EVENT,
+            GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_L1B_EVENT);
         BlockMmadAttenVNEW blockMmadAttenVNEW(
             resource, GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE,
             GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE3_L1A_EVENT,
@@ -482,8 +488,14 @@ private:
                                      tla::MakeShape(shape.k(), shape.n()));
                 auto tileHWork = GetTile(tensorHWork, tla::MakeCoord(0, 0),
                                          tla::MakeShape(shape.m(), shape.n()));
+                // The OC2 operands use a disjoint L1 window, so launch their
+                // GM->L1 copy immediately after HC1 is issued.  Only the L0
+                // handoff waits for HC1 below.
                 blockMmadQH.preSetL1Flags();
                 blockMmadQH.copyGmToL1(tileQ, tileH, shape);
+                if (h.blockTokens == chunkSize) {
+                    hPreload.WaitC1Compute();
+                }
                 blockMmadQH.preSetL0Flags();
                 blockMmadQH.executeCompute(tileHWork, shape);
                 blockMmadQH.finalWaitFlags();

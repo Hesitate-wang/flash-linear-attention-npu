@@ -244,6 +244,7 @@ public:
                              tla::MakeShape(shape.k(), shape.n()));
         // HC1 waits for HV2 H writeback inside the MMAD, before loading H.
         // W may be prefetched first. readyFlagId = 0 skips only mode-0 rendezvous.
+        blockMmadWH.preSetFlags();
         blockMmadWH(tileW, tileH, tensorV, shape, hv2HReadyForHc1, 0);
         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc1WhReady);
     }
@@ -265,11 +266,22 @@ public:
                                  tla::MakeShape(shape.m(), shape.k()));
             auto tileVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0),
                                      tla::MakeShape(shape.k(), shape.n()));
+            blockMmadKV.preSetFlags();
             blockMmadKV(tileK, tileVwork, tensorHwork, shape, hv1VUpdateReadyForHc2);
+            blockMmadKV.finalWaitFlags();
         } else {
             Arch::CrossCoreWaitFlag(hv1VUpdateReadyForHc2);
         }
         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc2KvUpdateReady);
+    }
+
+    // HC1 and OC2 use disjoint L1 windows but share the L0 buffers.  The
+    // caller starts OC2's GM->L1 prefetch first, then calls this method before
+    // OC2 initializes and consumes the shared L0 events. This also drains
+    // HC1 L1 release events, allowing HC2 to initialize them again.
+    __aicore__ inline void WaitC1Compute()
+    {
+        blockMmadWH.finalWaitFlags();
     }
 
     // ------------------------------------------------------------------

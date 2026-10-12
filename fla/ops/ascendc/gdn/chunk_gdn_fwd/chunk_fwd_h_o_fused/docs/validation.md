@@ -200,3 +200,10 @@
 - A5 chunk pipeline 的 O scheduler 与 H scheduler 使用同一单 task 串行模型：每个
   producer/consumer pair 固定使用唯一 active stream/slot，当前 chunk 完成并发布
   `vec2Done` 后才推进到下一 chunk；不为同一 task 伪造第二个并行 stream。
+
+## 完整 chunk OC2 预取调整
+
+- OC2 的 GM→L1 位于 HC1 发射之后、HC1 资源回收等待之前；等待仅在完整 chunk 调用。
+- HC1/HC2 保留原内部缓冲配置，补齐 preSetFlags/finalWaitFlags 生命周期。OC2 预取后回收 HC1 事件，再初始化 OC2 L0 事件；HC2 的事件在 OC3 之前回收。
+- H L1 为 [0,128 KiB)，OC2 为 [128,256 KiB)，OC3 为 [192,320 KiB)。H 使用事件 0–3，OC2/OC3 在阶段结束后复用事件 4–7。
+- 本地完成源码顺序、完整 chunk 分支保护及 diff 格式检查；CANN 编译、设备精度和重叠收益仍待验证。
