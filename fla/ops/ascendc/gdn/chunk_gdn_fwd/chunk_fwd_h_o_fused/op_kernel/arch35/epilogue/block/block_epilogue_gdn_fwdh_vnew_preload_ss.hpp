@@ -216,8 +216,8 @@ public:
         uint32_t chunkSize,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
-        Arch::CrossCoreFlag cube1Done,
-        Arch::CrossCoreFlag vec1Done,
+        Arch::CrossCoreFlag hc1WhReady,
+        Arch::CrossCoreFlag hv1VUpdateReadyForHc2,
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState
@@ -295,7 +295,7 @@ public:
             reinterpret_cast<__ubuf__ float *>(gUbTensor.GetPhyAddr()), mActual);
         AscendC::PipeBarrier<PIPE_V>();
 
-        Arch::CrossCoreWaitFlag(cube1Done);
+        Arch::CrossCoreWaitFlag(hc1WhReady);
 
         Vec1CalcVF(
             (__ubuf__ VElementOutput*)vNewDecayUbTensor.GetPhyAddr(), (__ubuf__ VElementOutput*)vNewOutputUbTensor.GetPhyAddr(),
@@ -310,7 +310,7 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
 
-        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
 
         Vec1PostVF(
             (__ubuf__ VElementOutput*)vNewOutputUbTensor.GetPhyAddr(), (__ubuf__ float*)wsUbTensor.GetPhyAddr(), (__ubuf__ float*)calcUbTensor.GetPhyAddr(),
@@ -321,7 +321,7 @@ public:
         AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, mActualThisSubBlock * nvActual);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         // Single-slot fused schedule: H and O share one core, so V_new readiness
-        // is carried by the driver's 0x2 tokens (hVec1Done / oAiv1Done) and no
+        // is carried by the driver's 0x2 tokens (hv1VUpdateReadyForHc2 / ov1MaskAndHv1VNewReadyForOc3) and no
         // mode-0 cross-core H/O rendezvous happens here.
 
     }

@@ -121,20 +121,19 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_TAIL_END = 171U * 1024U;
 // 0x2 domain flag ids of the fused single-core schedule.  Single slot means one
 // id per dependency; the preload H path needs two extra tokens of its own and
 // the FwdO side keeps its own (see the fused kernel header):
-//   hVec1Done       consumed inside the preload K^T @ VUpdate MMAD
-//   oAiv1Done       V-new/masked-QK token consumed by the FwdO AIC before OC3
-//   preloadSlotFree consumed inside the preload Fixpipe slot handshake
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC1_DONE = 0;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HC1_DONE = 1;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC2_DONE = 2;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC3_DONE = 3;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HC2_DONE = 4;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_O_AIV1_DONE = 5;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_AIV_CHUNK_DONE = 6;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_H_VEC1_DONE = 7;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_PRELOAD_SLOT_FREE = 8;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HV2_DONE_FOR_OC2 = 9;
-constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_ID_COUNT = 10;
+//   hv1VUpdateReadyForHc2       consumed inside the preload K^T @ VUpdate MMAD
+//   ov1MaskAndHv1VNewReadyForOc3       V-new/masked-QK token consumed by the FwdO AIC before OC3
+//   hv2HReadyForHc1 consumed inside the preload Fixpipe slot handshake
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC1_QK_READY = 0;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HC1_WH_READY = 1;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC2_QH_READY = 2;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC3_ATTENTION_V_READY = 3;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HC2_KV_UPDATE_READY = 4;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OV1_MASK_AND_HV1_VNEW_READY_FOR_OC3 = 5;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OV2_CHUNK_FINISHED = 6;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HV1_VUPDATE_READY_FOR_HC2 = 7;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HV2_H_READY_FOR_HC1 = 8;
+constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_ID_COUNT = 9;
 
 // DirectUb handshake ids (0x4 domain).  The fused schedule keeps a single slot,
 // so ubListId is pinned to 0; the block and the epilogue also address the second

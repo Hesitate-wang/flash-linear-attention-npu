@@ -6,8 +6,8 @@
   selects one MIX core per task (`blockDim=T`); `T<=floor(P/2)` retains MODE1.
 - Dedicated MODE2 kernel/helper/epilogue files contain the single-slot path;
   MODE1 H/O kernels and shared MODE1 epilogues remain unchanged.
-- The local mode-`0x2` graph seeds `slotFree` and `HV2DoneForOC2` before chunk 0.
-  Each HV2 republishes both; OV2 waits for OC2/OC3; chunk completion is signaled
+- The local mode-`0x2` graph seeds `hv2HReadyForHc1` before chunk 0.
+  Each HV2 republishes it; OC2 follows HC1 and needs no second H-ready wait; OV2 waits for OC2/OC3; chunk completion is signaled
   after OV2. Device checks still required: CANN build, one-/multi-chunk CPU and
   composed precision, initial/final-state combinations, and T boundary cases.
 - Local environment has no `ccec`/CANN toolchain or Ascend device; only static
@@ -28,13 +28,13 @@
 | `T` 对生产者/消费者核 | Host tiling 对 MODE1 检查 `T<=floor(P/2)`，对受限 A5 MODE2 检查 `floor(P/2)<T<=P` 并设置 `activeCoreNum=T` |
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
 | 启动事件初始化 | A2/A5 统一入口不再初始化同步区或执行额外启动屏障；自然指数路径不访问 IB event table |
-| 逐 chunk 的 H 到 O 发布 | mode `0x0` 的 `H_READY=12`、`V_READY=13` 按 chunk 执行全体 AIV `Set→Wait`；本核 `cube1Done/cube2Done/vec1Done` 继续使用 mode `0x2` |
+| 逐 chunk 的 H 到 O 发布 | mode `0x0` 的 `H_READY=12`、`V_READY=13` 按 chunk 执行全体 AIV `Set→Wait`；本核 `hc1WhReady/hc2KvUpdateReady/hv1VUpdateReadyForHc2` 继续使用 mode `0x2` |
 | A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 CrossCore H/V rendezvous；exp2 专用 O 仍使用既有 `SyncAll<false>()` 阶段边界 |
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
 | FwdO 架构隔离 | A2 实现在 `op_kernel/gemm/kernel`；A5 kernel、配套 epilogue、exp2 tiling/constants 和 UB layout 全部位于 `op_kernel/arch35` |
 | A5 自然指数 FwdO Vec1/HReady 重排 | qkmask 两条分支均先发射 gate/causal-mask Vector，再在 QK MTE2 前执行 H_READY Set/Wait 并立即 ACK；`chunk=128` 仅首段握手。待设备检查三 chunk 精度、IB/flag 代次以及相同条件下的 profiling 总耗时 |
-| A5 FwdO V128 两段 Vec2 | 新增 `cube2Done[0/1]` 事件 8/9；Cube2 完成后先对整片 H FP32 乘 `exp(g)` 并驻留 UB，Cube3 完成后再 Add、Muls、Cast、写 O。V256 沿用旧融合路径。待设备验证 V128 chunk64/128、两种 gate dtype、三 chunk slot 回绕的精度、同步代次和总耗时 |
+| A5 FwdO V128 两段 Vec2 | 新增 `hc2KvUpdateReady[0/1]` 事件 8/9；Cube2 完成后先对整片 H FP32 乘 `exp(g)` 并驻留 UB，Cube3 完成后再 Add、Muls、Cast、写 O。V256 沿用旧融合路径。待设备验证 V128 chunk64/128、两种 gate dtype、三 chunk slot 回绕的精度、同步代次和总耗时 |
 
 ## 已完成的静态检查
 
@@ -66,7 +66,7 @@
   在 Ascend 950 上另接受 exp2 与 BSND/TND。L0 下发失败时保留原始状态码，不再统一改写为
   `ACLNN_ERR_PARAM_NULLPTR`（161001）。
 - 按接口要求，IB 本地张量保留在 SIMD 侧。在 MIX 模式下，IB 索引空间为
-  `2 * blockDim`；O AIC 读取完整 `H_old` tile 前，通过反向 `cube1Done` 的代次
+  `2 * blockDim`；O AIC 读取完整 `H_old` tile 前，通过反向 `hc1WhReady` 的代次
   聚合两个配对 AIV 的 `HReady` 等待结果；`V_new` 由后续 `VReady` 单独约束。
 - A2 和 A5 均在 H/O 分流前由每个逻辑 AIV 清零自身的全部 IB event slot，
   随后由全部活动 AIC/AIV 执行一次启动 rendezvous；A5 不依赖未初始化的

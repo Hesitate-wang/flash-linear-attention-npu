@@ -20,15 +20,14 @@
  *
  * Every buffer exists once (see chunk_fwd_ho_fused_a5_single_slot_ub_layout.h):
  * both Fixpipe targets use the H_DIRECT window and the two epilogues read them
- * in place.  Flags are single ids of the 0x2 domain:
- *   hc1Done / hc2Done  AIC -> AIV, Fixpipe result ready for the epilogue
- *   hVec1Done          AIV -> AIC, VUpdate ready; consumed inside the KV MMAD
- *   oAiv1Done          AIV -> AIC, V_new / masked QK ready; consumed by OC3
- *   preloadSlotFree    AIV -> AIC, H_DIRECT readable again; consumed inside the
- *                      WH MMAD slot handshake
- * The driver's own chunk gate (aivChunkDone) and the slotFree token are owned
- * by the driver: it publishes both in its prologue (after the h[0] write back)
- * and after every chunk's V2 stage.  These stages never publish them.
+ * in place. The driver's mode-0x2 tokens describe stage outputs:
+ *   hc1WhReady / hc2KvUpdateReady: Cube results ready for HV1 / HV2.
+ *   hv1VUpdateReadyForHc2: HV1 wrote VUpdate; HC2 consumes this token.
+ *   ov1MaskAndHv1VNewReadyForOc3: OV1 mask and HV1 V_new are ready for OC3.
+ *   hv2HReadyForHc1: HV2 wrote H; HC1 consumes it before loading H.
+ * The driver seeds hv2HReadyForHc1 after writing h[0] and republishes it
+ * after HV2. The independent ov2ChunkFinished gate is published after OV2,
+ * so the next chunk cannot reuse its single-slot buffers prematurely.
  *
  * A partial final chunk is not handled here: the driver routes
  * blockTokens < chunkSize to the split-mode bounded tail MMAD and the AIV
@@ -135,11 +134,11 @@ public:
     using LayoutK = Catlass::layout::ColumnMajor;
 
     // Single-slot H-side flags.
-    Arch::CrossCoreFlag hc1Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_HC1_DONE};
-    Arch::CrossCoreFlag hc2Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_HC2_DONE};
-    Arch::CrossCoreFlag hVec1Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_H_VEC1_DONE};
-    Arch::CrossCoreFlag oAiv1Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_O_AIV1_DONE};
-    Arch::CrossCoreFlag slotFree{GDN::CHUNK_FWD_HO_FUSED_FLAG_PRELOAD_SLOT_FREE};
+    Arch::CrossCoreFlag hc1WhReady{GDN::CHUNK_FWD_HO_FUSED_FLAG_HC1_WH_READY};
+    Arch::CrossCoreFlag hc2KvUpdateReady{GDN::CHUNK_FWD_HO_FUSED_FLAG_HC2_KV_UPDATE_READY};
+    Arch::CrossCoreFlag hv1VUpdateReadyForHc2{GDN::CHUNK_FWD_HO_FUSED_FLAG_HV1_VUPDATE_READY_FOR_HC2};
+    Arch::CrossCoreFlag ov1MaskAndHv1VNewReadyForOc3{GDN::CHUNK_FWD_HO_FUSED_FLAG_OV1_MASK_AND_HV1_VNEW_READY_FOR_OC3};
+    Arch::CrossCoreFlag hv2HReadyForHc1{GDN::CHUNK_FWD_HO_FUSED_FLAG_HV2_H_READY_FOR_HC1};
 
     uint32_t shapeBatch{0};
     uint32_t seqlen{0};
@@ -243,9 +242,10 @@ public:
                              tla::MakeShape(shape.m(), shape.k()));
         auto tileH = GetTile(tensorH, tla::MakeCoord(0, 0),
                              tla::MakeShape(shape.k(), shape.n()));
-        // No cross-core H/O rendezvous in this schedule: readyFlagId = 0.
-        blockMmadWH(tileW, tileH, tensorV, shape, slotFree, 0);
-        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc1Done);
+        // HC1 waits for HV2 H writeback inside the MMAD, before loading H.
+        // W may be prefetched first. readyFlagId = 0 skips only mode-0 rendezvous.
+        blockMmadWH(tileW, tileH, tensorV, shape, hv2HReadyForHc1, 0);
+        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc1WhReady);
     }
 
     __aicore__ inline void StageC2(const HOffsets &off, bool needStage2)
@@ -265,11 +265,11 @@ public:
                                  tla::MakeShape(shape.m(), shape.k()));
             auto tileVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0),
                                      tla::MakeShape(shape.k(), shape.n()));
-            blockMmadKV(tileK, tileVwork, tensorHwork, shape, hVec1Done);
+            blockMmadKV(tileK, tileVwork, tensorHwork, shape, hv1VUpdateReadyForHc2);
         } else {
-            Arch::CrossCoreWaitFlag(hVec1Done);
+            Arch::CrossCoreWaitFlag(hv1VUpdateReadyForHc2);
         }
-        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc2Done);
+        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc2KvUpdateReady);
     }
 
     // ------------------------------------------------------------------
@@ -281,10 +281,10 @@ public:
             gmV[off.uvOffset], gmVUpdateWorkspace[off.vWorkOffset],
             gmG[off.gOffset], gmU[off.uvOffset], gmVWorkspace[off.vWorkOffset],
             off.blockTokens, kHeadDim, vHeadDim,
-            hc1Done, hVec1Done,
+            hc1WhReady, hv1VUpdateReadyForHc2,
             off.isInitialState, off.isFinalState, storeFinalState);
         // The FwdO side needs its own token for masked QK -> OC3.
-        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(oAiv1Done);
+        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov1MaskAndHv1VNewReadyForOc3);
     }
 
     __aicore__ inline void StageV2(const HOffsets &off, bool needStage2)
@@ -295,10 +295,10 @@ public:
                 gmInitialState[off.initialStateOffset],
                 gmG[off.gOffset], gmH[off.hSrcOffset], gmHWorkspace[off.hWorkOffset],
                 off.blockTokens, kHeadDim, vHeadDim,
-                hc2Done, off.isInitialState, off.isFinalState,
+                hc2KvUpdateReady, off.isInitialState, off.isFinalState,
                 storeFinalState, useInitialState);
         } else {
-            Arch::CrossCoreWaitFlag(hc2Done);
+            Arch::CrossCoreWaitFlag(hc2KvUpdateReady);
         }
     }
 

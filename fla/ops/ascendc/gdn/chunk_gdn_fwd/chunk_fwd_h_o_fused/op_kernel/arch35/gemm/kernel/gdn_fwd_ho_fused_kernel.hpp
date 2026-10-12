@@ -10,7 +10,7 @@
  * (SINGLE_CORE_CHUNK_FUSED): one MIX core owns one logical task, walks its
  * chunks strictly serially and alternates the FwdH/FwdO stages inside a chunk.
  *
- *   AIC : [chunk gate] OC1 -> HC1 -> OC2(wait prior HV2) -> HC2 -> [wait AIV1] OC3
+ *   AIC : [chunk gate] OC1 -> HC1 -> OC2 -> HC2 -> [wait AIV1] OC3
  *   AIV : [init vec2] OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2)
  *         -> [wait OC2, OC3] OV2 -> [AIVCHUNK]
  *
@@ -22,20 +22,19 @@
  * shorter tail -- because the preload family never handles a partial chunk.
  *
  * 0x2 flag ids (single slot, see the single-slot UB layout header):
- *   id 0 oc1Done        AIC -> AIV  Q @ K^T workspace ready
- *   id 1 hc1Done        AIC -> AIV  W @ h (H_DIRECT) ready
- *   id 2 oc2Done        AIC -> AIV  Q @ h FP32 workspace ready
- *   id 3 oc3Done        AIC -> AIV  maskedQK @ V_new FP32 workspace ready
- *   id 4 hc2Done        AIC -> AIV  K^T @ VUpdate (H_DIRECT) ready
- *   id 5 oAiv1Done      AIV -> AIC  V_new / masked QK ready, gates OC3
- *   id 6 aivChunkDone   AIV -> AIC  chunk retired (driver gate)
- *   id 7 hVec1Done      AIV -> AIC  VUpdate ready, consumed inside the KV MMAD
- *   id 8 slotFree       AIV -> AIC  H_DIRECT readable, consumed inside the WH MMAD
- *   id 9 hv2DoneForOc2  AIV -> AIC  prior-chunk state is ready for OC2
+ *   id 0 oc1QkReady        AIC -> AIV  Q @ K^T workspace ready
+ *   id 1 hc1WhReady        AIC -> AIV  W @ h (H_DIRECT) ready
+ *   id 2 oc2QhReady        AIC -> AIV  Q @ h FP32 workspace ready
+ *   id 3 oc3AttentionVReady        AIC -> AIV  maskedQK @ V_new FP32 workspace ready
+ *   id 4 hc2KvUpdateReady        AIC -> AIV  K^T @ VUpdate (H_DIRECT) ready
+ *   id 5 ov1MaskAndHv1VNewReadyForOc3      AIV -> AIC  V_new / masked QK ready, gates OC3
+ *   id 6 ov2ChunkFinished   AIV -> AIC  chunk retired (driver gate)
+ *   id 7 hv1VUpdateReadyForHc2      AIV -> AIC  VUpdate ready, consumed inside the KV MMAD
+ *   id 8 hv2HReadyForHc1       AIV -> AIC  H_DIRECT readable, consumed inside the WH MMAD
  *
- * The AIV seeds aivChunkDone, slotFree and hv2DoneForOc2 after its initial h[0]
- * write. It republishes slotFree and hv2DoneForOc2 immediately after HV2, then
- * aivChunkDone after OV2 retires the chunk.
+ * The AIV seeds ov2ChunkFinished and hv2HReadyForHc1 after its initial h[0]
+ * write. It republishes hv2HReadyForHc1 immediately after HV2, then
+ * ov2ChunkFinished after OV2 retires the chunk.
  *
  * FwdH Cube results go to GM workspaces (invariant I1 of the UB layout), so no
  * AIC-to-AIV Fixpipe target exists and the FwdO AIV stage running concurrently
@@ -283,13 +282,12 @@ public:
     Arch::Resource<ArchTag> resource;
 
     // Single-slot 0x2 flag ids (see the single-slot UB layout header).  The
-    // FwdH preload stages own hc1Done / hc2Done / hVec1Done / oAiv1Done /
-    // slotFree; this driver owns the FwdO tokens and the chunk gate.
-    Arch::CrossCoreFlag oc1Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_OC1_DONE};
-    Arch::CrossCoreFlag oc2Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_OC2_DONE};
-    Arch::CrossCoreFlag oc3Done{GDN::CHUNK_FWD_HO_FUSED_FLAG_OC3_DONE};
-    Arch::CrossCoreFlag aivChunkDone{GDN::CHUNK_FWD_HO_FUSED_FLAG_AIV_CHUNK_DONE};
-    Arch::CrossCoreFlag hv2DoneForOc2{GDN::CHUNK_FWD_HO_FUSED_FLAG_HV2_DONE_FOR_OC2};
+    // FwdH preload stages own hc1WhReady / hc2KvUpdateReady / hv1VUpdateReadyForHc2 / ov1MaskAndHv1VNewReadyForOc3 /
+    // hv2HReadyForHc1; this driver owns the FwdO tokens and the chunk gate.
+    Arch::CrossCoreFlag oc1QkReady{GDN::CHUNK_FWD_HO_FUSED_FLAG_OC1_QK_READY};
+    Arch::CrossCoreFlag oc2QhReady{GDN::CHUNK_FWD_HO_FUSED_FLAG_OC2_QH_READY};
+    Arch::CrossCoreFlag oc3AttentionVReady{GDN::CHUNK_FWD_HO_FUSED_FLAG_OC3_ATTENTION_V_READY};
+    Arch::CrossCoreFlag ov2ChunkFinished{GDN::CHUNK_FWD_HO_FUSED_FLAG_OV2_CHUNK_FINISHED};
 
     // Full chunks run the single-slot FwdH preload stages; partial chunks use
     // the split-mode bounded tail MMAD plus the AIV Vector fallback.
@@ -409,7 +407,7 @@ private:
         while (scheduler.isRunning) {
             // Chunk gate: the previous chunk's AIV retired every single-slot
             // workspace and wrote h[i] back to GM.
-            Arch::CrossCoreWaitFlag(aivChunkDone);
+            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
 
             const HOffsets &h = scheduler.offsets.h;
             const OOffsets &o = scheduler.offsets.o;
@@ -433,7 +431,7 @@ private:
                 blockMmadQK(tileQ, tileK, tileAttn, shape);
                 blockMmadQK.waitL1Drained();
                 blockMmadQK.waitL0Drained();
-                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc1Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc1QkReady);
             }
 
             // ---- HC1: W @ h[i] ------------------------------------------
@@ -444,7 +442,7 @@ private:
                 const bool tailVectorPath = h.blockTokens < kMinCubeTokens;
                 const bool tailMmadPath = !tailVectorPath && (h.blockTokens < chunkSize);
                 if (tailVectorPath) {
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(hPreload.hc1Done);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(hPreload.hc1WhReady);
                 } else if (tailMmadPath) {
                     auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(h.blockTokens, h.vBlockDim);
                     auto tensorW = tla::MakeTensor(gmW[h.wOffset], wLayout, Catlass::Arch::PositionGM{});
@@ -461,14 +459,15 @@ private:
                     blockMmadWHTail.preSetFlags();
                     blockMmadWHTail(tileW, tileH, tileV, shape, EmptyClass{}, true);
                     blockMmadWHTail.finalWaitFlags();
-                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hPreload.hc1Done);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hPreload.hc1WhReady);
                 } else {
                     hPreload.StageC1(h);
                 }
             }
 
             // ---- OC2: Q @ h[i] -> FP32 oH workspace (GM) ----------------
-            Arch::CrossCoreWaitFlag(hv2DoneForOc2);
+            // HC1 already waited for this H before loading it. Tail HC1
+            // paths are protected by the chunk gate. No second H-ready wait.
             {
                 auto tensorQ = tla::MakeTensor(gmQ[o.qkOffset], qLayout, Catlass::Arch::PositionGM{});
                 auto tensorH = tla::MakeTensor(gmH[o.hOffset], hLayout, Catlass::Arch::PositionGM{});
@@ -488,7 +487,7 @@ private:
                 blockMmadQH.preSetL0Flags();
                 blockMmadQH.executeCompute(tileHWork, shape);
                 blockMmadQH.finalWaitFlags();
-                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc2Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc2QhReady);
             }
 
             // ---- HC2: K^T @ VUpdate --------------------------------------
@@ -503,7 +502,7 @@ private:
                 if (!tailVectorPath && !tailMmadPath) {
                     hPreload.StageC2(h, needStage2);
                 } else {
-                    Arch::CrossCoreWaitFlag(hPreload.hVec1Done);
+                    Arch::CrossCoreWaitFlag(hPreload.hv1VUpdateReadyForHc2);
                     if (needStage2 && tailMmadPath) {
                         auto tensorK = tla::MakeTensor(gmK[h.wkOffset], kLayout, Catlass::Arch::PositionGM{});
                         auto vUpdateLayout = tla::MakeLayout<ElementVUpdate, LayoutVUpdate>(
@@ -524,12 +523,12 @@ private:
                         blockMmadKVTail(tileK, tileVUpdate, tileHWork, shape, EmptyClass{}, true);
                         blockMmadKVTail.finalWaitFlags();
                     }
-                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hPreload.hc2Done);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hPreload.hc2KvUpdateReady);
                 }
             }
 
             // ---- OC3 waits for OV1 and V_new/HV1, then consumes both -----
-            Arch::CrossCoreWaitFlag(hPreload.oAiv1Done);
+            Arch::CrossCoreWaitFlag(hPreload.ov1MaskAndHv1VNewReadyForOc3);
             {
                 auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(
                     coreNum * chunkSize * kSlotCount, o.blockTokens);
@@ -555,7 +554,7 @@ private:
                 blockMmadAttenVNEW.preSetL0Flags();
                 blockMmadAttenVNEW.executeCompute(tileVWork, shape);
                 blockMmadAttenVNEW.finalWaitFlags();
-                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc3Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc3AttentionVReady);
             }
 
             if (!scheduler.Next()) {
@@ -590,11 +589,10 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
 
         WriteInitialHandoffState(subBlockIdx, subBlockNum);
-        // Chunk -1 tokens: the AIC chunk gate and the first FwdH Fixpipe slot
-        // handshake.  Both are re-published after every chunk's V2 stage.
-        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(aivChunkDone);
-        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hPreload.slotFree);
-        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv2DoneForOc2);
+        // Seed chunk-0 dependencies after the initial H writeback.
+        // H-ready tokens recur after HV2; chunk-finished recurs after OV2.
+        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished);
+        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hPreload.hv2HReadyForHc1);
 
         uint32_t pingpongFlag = 0;  // forced: single slot always uses the ping half
         while (scheduler.isRunning) {
@@ -606,7 +604,7 @@ private:
             RebuildCausalMask(maskUbTensor);
 
             // ---- OV1: gate difference / exp / causal mask, masked QK -----
-            Arch::CrossCoreWaitFlag(oc1Done);
+            Arch::CrossCoreWaitFlag(oc1QkReady);
             epilogueQkmask(
                 gmAftermaskWorkspace[o.attnWorkOffset],
                 gmG[o.gOffset], gmAttnWorkspace[o.attnWorkOffset], gmMask,
@@ -615,7 +613,7 @@ private:
 
             // ---- HV1: VUpdate + V_new ------------------------------------
             // Full chunks run the single-slot preload stage, which publishes
-            // hVec1Done (consumed inside the KV MMAD) and oAiv1Done (consumed
+            // hv1VUpdateReadyForHc2 (consumed inside the KV MMAD) and ov1MaskAndHv1VNewReadyForOc3 (consumed
             // by this driver before OC3).  Partial chunks run the GM epilogue
             // on the bounded tail MMAD, or on the Vector fallback when the tail
             // is shorter than one MMAD tile.
@@ -625,7 +623,7 @@ private:
                 hPreload.StageV1(h);
             } else {
                 if (tailVectorPath) {
-                    Arch::CrossCoreWaitFlag(hPreload.hc1Done);
+                    Arch::CrossCoreWaitFlag(hPreload.hc1WhReady);
                     ComputeTailVWorkspace(h, EVENT_ID3);
                 }
                 epilogueVnewGm(
@@ -634,10 +632,10 @@ private:
                     gmG[h.gOffset], gmU[h.uvOffset], gmVWorkspace[h.vWorkOffset],
                     gmG[h.gOffset], gmK[h.wkOffset], gmK[h.wkOffset],
                     h.blockTokens, kHeadDim, h.vBlockDim, vHeadDim,
-                    hPreload.hc1Done, hPreload.hVec1Done,
+                    hPreload.hc1WhReady, hPreload.hv1VUpdateReadyForHc2,
                     h.isInitialState, h.isFinalState, storeFinalState,
                     false, true, tailVectorPath, 0ULL, 0ULL);
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hPreload.oAiv1Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hPreload.ov1MaskAndHv1VNewReadyForOc3);
             }
 
             // ---- HV2: h[i+1] = h[i] * gate + h work ---------------------
@@ -648,7 +646,7 @@ private:
                 hPreload.StageV2(h, needStage2);
             } else if (needStage2) {
                 if (tailVectorPath) {
-                    Arch::CrossCoreWaitFlag(hPreload.hc2Done);
+                    Arch::CrossCoreWaitFlag(hPreload.hc2KvUpdateReady);
                     ComputeTailHWorkspace(h, EVENT_ID3);
                 }
                 epilogueUpdateGm(
@@ -656,25 +654,24 @@ private:
                     gmG[h.gOffset], gmH[h.hSrcOffset], gmHWorkspace[h.hWorkOffset],
                     gmG[h.gOffset], gmInitialState[h.initialStateOffset],
                     h.blockTokens, kHeadDim, h.vBlockDim, vHeadDim,
-                    hPreload.hc2Done,
+                    hPreload.hc2KvUpdateReady,
                     h.isInitialState, h.isFinalState, storeFinalState, useInitialState,
                     true, tailVectorPath, 0ULL, 0ULL);
             } else {
-                Arch::CrossCoreWaitFlag(hPreload.hc2Done);
+                Arch::CrossCoreWaitFlag(hPreload.hc2KvUpdateReady);
             }
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv2DoneForOc2);
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hPreload.slotFree);
+            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hPreload.hv2HReadyForHc1);
 
             // ---- OV2: (exp(g) * oH + oV) * scale -> O --------------------
             epilogueOutput.ProcessNarrowSplit(
                 gmO[o.ovOffset], gmG[o.gOffset],
                 gmOVWorkspace[o.hvWorkOffset], gmOHWorkspace[o.hvWorkOffset],
                 scale, o.blockTokens, o.vBlockDim, vHeadDim, pingpongFlag,
-                oc2Done, oc3Done, nullptr);
+                oc2QhReady, oc3AttentionVReady, nullptr);
             pingpongFlag = 0;  // single slot
 
-            // Chunk retired: the driver gate plus the FwdH slot free token.
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(aivChunkDone);
+            // OV2 finished: allow the next chunk to reuse all single-slot buffers.
+            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished);
 
             if (!scheduler.Next()) {
                 break;

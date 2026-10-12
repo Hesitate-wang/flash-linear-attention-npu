@@ -255,8 +255,8 @@ public:
         uint32_t kHeadDim,
         uint32_t vBlockDim,
         uint32_t vHeadDim,
-        Arch::CrossCoreFlag cube1Done,
-        Arch::CrossCoreFlag vec1Done,
+        Arch::CrossCoreFlag hc1WhReady,
+        Arch::CrossCoreFlag hv1VUpdateReadyForHc2,
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState,
@@ -290,7 +290,7 @@ public:
                 AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
                     directUbFreeFlagBegin + directUbSlot);
             } else if (!cube1AlreadyWaited) {
-                Arch::CrossCoreWaitFlag(cube1Done);
+                Arch::CrossCoreWaitFlag(hc1WhReady);
             }
             // A zero-row AIV lane still owns the EVENT0 hand-off consumed by V2.
             if (waitWsFromMte3) {
@@ -299,7 +299,7 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(
                     EVENT_ID0 + pingpongFlag);
             }
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
             return;
         }
         AscendC::ResetMask();
@@ -354,7 +354,7 @@ public:
                     directUbReadyFlagBegin + directUbSlot);
             } else {
                 if (!cube1AlreadyWaited) {
-                    Arch::CrossCoreWaitFlag(cube1Done);
+                    Arch::CrossCoreWaitFlag(hc1WhReady);
                 }
                 AscendC::DataCopy(wsUbTensor, wsInputThisSubBlock, mActualThisSubBlock * nvActual);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0 + pingpongFlag);
@@ -398,7 +398,7 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1 + pingpongFlag);
             if constexpr (!kGated) {
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
             }
 
             AscendC::Cast(vNewOutputUbTensor, wsUbTensor, AscendC::RoundMode::CAST_RINT, mActualThisSubBlock * nvActual);
@@ -422,7 +422,7 @@ public:
                                   mActualThisSubBlock * nkActual);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pingpongFlag);
 
-                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
             }
             if constexpr (kUseDirectFp32Ub) {
                 uint32_t directUbSlot = isPing ? 0 : 1;
@@ -438,7 +438,7 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag);
         }
         if (!cube1AlreadyWaited) {
-            Arch::CrossCoreWaitFlag(cube1Done);
+            Arch::CrossCoreWaitFlag(hc1WhReady);
         }
 
         uint32_t mActualPadded = (mActual + NZ_BLOCK_SIZE - 1) / NZ_BLOCK_SIZE * NZ_BLOCK_SIZE;
@@ -511,7 +511,7 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1 + pingpongFlag);
             if constexpr (!kGated) {
                 if (rowStart + rowsThisTile >= rowEnd) {
-                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+                    Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
                 }
             }
 
@@ -541,7 +541,7 @@ public:
                            rowsThisTile, nkActual, nkActual);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pingpongFlag);
             }
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vec1Done);
+            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
         }
 
         if (rowBegin < rowEnd) {

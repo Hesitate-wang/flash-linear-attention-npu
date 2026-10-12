@@ -46,9 +46,9 @@ H 的两个 stream 分别使用 flag `0/1`、`2/3`、`4/5`、`6/7`：
 
 | flag | 发布方 | 等待方 | 含义 |
 | --- | --- | --- | --- |
-| `cube1Done[s]` | AIC Cube1 | 两个 AIV Vec1 | `W @ H` 的 workspace 已可读；短尾块由 AIC 直接从 MTE2 发布 |
-| `vec1Done[s]` | 两个 AIV Vec1 | AIC Cube2 | `VUpdate`（以及 gated K workspace）已可读 |
-| `cube2Done[s]` | AIC Cube2 | 两个 AIV Vec2 | `K^T @ VUpdate` 的 H workspace 已可读；无需 Cube2 的分支也必须发布匹配代次 |
+| `hc1WhReady[s]` | AIC Cube1 | 两个 AIV Vec1 | `W @ H` 的 workspace 已可读；短尾块由 AIC 直接从 MTE2 发布 |
+| `hv1VUpdateReadyForHc2[s]` | 两个 AIV Vec1 | AIC Cube2 | `VUpdate`（以及 gated K workspace）已可读 |
+| `hc2KvUpdateReady[s]` | AIC Cube2 | 两个 AIV Vec2 | `K^T @ VUpdate` 的 H workspace 已可读；无需 Cube2 的分支也必须发布匹配代次 |
 | `vec2Done[s]` | 两个 AIV Vec2 | AIC 下一次 Cube1 | 当前 stream 的 H/V/H-workspace 已消费完，可以复用 |
 
 每个 stream 的稳态闭环为：
@@ -60,19 +60,19 @@ H 的两个 stream 分别使用 flag `0/1`、`2/3`、`4/5`、`6/7`：
 AIV 预置 vec2Done[s]
     -> AIC wait vec2Done[s]
     -> Cube1: W @ H
-    -> AIC set cube1Done[s]
-    -> AIV wait cube1Done[s], 生成并写回 V_new/VUpdate
-    -> AIV set vec1Done[s]
+    -> AIC set hc1WhReady[s]
+    -> AIV wait hc1WhReady[s], 生成并写回 V_new/VUpdate
+    -> AIV set hv1VUpdateReadyForHc2[s]
     -> mode-0 Set/Wait(V_READY)
-    -> AIC wait vec1Done[s]
+    -> AIC wait hv1VUpdateReadyForHc2[s]
     -> Cube2: K^T @ VUpdate
-    -> AIC set cube2Done[s]
-    -> AIV wait cube2Done[s], 更新并写回 H_after
+    -> AIC set hc2KvUpdateReady[s]
+    -> AIV wait hc2KvUpdateReady[s], 更新并写回 H_after
     -> 非 final chunk: mode-0 Set/Wait(H_READY)
     -> AIV set vec2Done[s]
 ```
 
-首轮若没有 AIV 对 `vec2Done[0..1]` 的预置，AIC 会在第一次 Cube1 前永久等待。结束时 AIC 再等待两个 `vec2Done`，保证最后一代 Vec2 已消费 workspace。短尾块虽然可能绕过 MMAD，仍会走同代次的 `cube1Done/cube2Done` 发布，避免另一侧等待一个不存在的 Cube 任务。
+首轮若没有 AIV 对 `vec2Done[0..1]` 的预置，AIC 会在第一次 Cube1 前永久等待。结束时 AIC 再等待两个 `vec2Done`，保证最后一代 Vec2 已消费 workspace。短尾块虽然可能绕过 MMAD，仍会走同代次的 `hc1WhReady/hc2KvUpdateReady` 发布，避免另一侧等待一个不存在的 Cube 任务。
 
 `useDirectFp32Ub` 路径另有 `0x4` 域的 free/ready flag，负责 AIC 与 AIV 直接共享 UB 槽；它不替代上述 `0x2` 完成链。AIV 内部 epilogue 还使用 MTE2/V/MTE3 hard event 管理 UB ping-pong 槽，入口预置 free event，退出逐一 `WaitFlag` 回收，保证没有悬空的本地事件。
 
@@ -82,9 +82,9 @@ O 的两个 stream 使用相同的编号空间，但语义不同：
 
 | flag | 方向 | 含义 |
 | --- | --- | --- |
-| `cube1Done[s]` | AIC→AIV，随后 AIV→AIC | 第一代表示 `Q @ K^T` workspace 可读；同一 flag 的下一代是两个 AIV 在收到 `HReady` 后给 AIC 的 ACK |
-| `vec1Done[s]` | AIV→AIC | masked QK 已写入 workspace，且 `VReady` 已消费，Cube3 的两个输入均可用 |
-| `cube2Done[s]` | AIC→AIV，仅 V128 | `Q @ H_before` 的 FP32 workspace 已可读；允许先计算 `Cube2 * exp(g)` |
+| `hc1WhReady[s]` | AIC→AIV，随后 AIV→AIC | 第一代表示 `Q @ K^T` workspace 可读；同一 flag 的下一代是两个 AIV 在收到 `HReady` 后给 AIC 的 ACK |
+| `hv1VUpdateReadyForHc2[s]` | AIV→AIC | masked QK 已写入 workspace，且 `VReady` 已消费，Cube3 的两个输入均可用 |
+| `hc2KvUpdateReady[s]` | AIC→AIV，仅 V128 | `Q @ H_before` 的 FP32 workspace 已可读；允许先计算 `Cube2 * exp(g)` |
 | `cube3Done[s]` | AIC→AIV | `masked(QK) @ V_new` workspace 可读 |
 | `vec2Done[s]` | AIV→AIC | 输出 epilogue 已完成对 H/V workspace 的最终读取，AIC 可以复用该 ping-pong 槽 |
 
@@ -93,24 +93,24 @@ O 的两个 stream 使用相同的编号空间，但语义不同：
 ```text
 AIV 预置 vec2Done[s]
 
-AIC: Cube1(Q @ K^T) -> set cube1Done[s]
-AIV: wait cube1Done[s]
+AIC: Cube1(Q @ K^T) -> set hc1WhReady[s]
+AIV: wait hc1WhReady[s]
      -> 计算 gate 差、指数和 causal mask
      -> mode-0 Set/Wait(H_READY)
-     -> set cube1Done[s]                 # 反向 ACK
+     -> set hc1WhReady[s]                 # 反向 ACK
      -> 读取 QK，计算并写回 masked(QK)
      -> mode-0 Set/Wait(V_READY)
-     -> set vec1Done[s]
+     -> set hv1VUpdateReadyForHc2[s]
 
-AIC: wait cube1Done[s]                   # 等待 HReady ACK
+AIC: wait hc1WhReady[s]                   # 等待 HReady ACK
      -> Cube2(Q @ H_before)
      -> wait vec2Done[s]                 # 复用 H/V workspace 前
-     -> wait vec1Done[s]
-     -> set cube2Done[s]                 # V128, Cube2 FixPipe 完成
+     -> wait hv1VUpdateReadyForHc2[s]
+     -> set hc2KvUpdateReady[s]                 # V128, Cube2 FixPipe 完成
      -> Cube3(masked(QK) @ V_new)
      -> set cube3Done[s]
 
-AIV (V128): wait cube2Done[s]
+AIV (V128): wait hc2KvUpdateReady[s]
      -> 整片 FP32 Cube2 * exp(g)，驻留 H UB 槽
      -> wait cube3Done[s]
      -> 逐 tile 计算 (gated Cube2 + Cube3) * scale 并写 O
@@ -121,7 +121,7 @@ AIV (V256): wait cube3Done[s]
      -> set vec2Done[s]
 ```
 
-`cube1Done[s]` 是双向、分代复用的握手：AIC 发出第 `2n` 代，两个 AIV 各自等待后发出第 `2n+1` 代 ACK，AIC 必须消费 ACK 后才允许同一 stream 再发下一代 Cube1 完成事件。两个 ping-pong stream 使当前 Cube1 与上一任务的 Cube2/Cube3 重叠，但不能改变同一 stream 的代次顺序。
+`hc1WhReady[s]` 是双向、分代复用的握手：AIC 发出第 `2n` 代，两个 AIV 各自等待后发出第 `2n+1` 代 ACK，AIC 必须消费 ACK 后才允许同一 stream 再发下一代 Cube1 完成事件。两个 ping-pong stream 使当前 Cube1 与上一任务的 Cube2/Cube3 重叠，但不能改变同一 stream 的代次顺序。
 
 `QK` 和 `masked(QK)` 在数学上都不依赖 H。AIV 在等待 Cube1 结果后先发射
 gate 搬运、差值、指数及 causal mask 的 Vector 工作，再在 qkmask epilogue 内执行
@@ -134,7 +134,7 @@ mode-0 rendezvous 要求所有活动 AIV 按同一 chunk 代次参与；H 提前
 
 V128 的 Cube2 H workspace 每个 AIV 最多持有 `64 x 128 x 4 = 32 KiB`，
 完整载入已有的 ping/pong H UB 槽后原位乘 `exp(g)`，无需新 GM workspace。
-Cube3 仍使用独立的 attn workspace；`cube2Done` 在 Cube2 的 FixPipe 完成后发布，
+Cube3 仍使用独立的 attn workspace；`hc2KvUpdateReady` 在 Cube2 的 FixPipe 完成后发布，
 `cube3Done` 在 Cube3 完成后发布。第二段对同一个 FP32 H tile 先 Add 再 Muls，
 保持原融合公式和 cast 顺序。两个 stage 的 H UB 槽不重叠；`vec2Done` 在最后一块
 attn MTE2 结束后通知 AIC 复用 GM workspace。V256 的每 AIV 半片可达 64 KiB，
@@ -146,14 +146,14 @@ H producer `p in [0,T)` 负责 task `p`，O consumer `T+p` 按相同的 task/chu
 
 | flag | 事件 | 生产方 | 消费方 |
 | --- | --- | --- | --- |
-| `0/2/4` | `HReady` | H 初始状态或 Vec2 写回 `H_i`；O Vec1 完成独立 gate/mask 计算后 | 每七个 MIX task pair 一组；双方等待完成后，O AIV 通过 `cube1Done` 通知 O AIC 读取 H |
-| `0..6` | `VReady` | H Vec1 完成 `V_new_i` 的 GM 写回后；O Vec1 完成 masked QK 后 | 每六个相对 AIV block index 一组；随后 O AIV 通过 `vec1Done` 通知 O AIC 执行 Cube3 |
+| `0/2/4` | `HReady` | H 初始状态或 Vec2 写回 `H_i`；O Vec1 完成独立 gate/mask 计算后 | 每七个 MIX task pair 一组；双方等待完成后，O AIV 通过 `hc1WhReady` 通知 O AIC 读取 H |
+| `0..6` | `VReady` | H Vec1 完成 `V_new_i` 的 GM 写回后；O Vec1 完成 masked QK 后 | 每六个相对 AIV block index 一组；随后 O AIV 通过 `hv1VUpdateReadyForHc2` 通知 O AIC 执行 Cube3 |
 
 每个任务固定使用 `taskLane=0`。V_READY 的 H 侧相对 AIV 编号为原始 AIV `blockIdx`；O 侧相对编号为 `blockIdx - producerCoreNum * subBlockNum`。因此同一 task 的两个 H/O AIV 分别得到相同编号，并映射到相同的 V_READY flag group。
 
 `pipelineSyncWorkspaceOffset` 和原有 IB workspace allocation 保持 ABI 兼容，但自然指数 H/O 不再初始化或访问其中的 event 槽；入口不再执行同步区初始化或额外启动屏障。mode `0x0` flag 不携带 task id，正确性依赖所有活动 H/O AIV 按相同 chunk 顺序参与集合握手。
 
-H 的 GM 写回完成后再发布 ready。A5 V128 中，O AIV 等到 V_READY 后才发布本核 mode `0x2` `vec1Done`，保证 Cube3 同时看到 masked QK 和 V_new；handoff 数据仍按任务/chunk 独立编址。
+H 的 GM 写回完成后再发布 ready。A5 V128 中，O AIV 等到 V_READY 后才发布本核 mode `0x2` `hv1VUpdateReadyForHc2`，保证 Cube3 同时看到 masked QK 和 V_new；handoff 数据仍按任务/chunk 独立编址。
 
 ### 2.5 调度匹配与无死锁条件
 
@@ -194,9 +194,9 @@ A5 H/O kernel 统一使用 `chunk_fwd_h_o_fused_ub_layout.h` 声明 UB 布局。
 
 MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`consumerCoreBase=T` 和 `scheduleMode=1`，要求 `T <= floor(P/2)`。A5 MODE2 在 `floor(P/2) < T <= P` 时设置 `activeCoreNum=T`、`executionMode=2` 和 `singleCoreTaskNum=T`，producer/consumer 分区字段置零以避免误入 MODE1 handoff。当前 MODE2 限定自然指数、定长、V=128、无 gk；不支持的 saturated-range 输入显式失败。两种路径均拒绝变长 `cuSeqlens`/`chunkIndices`。
 
-MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `slotFree`（供 HC1 消费）及独立的 `HV2DoneForOC2` token；之后每个 HV2 完成重新发布两者。每 chunk 的依赖为：AIC `OC1 -> HC1(wait slotFree) -> OC2(wait HV2DoneForOC2) -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。`slotFree` 与 `HV2DoneForOC2` 分开，防止 HC1 和 OC2 对同一个 token 重复消费。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
+MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `hv2HReadyForHc1`（供 HC1 消费）；之后每个 HV2 完成重新发布该信号。每 chunk 的依赖为：AIC `OC1 -> HC1(wait hv2HReadyForHc1) -> OC2 -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。HC1 已在加载 H 前消费 H-ready 信号，顺序执行的 OC2 使用同一份 H，无需再次等待。尾块 HC1/OC2 由上一 chunk 的完成信号保护。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
-MODE2 完整 chunk 使用私有 single-slot preload epilogue；尾块使用独立的 `*_gm_mode2.hpp` 和 GM dispatch policy。两类 epilogue 的模板参数及调用签名分别匹配，不能互换。尾块 GM epilogue 的 ping/pong 地址映射到同一个槽，并省去 MODE1 的 V-ready 跨核发布，由 driver 发布本核 `oAiv1Done`。
+MODE2 完整 chunk 使用私有 single-slot preload epilogue；尾块使用独立的 `*_gm_mode2.hpp` 和 GM dispatch policy。两类 epilogue 的模板参数及调用签名分别匹配，不能互换。尾块 GM epilogue 的 ping/pong 地址映射到同一个槽，并省去 MODE1 的 V-ready 跨核发布，由 driver 发布本核 `ov1MaskAndHv1VNewReadyForOc3`。
 
 ## 4. TilingData ABI
 

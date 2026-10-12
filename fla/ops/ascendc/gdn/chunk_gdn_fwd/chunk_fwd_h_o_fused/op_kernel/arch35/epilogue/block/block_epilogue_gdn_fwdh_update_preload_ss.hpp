@@ -190,7 +190,7 @@ public:
         uint32_t chunkSize,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
-        Arch::CrossCoreFlag cube2Done,
+        Arch::CrossCoreFlag hc2KvUpdateReady,
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState,
@@ -243,7 +243,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID3);
         float muls = glastUbTensor.GetValue(0);
 
-        Arch::CrossCoreWaitFlag(cube2Done);
+        Arch::CrossCoreWaitFlag(hc2KvUpdateReady);
 
         if constexpr (std::is_same<FinalStateElement, float>::value) {
             if (storeFinalState) {

@@ -210,7 +210,7 @@ public:
         uint32_t kHeadDim,
         uint32_t vBlockDim,
         uint32_t vHeadDim,
-        Arch::CrossCoreFlag cube2Done,
+        Arch::CrossCoreFlag hc2KvUpdateReady,
         bool isInitialState,
         bool isFinalState,
         bool storeFinalState,
@@ -246,7 +246,7 @@ public:
                 AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
                     directUbFreeFlagBegin + directUbSlot);
             } else if (!cube2AlreadyWaited) {
-                Arch::CrossCoreWaitFlag(cube2Done);
+                Arch::CrossCoreWaitFlag(hc2KvUpdateReady);
             }
             return;
         }
@@ -301,7 +301,7 @@ public:
             AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
                 directUbReadyFlagBegin + directUbSlot);
         } else if (!cube2AlreadyWaited) {
-            Arch::CrossCoreWaitFlag(cube2Done);
+            Arch::CrossCoreWaitFlag(hc2KvUpdateReady);
         }
 
         // fix: need to adapt kGated. issue: A5 do not have vdim128 branch.
