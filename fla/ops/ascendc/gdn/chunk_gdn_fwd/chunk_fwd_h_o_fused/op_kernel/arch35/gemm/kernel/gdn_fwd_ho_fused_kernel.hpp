@@ -59,8 +59,6 @@
 #include "catlass/catlass.hpp"
 #include "catlass/debug.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdh_update.hpp"
-#include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew.hpp"
 #include "../../epilogue/gdn_fwd_h_epilogue_policies_mode2.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew_preload_ss.hpp"
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_update_preload_ss.hpp"
@@ -91,16 +89,6 @@ using namespace Catlass;
 using namespace tla;
 
 namespace Catlass::Gemm::Kernel {
-
-// Gate tag consumed by the FwdH epilogues.  The fused schedule always uses the
-// GM exchange path, so the direct-UB flag is compile-time false.
-template <bool KGated, bool ScalarGated, bool UseExp2, bool UseDirectFp32Ub>
-struct GDNFwdHOFusedGateTag {
-    static constexpr bool value = KGated;
-    static constexpr bool scalarGated = ScalarGated;
-    static constexpr bool useExp2 = UseExp2;
-    static constexpr bool useDirectFp32Ub = UseDirectFp32Ub;
-};
 
 template <
     typename INPUT_TYPE,
@@ -153,18 +141,16 @@ public:
         DispatchPolicyHTail, L1TileShapeH, L0TileShapeH, INPUT_TYPE, INPUT_TYPE,
         WORKSPACE_TYPE, void, TileCopyKV>;
 
-    using DispatchPolicyHVnew = Epilogue::EpilogueAtlasGDNFwdHVnew;
-    using DispatchPolicyHUpdate = Epilogue::EpilogueAtlasGDNFwdHUpdate;
+    using DispatchPolicyHVnew = Epilogue::EpilogueAtlasGDNFwdHVnewPreloadSingleSlot;
+    using DispatchPolicyHUpdate = Epilogue::EpilogueAtlasGDNFwdHUpdatePreloadSingleSlot;
 
     // GM variants of the same epilogues for tail chunks, which never use the
     // DirectUb slot.  Both share the single-slot UB layout.
-    using GateTagGm = GDNFwdHOFusedGateTag<kGated, true, false, false>;
     using EpilogueHVnewGm = Epilogue::Block::BlockEpilogue<
         DispatchPolicyHVnew, VType, GType, UType, VworkType, VUpdateType,
-        FinalStateType, GateTagGm, /*kHOSyncEnabled=*/false>;
+        FinalStateType>;
     using EpilogueHUpdateGm = Epilogue::Block::BlockEpilogue<
-        DispatchPolicyHUpdate, HType, GType, HType, HworkType, FinalStateType,
-        GateTagGm>;
+        DispatchPolicyHUpdate, HType, GType, HType, HworkType, FinalStateType>;
 
     // ------------------------------------------------------------------
     // FwdO building blocks
@@ -357,8 +343,9 @@ public:
         } else {
             mixedCoreIdx = AscendC::GetBlockIdx();
         }
-        scheduler.Init(reinterpret_cast<const GDN::ChunkFwdHOFusedTilingData *>(tiling),
-                       mixedCoreIdx);
+        scheduler.Init(
+            reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling),
+            mixedCoreIdx);
         hPreload.Init(k, w, u, g, initialState, hHandoff, vNewHandoff,
                       finalState, tiling, user);
     }

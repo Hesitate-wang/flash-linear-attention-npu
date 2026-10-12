@@ -293,7 +293,8 @@ public:
                 gmInitialState[off.initialStateOffset],
                 gmG[off.gOffset], gmH[off.hSrcOffset], gmHWorkspace[off.hWorkOffset],
                 off.blockTokens, kHeadDim, vHeadDim,
-                hc2Done, off.isInitialState, off.isFinalState, useInitialState);
+                hc2Done, off.isInitialState, off.isFinalState,
+                storeFinalState, useInitialState);
         } else {
             Arch::CrossCoreWaitFlag(hc2Done);
         }

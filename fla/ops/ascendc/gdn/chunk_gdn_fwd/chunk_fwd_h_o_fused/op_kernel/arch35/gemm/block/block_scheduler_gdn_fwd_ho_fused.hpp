@@ -53,7 +53,7 @@ struct BlockSchedulerGdnFwdHOFused {
     BlockSchedulerGdnFwdHOFused() {}
 
     CATLASS_DEVICE
-    void Init(const GDN::ChunkFwdHOFusedTilingData *tilingData, uint32_t mixedCoreIdx)
+    void Init(const __gm__ GDN::ChunkFwdHOFusedTilingData *tilingData, uint32_t mixedCoreIdx)
     {
         shapeBatch = static_cast<uint32_t>(tilingData->shapeBatch);
         seqlen = static_cast<uint32_t>(tilingData->seqlen);

@@ -193,6 +193,7 @@ public:
         Arch::CrossCoreFlag cube2Done,
         bool isInitialState,
         bool isFinalState,
+        bool storeFinalState,
         bool useInitialState
     )
     {
