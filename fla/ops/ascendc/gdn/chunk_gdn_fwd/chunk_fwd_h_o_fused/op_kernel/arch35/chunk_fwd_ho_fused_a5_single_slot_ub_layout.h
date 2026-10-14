@@ -7,47 +7,45 @@
  *
  * One MIX core owns one (batch, value-head) task and walks its chunks strictly
  * serially.  Inside every chunk the FwdH and FwdO stages alternate on the same
- * core, so every buffer exists once (no ping-pong) and the FwdH Cube results go
- * straight into AIV UB through Fixpipe, exactly like the split-mode DirectUb
- * path -- the space freed by dropping the second slot is what makes that direct
- * path fit next to the FwdO buffers:
+ * core. FwdH has one Fixpipe slot; FwdO retains its internal Vector ping/pong
+ * scratch, not a second chunk slot:
  *
- *   AIC : [chunk gate] OC1 -> HC1 -> OC2 -> [wait AIV1] -> OC3 -> HC2
- *   AIV : [mask] [wait OC1] OV1 -> [wait HC1] HV1 -> [AIV1] OV2
- *         -> [wait HC2] HV2 -> [AIVCHUNK]
+ *   AIC : [chunk gate] OC1 -> HC1 -> OC2 -> HC2 -> [wait HV1] OC3
+ *   AIV : [mask] OV1 -> [O/H fence] HV1 -> HV2 -> [H/O fence] OV2
+ *         -> [O fence, chunk finished]
  *
  * Address map (V128; every size is per AIV):
  *
  *   [0,32K)      FwdH calc                             HV1/HV2
- *   [32K,96K)    FwdH staging: u / V_new / VUpdate     HV1/HV2
- *   [96K,117K)   FwdH small: g / g_last / g_sub / g_input / share
+ *   [64K,80K)    FwdH u / V_new / VUpdate             HV1
+ *   [80K,96K)    FwdH H input/output                  HV2
+ *   [96K,100K)   FwdH g / g_input / g_last            HV1/HV2
  *   [135K,199K)  H_DIRECT: HC1 and HC2 Fixpipe target  AIC -> AIV, read in place
- *   [199K,231K)  FwdH update output staging            HV2
- *   [231K,232K)  FwdH update g_last                    HV2
+ *   [135K,167K)  FP32 final-state output in H_DIRECT  HV2 MTE3
  *   [0,16K)      causal mask (rebuilt per chunk)       OV1/OV2
  *   [16K,71K)    FwdO base: gbrc / gcomp / share / g   OV1/OV2
  *   [71K,103K)   FwdO V work (GM staging)              OV2
  *   [103K,135K)  FwdO H work (GM staging)              OV2
+ *   [135K,167K)  FwdO V work pong (reuses H_DIRECT)   OV2
+ *   [167K,199K)  FwdO H work pong (reuses H_DIRECT)   OV2
  *   [199K,239K)  FwdO OV1 scratch (a / out / out_half) OV1
- *   [199K,223K)  FwdO OV2 out scratch                  OV2
+ *   [199K,223K)  FwdO OV2 out scratch ping            OV2
+ *   [223K,247K)  FwdO OV2 out scratch pong            OV2
  *
  * Invariants enforced by the fused kernel:
  *   I1. HC1/HC2 write H_DIRECT through Fixpipe and the matching AIV epilogue
- *       reads that same window in place.  The handshake is the DirectUb one:
- *       the AIV presets the 0x4 free flag per slot, the Cube waits it before
- *       writing and sets the 0x4 ready flag after the write, the epilogue waits
- *       the ready flag and sets the free flag again.
+ *       reads that same window in place. HC1/HC2 readiness uses mode-0x2
+ *       flags; HV1 publishes HC2's input only after reading HC1's result.
  *   I2. H_DIRECT must stay disjoint from every buffer of the FwdO stage that
  *       runs concurrently with the Cube Fixpipe: HC1 runs with OV1
- *       ([0,71K) plus [199K,239K)) and HC2 runs with OV2 ([0,135K) plus
- *       [199K,223K)).  The static_asserts below pin that property.
+ *       ([0,71K) plus [199K,239K)). OV2 starts only after HV2 (or the final
+ *       skipped-HV2 wait) and its H/O fence, so its pong views may reuse
+ *       H_DIRECT. The next HC1 cannot start until OV2 retires the chunk.
  *   I3. FwdH clobbers UB[0,16K) with its calc buffer, so the 64 x 64 causal
  *       mask is rebuilt by the AIV before every OV1.
  *
- * Full chunks run the single-slot preload family, whose epilogue offsets are
- * taken from the constants in this header.  Partial chunks use the split-mode
- * GM epilogues with their own (legacy) offsets, so those shared files are not
- * parameterized by this layout.
+ * Full and partial chunks use the same preload/epilogue path with actual
+ * blockTokens. Cross-family UB reuse is protected by local stage fences.
  */
 
 #ifndef CHUNK_FWD_HO_FUSED_A5_SINGLE_SLOT_UB_LAYOUT_H
@@ -83,11 +81,13 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_SLOT_OFFSET =
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET = 135U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_DIRECT_BYTES = 64U * 1024U;
 
+// Legacy reservations, not the active HV2 views (staging + 48 KiB and small
+// + 3 KiB). OV1/OV2 own this upper scratch region in the current driver.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_UPDATE_SCRATCH_OFFSET = 199U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_UPDATE_SCRATCH_BYTES = 32U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_UPDATE_G_OFFSET = 231U * 1024U;
 
-// FwdO regions (the legacy ping half; the O epilogues are used unchanged).
+// FwdO regions. OV1 aliases ping/pong; OV2 keeps both Vector scratch views.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_MASK_OFFSET = 0U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_MASK_BYTES = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_BASE_OFFSET = 0U;
@@ -106,11 +106,25 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_OFFSET = 199U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_BYTES = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_OFFSET = 215U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_BYTES = 8U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_VWORK_PONG_OFFSET = 135U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_HWORK_PONG_OFFSET = 167U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_PONG_OFFSET = 223U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_PONG_OFFSET = 239U * 1024U;
 
-// Tail Vector fallback scratch (a tail shorter than one MMAD tile has no Cube).
-// It deliberately lives inside H_DIRECT: a tail chunk never uses the DirectUb
-// slot, and a partial chunk is always the last chunk of the task, so nothing
-// writes H_DIRECT afterwards.
+// Local HardEvent domains, independent of the mode-0x2/mode-0x4 flag ids.
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_O_BEGIN = 0U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_O_FENCE = 3U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT = 4U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER = 5U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_H_INPUT = 6U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR = 7U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_EVENT_H_FENCE =
+    CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR;
+static_assert(CHUNK_FWD_HO_FUSED_EVENT_O_FENCE < CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT &&
+                  CHUNK_FWD_HO_FUSED_EVENT_H_FENCE < 8U,
+              "fused Vector event domains must be disjoint and fit ids 0-7");
+
+// Legacy address constants; the current MODE2 driver has no tail fallback.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_TAIL_INPUT_OFFSET = 166U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_TAIL_FLOAT_OFFSET = 167U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_TAIL_ACCUM_OFFSET = 168U * 1024U;
@@ -123,7 +137,7 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_H_TAIL_END = 171U * 1024U;
 // the FwdO side keeps its own (see the fused kernel header):
 //   hv1VUpdateReadyForHc2       consumed inside the preload K^T @ VUpdate MMAD
 //   ov1MaskAndHv1VNewReadyForOc3       V-new/masked-QK token consumed by the FwdO AIC before OC3
-//   hv2HReadyForHc1 consumed inside the preload Fixpipe slot handshake
+//   hv2HReadyForHc1 consumed before HC1 preloads H
 constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC1_QK_READY = 0;
 constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HC1_WH_READY = 1;
 constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_OC2_QH_READY = 2;
@@ -135,16 +149,15 @@ constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HV1_VUPDATE_READY_FOR_HC2 = 7;
 constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_HV2_H_READY_FOR_HC1 = 8;
 constexpr uint16_t CHUNK_FWD_HO_FUSED_FLAG_ID_COUNT = 9;
 
-// DirectUb handshake ids (0x4 domain).  The fused schedule keeps a single slot,
-// so ubListId is pinned to 0; the block and the epilogue also address the second
-// AIV through +FLAG_STRIDE, exactly like the split-mode DirectUb path.
+// Legacy DirectUb handshake ids (0x4 domain). The current MODE2 preload path
+// uses the mode-0x2 readiness flags above, not these reserved constants.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_DIRECT_FREE_FLAG = 1U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_DIRECT_READY_FLAG = 6U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_DIRECT_FLAG_STRIDE = 16U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_DIRECT_VEC_NUM = 2U;
 
-// Whole single-slot FwdH footprint, excluding the FwdO-only regions.
-constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_USED_MAX = 239U * 1024U;
+// Peak of every active view, including OV2's internal output pong.
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_USED_MAX = 247U * 1024U;
 
 // ---------------------------------------------------------------------------
 // Checks.  Every FwdH stage view must stay disjoint from itself and from the
@@ -191,7 +204,7 @@ static_assert(CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET >=
 static_assert(CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET >=
                   CHUNK_FWD_HO_FUSED_UB_O_V2_VWORK_OFFSET + CHUNK_FWD_HO_FUSED_UB_O_V2_VWORK_BYTES +
                       CHUNK_FWD_HO_FUSED_UB_O_V2_HWORK_BYTES,
-              "fused UB: H_DIRECT overlaps the FwdO work slots (HC2 runs with OV2)");
+              "fused UB: H_DIRECT overlaps the FwdO ping work slots");
 static_assert(CHUNK_FWD_HO_FUSED_UB_H_DIRECT_END <= CHUNK_FWD_HO_FUSED_UB_O_V1_A_OFFSET,
               "fused UB: H_DIRECT overlaps the FwdO OV1 scratch");
 
@@ -209,6 +222,22 @@ static_assert(CHUNK_FWD_HO_FUSED_UB_O_V1_OUT_HALF_OFFSET +
                       CHUNK_FWD_HO_FUSED_UB_O_V1_OUT_HALF_BYTES <=
                   CHUNK_FWD_HO_FUSED_UB_USED_MAX,
               "fused UB: OV1 scratch exceeds the recorded footprint");
+static_assert(CHUNK_FWD_HO_FUSED_UB_O_V2_VWORK_PONG_OFFSET ==
+                  CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET &&
+                  CHUNK_FWD_HO_FUSED_UB_O_V2_HWORK_PONG_OFFSET +
+                      CHUNK_FWD_HO_FUSED_UB_O_V2_HWORK_BYTES ==
+                  CHUNK_FWD_HO_FUSED_UB_H_DIRECT_END,
+              "fused UB: OV2 pong work must reuse H_DIRECT only after the H/O fence");
+static_assert(CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_OFFSET +
+                      CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_BYTES <=
+                  CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_PONG_OFFSET &&
+                  CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_PONG_OFFSET +
+                      CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_BYTES <=
+                  CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_PONG_OFFSET &&
+                  CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_PONG_OFFSET +
+                      CHUNK_FWD_HO_FUSED_UB_O_V2_OUT_HALF_BYTES ==
+                  CHUNK_FWD_HO_FUSED_UB_USED_MAX,
+              "fused UB: OV2 output ping/pong views overlap or exceed the footprint");
 static_assert(CHUNK_FWD_HO_FUSED_UB_USED_MAX <=
                   static_cast<uint32_t>(CHUNK_FWD_HO_FUSED_UB_DATA_LIMIT),
               "fused UB: footprint crosses the UB data limit");

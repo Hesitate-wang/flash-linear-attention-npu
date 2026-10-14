@@ -29,9 +29,8 @@
  * after HV2. The independent ov2ChunkFinished gate is published after OV2,
  * so the next chunk cannot reuse its single-slot buffers prematurely.
  *
- * A partial final chunk is not handled here: the driver routes
- * blockTokens < chunkSize to the split-mode bounded tail MMAD and the AIV
- * Vector fallback.
+ * Each stage uses the current block's actual token count for its MMAD shape
+ * and Vector length, including the last block.
  */
 
 #ifndef CATLASS_GEMM_KERNEL_GDN_FWD_H_PRELOAD_SS_HPP
@@ -254,7 +253,7 @@ public:
         if (needStage2) {
             auto kLayout = tla::MakeLayout<ElementK, LayoutK>(
                 kHeadDim, shapeBatch * kNumHead * seqlen);
-            auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize, vHeadDim);
+            auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(off.blockTokens, vHeadDim);
             auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(kHeadDim, vHeadDim);
             auto tensorK = tla::MakeTensor(gmK[off.wkOffset], kLayout, Catlass::Arch::PositionGM{});
             auto tensorVwork = tla::MakeTensor(

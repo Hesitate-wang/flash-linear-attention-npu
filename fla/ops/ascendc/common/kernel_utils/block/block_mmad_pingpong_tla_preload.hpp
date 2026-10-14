@@ -331,6 +331,23 @@ public:
         int32_t readyFlagId = 0,
         TensorBias const &tensorBias = {})
     {
+        operatorImpl(tensorA, tensorB, tensorC, actualShape, vecDone, readyFlagId, tensorBias);
+    }
+
+    /// Perform a block-scoped MMAD without a cross-core producer dependency.
+    template <class TensorA, class TensorB, class TensorC>
+    CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC,
+                                   GemmCoord const &actualShape)
+    {
+        operatorImpl(tensorA, tensorB, tensorC, actualShape, EmptyClass{}, 0, EmptyClass{});
+    }
+
+protected:
+    template <class TensorA, class TensorB, class TensorC, class VecDone, class TensorBias>
+    CATLASS_DEVICE void operatorImpl(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC,
+                                     GemmCoord const &actualShape, VecDone vecDone,
+                                     int32_t readyFlagId, TensorBias const &tensorBias)
+    {
         // Check L1TileShape
         if constexpr (HAS_BIAS) {
             static constexpr uint32_t BIAS_BUF_SIZE = L0_TILE_N * sizeof(ElementAccumulator);
@@ -391,9 +408,11 @@ public:
         } else {
             copyGmToL1A(tensorL1A, tensorTileA);
         }
-        Arch::CrossCoreWaitFlag(vecDone);
+        if constexpr (!std::is_same_v<VecDone, EmptyClass>) {
+            Arch::CrossCoreWaitFlag(vecDone);
+        }
         // Fused H/O kernels pass the mode-0 H_READY/V_READY flag id computed by
-        // ChunkFwdHOReadyFlag; the default -1 skips the rendezvous entirely.
+        // ChunkFwdHOReadyFlag; non-positive ids skip the mode-0 rendezvous.
         if (readyFlagId >= 1) {
             AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(readyFlagId);
             AscendC::CrossCoreWaitFlag<0x0, PIPE_MTE3>(readyFlagId);

@@ -187,7 +187,7 @@ public:
         AscendC::GlobalTensor<GElementInput> gInput,
         AscendC::GlobalTensor<HElementInput> hInput,
         AscendC::GlobalTensor<float> hUpdateInput,
-        uint32_t chunkSize,
+        uint32_t blockTokens,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag hc2KvUpdateReady,
@@ -219,14 +219,14 @@ public:
         AscendC::GlobalTensor<HElementInput> hInputThisSubBlock = hInput[offsetH];
         AscendC::GlobalTensor<FinalStateElement> finalStateThisSubBlock = finalState[offsetH];
 
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_INPUT);
 
         AscendC::DataCopy(hUbTensor, hInputThisSubBlock, mActualThisSubBlock * nActual);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
 
-        GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
+        GElementInput gLastVal = gInputThisSubBlock.GetValue(blockTokens - 1);
         float gLastFloat = 0.0f;
         if constexpr(std::is_same<GElementInput, float>::value) {
             gLastFloat = gLastVal;
@@ -236,11 +236,11 @@ public:
             gLastFloat = AscendC::ToFloat(gLastVal);
         }
         glastUbTensor.SetValue(0, gLastFloat);
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID3);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR);
         AscendC::Exp(glastUbTensor, glastUbTensor, 1);
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID3);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR);
         float muls = glastUbTensor.GetValue(0);
 
         Arch::CrossCoreWaitFlag(hc2KvUpdateReady);
@@ -258,8 +258,8 @@ public:
                         AscendC::DataCopy(calcUbTensor, finalStateThisSubBlock,
                                           mActualThisSubBlock * nActual);
                     }
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
                 }
             } else {
                 AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE,
@@ -278,8 +278,8 @@ public:
                     (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(),
                     (__ubuf__ float*)calcUbTensor.GetPhyAddr(), muls,
                     mActualThisSubBlock * nActual);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
                 AscendC::DataCopy(finalStateThisSubBlock, hUpdateUbTensor,
                                   mActualThisSubBlock * nActual);
                 if (!isFinalState) {
@@ -287,8 +287,8 @@ public:
                                   AscendC::RoundMode::CAST_RINT,
                                   mActualThisSubBlock * nActual);
                     AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
                     AscendC::DataCopy(hOutputThisSubBlock, hUbTensor,
                                       mActualThisSubBlock * nActual);
                 }
@@ -299,8 +299,8 @@ public:
                     (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(),
                     mActualThisSubBlock * nActual, oneRepeatSize,
                     repeatOuterTimes, repeatInnerTimes, muls);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
                 AscendC::DataCopy(hOutputThisSubBlock, hUbTensor,
                                   mActualThisSubBlock * nActual);
             }
@@ -312,8 +312,8 @@ public:
                     (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(),
                     mActualThisSubBlock * nActual, oneRepeatSize,
                     repeatOuterTimes, repeatInnerTimes, muls);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
                 AscendC::DataCopy(finalStateThisSubBlock, hUbTensor, mActualThisSubBlock * nActual);
             } else {
                 Vec2CalcVF(
@@ -322,17 +322,17 @@ public:
                     (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(),
                     mActualThisSubBlock * nActual, oneRepeatSize,
                     repeatOuterTimes, repeatInnerTimes, muls);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
                 AscendC::DataCopy(hOutputThisSubBlock, hUbTensor,
                                   mActualThisSubBlock * nActual);
             }
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_INPUT);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_INPUT);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_INPUT);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT);
 
 
     }

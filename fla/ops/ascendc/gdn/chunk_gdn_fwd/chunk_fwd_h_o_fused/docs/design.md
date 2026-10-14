@@ -196,7 +196,56 @@ MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`c
 
 MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `hv2HReadyForHc1`（供 HC1 消费）；之后每个 HV2 完成重新发布该信号。每 chunk 的依赖为：AIC `OC1 -> HC1(wait hv2HReadyForHc1) -> OC2 -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。HC1 已在加载 H 前消费 H-ready 信号，顺序执行的 OC2 使用同一份 H，无需再次等待。尾块 HC1/OC2 由上一 chunk 的完成信号保护。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
-MODE2 完整 chunk 使用私有 single-slot preload epilogue；AIC 的 HC1 使用 L1 [0,128 KiB)，OC2 使用 [128,256 KiB)，OC3 保持 [192,320 KiB)；OC2 完成后 OC3 才复用重叠地址及事件 4–7，OC2 在 HC1 发射后先执行 GM→L1 预取，再等待共享 L0 资源释放。尾块使用独立的 `*_gm_mode2.hpp` 和 GM dispatch policy。两类 epilogue 的模板参数及调用签名分别匹配，不能互换。尾块 GM epilogue 的 ping/pong 地址映射到同一个槽，并省去 MODE1 的 V-ready 跨核发布，由 driver 发布本核 `ov1MaskAndHv1VNewReadyForOc3`。
+MODE2 所有 chunk（包括尾块）统一按实际 `blockTokens` 组装 MMAD shape 和 Vector 长度，不设尾块专用执行分支。H 的四个 stage、成员和初始化直接归入 `gdn_fwd_ho_fused_kernel.hpp`，HC1/HC2 使用私有 single-slot preload epilogue 和共享 H_DIRECT UB 输出。五个矩阵均使用 `MmadPingpongTlaPreload`：H 保留带 `vecDone` 的重载；OC1/OC2/OC3 调用不带 `vecDone` 的四参数重载，跨核等待由 driver 的 chunk gate 和 OC3 ready token 保证。HC1 使用 L1 [0,128 KiB)，OC2 使用 [128,256 KiB)，OC3 保持 [192,320 KiB)；OC2 执行完整 preload 调用，不再单独提前预取。当前工作区的 Cube event 生命周期为循环前一次 preset、循环后一次 drain；本次 Vector 事件隔离不修改该生命周期。OC2 完成后 OC3 才复用重叠 L1 地址。最终状态无需保存时的 HC2/HV2 跳过属于状态输出条件，不是尾块 shape 分支。
+
+### MODE2 Local Event 与 UB 生命周期
+
+MODE1 和共享 O epilogue 保持不变。MODE2 的 local HardEvent 以 `(方向, ID)` 为键；
+O 使用 ID0-3，两个 H single-slot epilogue 将原 ID0-3 完整映射到 ID4-7：
+
+| 所有者 | ID | 协议 |
+| --- | --- | --- |
+| O epilogue | 0-3 | 保留调用内 Set/Wait；OV2 在返回前 drain 输出 ping/pong token |
+| H output | 4 | `MTE3_V` 在 driver preset，HV1/HV2 wait 后 republish，退出 drain |
+| H transfer/init | 5 | epilogue 调用内配对；初始化返回前 drain MTE3，不遗留 token |
+| H input | 6 | `MTE3_MTE2` 在 driver preset，HV2 wait 后 republish，退出 drain |
+| H scalar/fence | 7 | scalar 事件调用内配对；H→O fence 使用不同方向的事件 |
+| O→H fence | 3 | 前阶段返回后使用，方法内 Set/Wait，不保留 token |
+
+H 入口/出口只保留 ID4、6 的上述两个持续 token；最终 HV2 跳过时不改变它们。
+空 token 行也必须走原有事件协议，不能引入未配对的早退。
+初始化使用 ID5 闭环，不依赖 O 域 preset。跨核 mode-`0x2` flag 编号及其消费方不变。
+HV1 在 `Vec1PostVF` 最后读取 H_DIRECT 并完成 V→MTE3 依赖后，才发布
+`hv1VUpdateReadyForHc2`，防止 HC2 Fixpipe 提前覆盖同一槽。
+
+AIV 顺序为 `初始化 → mask/OV1 → O→H fence → HV1 → HV2 → H→O fence → OV2`。
+每个 fence 配对 `MTE2_V`，执行 `PipeBarrier<PIPE_V>`，再配对 `V_MTE3`、
+`MTE3_V`、`MTE3_MTE2`，将前阶段的读、计算、写队列交接给后阶段；不用全核屏障。
+HV2 跳过仍执行 H→O fence，以覆盖 HV1 输出。OV2 内部 token drain 后再执行 O fence，
+随后发布 chunk-finished；下一轮 mask 重建之前也执行 O fence。
+
+以下区间为每个 AIV 的最大实际访问跨度，单位 KiB，右端不含：
+
+| UB view | 最大区间 | 存活期/复用约束 |
+| --- | --- | --- |
+| 初始化状态 staging | [32,64) | 首 chunk 前；返回前输出完成 |
+| H calc | [0,32) | HV1/HV2；覆盖 O mask/base，需阶段 fence |
+| H u/V_new/VUpdate | [64,80) | HV1 内按原流水复用 |
+| H input/低精度输出 | [80,96) | HV2 内按原流水复用 |
+| H gate/input/last | [96,100) | HV1/HV2；保留区仍为 [96,117) |
+| H_DIRECT | [135,199) | HC1/HC2 Fixpipe；HV1/HV2 读取，FP32 final 写回最多 [135,167) |
+| O mask/base | [0,71) | OV1/OV2；OV1 与 HC1 并发时不覆盖 H_DIRECT |
+| OV1 a/out/out_half | [199,239) | 内部 alias；与 HC1/HC2 写入区不重叠 |
+| OV2 V/H work ping | [71,103)/[103,135) | OV2 的 GM staging/gated H |
+| OV2 V/H work pong | [135,167)/[167,199) | 仅 H→O fence 后可覆盖 H_DIRECT |
+| OV2 out FP32/low ping | [199,215)/[215,223) | 内部每 32 行分段 |
+| OV2 out FP32/low pong | [223,239)/[239,247) | 内部翻转 ping/pong，最高访问终点 247 KiB |
+
+旧 H update scratch [199,231) 和尾块地址常量不是当前 driver 的活动 view。
+实际容量为 `247 KiB < 248 KiB` 保留边界；布局静态断言检查容量、OV1 与
+Fixpipe 并发区间、OV2 输出 ping/pong 不重叠及 pong work 对 H_DIRECT 的复用范围。
+下一 HC1 受 chunk-finished 约束，不能与上一 OV2 覆盖 H_DIRECT 并发。
+离线回归检查事件状态与源码交接顺序，不代替硬件流水线/跨核代次验证。
 
 ## 4. TilingData ABI
 

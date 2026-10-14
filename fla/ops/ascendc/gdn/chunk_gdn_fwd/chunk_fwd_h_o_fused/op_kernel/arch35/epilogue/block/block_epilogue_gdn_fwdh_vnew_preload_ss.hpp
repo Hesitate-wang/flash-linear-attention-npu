@@ -213,7 +213,7 @@ public:
         AscendC::GlobalTensor<GElementInput> gInput,
         AscendC::GlobalTensor<UElementInput> uInput,
         AscendC::GlobalTensor<float> wsInput,
-        uint32_t chunkSize,
+        uint32_t blockTokens,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag hc1WhReady,
@@ -223,7 +223,7 @@ public:
         bool storeFinalState
     )
     {
-        uint32_t mActual = chunkSize;
+        uint32_t mActual = blockTokens;
         uint32_t nkActual = kHeadDim;
         uint32_t nvActual = vHeadDim;
 
@@ -266,10 +266,10 @@ public:
         // The shared V output slot is reused once for VUpdate and again for
         // V_new.  The previous chunk's MTE3 read must finish before this chunk
         // starts writing that slot.
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT);
         AscendC::DataCopy(uUbTensor, uInputThisSubBlock, mActualThisSubBlock * nvActual);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
         AscendC::Cast(calcUbTensor, uUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
 
         if constexpr(std::is_same<GElementInput, float>::value) {
@@ -281,8 +281,8 @@ public:
             AscendC::DataCopyPadParams gUbPadParams{false, 0, 0, 0};
             AscendC::DataCopyPad(gInputUbTensor, gInputThisSubBlock, gUbParams, gUbPadParams);
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID3);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID3);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_SCALAR);
         if constexpr(!std::is_same<GElementInput, float>::value) {
             AscendC::Cast(gUbTensor, gInputUbTensor, AscendC::RoundMode::CAST_NONE, mActual);
         }
@@ -304,22 +304,22 @@ public:
         );
 
 
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
         AscendC::DataCopy(vnewdecayOutputThisSubBlock, vNewDecayUbTensor, mActualThisSubBlock * nvActual);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-
-        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT);
 
         Vec1PostVF(
             (__ubuf__ VElementOutput*)vNewOutputUbTensor.GetPhyAddr(), (__ubuf__ float*)wsUbTensor.GetPhyAddr(), (__ubuf__ float*)calcUbTensor.GetPhyAddr(),
             mActualThisSubBlock, nvActual
         );
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_TRANSFER);
         AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, mActualThisSubBlock * nvActual);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        // HC2 overwrites H_DIRECT, so release it only after Vec1PostVF's last read.
+        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(GDN::CHUNK_FWD_HO_FUSED_EVENT_H_OUTPUT);
         // Single-slot fused schedule: H and O share one core, so V_new readiness
         // is carried by the driver's 0x2 tokens (hv1VUpdateReadyForHc2 / ov1MaskAndHv1VNewReadyForOc3) and no
         // mode-0 cross-core H/O rendezvous happens here.

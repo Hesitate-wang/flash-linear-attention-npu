@@ -1,5 +1,52 @@
 # 开发阶段验证记录
 
+## 2026-10-14 MODE2 H/O Local Event 隔离与 UB 交接
+
+- H single-slot epilogue 的 local ID0-3 映射为具名 ID4-7；O 仍使用 ID0-3。
+  driver 只 preset/drain `MTE3_V(4)`、`MTE3_MTE2(6)`，初始化 ID5 全部闭环。
+- O→H 使用 ID3、H→O 使用 ID7 的私有 fence，配对 MTE2/V/MTE3 依赖；
+  覆盖 OV1→HV1、HV2/跳过→OV2、OV2→chunk-finished 及下一 mask 重建。
+  未改共享 O/MODE1 epilogue、host tiling、公开 ABI、实际 shape 或数学公式。
+- HV1 的 HC2-ready 通知移到最后一次 H_DIRECT 读取之后；flag ID、消费者及
+  每 chunk 生产次数不变。OV2 pong work 仅在 H fence 后复用 H_DIRECT。
+- 按实际 view 修正 UB 注释：HV2 低精度 staging 为 [80,96) KiB，FP32 final
+  写回使用 H_DIRECT；O 输出 pong 末端为 247 KiB，低于 248 KiB 保留边界。
+- 离线命令：`python3 -m unittest discover -s tests -p test_chunk_fwd_ho_mode2_sync.py -v`。
+  6 项通过：事件域隔离、初始化分支闭环、错误事件拒绝、多 chunk/最终状态跳过/
+  空行 token 状态、阶段顺序与 H_DIRECT 释放、UB 区间/实际尾块跨度。
+  事件模型读取真实 Set/Wait 和分支，以逻辑 token 检查重复 Set/无生产者 Wait；
+  H 条件使用保守分支超集，O 模拟内部 32 行分段与 ping/pong 翻转。
+  UB 检查结合区间与源码交接顺序，不是硬件队列调度或跨核协议仿真。
+- `clang++ -std=c++17 -x c++ -fsyntax-only` 编译 single-slot UB 布局头通过，
+  布局容量/区间静态断言成立；`git diff --check` 通过。此命令未编译 Ascend kernel。
+- 本机无 CANN/`ccec`、Ascend NPU；无法运行设备编译、ATK 精度、MODE1 设备回归
+  或 60 秒超时验收。当前状态仅为代码修改与离线检查通过，不能认定死锁已获设备验证。
+
+设备验收待办：A5 FP16/BF16、支持的 gate/state dtype、initial/final 四组合、
+单/多 chunk、chunk64/128 和尾块 1/31/32/33/63/65/127、MODE2 核数边界；比较
+O、H、V_new、final state，并重复多 chunk 检查事件代次。单次 kernel 超过 60 秒
+判失败并终止、记录配置；同时回归 MODE1。Cube 现有一次 preset/drain 生命周期
+保持工作区版本，本次未对其作硬件验证。
+
+## 2026-10-14 MODE2 统一 preload 与 H stage 内联
+
+- `gdn_fwd_ho_fused_kernel.hpp` 直接持有 H 的 MMAD、epilogue、UB tensor 和
+  stage 方法，不再包含或实例化 `GDNFwdHPreloadSingleSlot`；原 helper 文件保留。
+- 五个矩阵统一使用 `MmadPingpongTlaPreload`。公共 BlockMmad 新增
+  `operator()(A, B, C, actualShape)`，共享主体以 `EmptyClass` 在编译期去除
+  `vecDone` 等待；原带 flag/readyFlagId/bias 的签名保持不变。
+- OC1/OC2/OC3 使用无 flag 重载。driver 保留 chunk gate 和 OC3 的 ready wait；
+  HC1 完整 drain 后 OC2 才 preset 默认 L1/L0 events，取消原 HC1/OC2 分离预取重叠。
+- H 和 O 的 shape 使用实际 `blockTokens`，H 向量 stage 继续传实际长度；未增加
+  尾块专用路径，未修改公开接口、host tiling 或 MODE1 调度。
+- 静态搜索确认目标 kernel 不再引用 helper、pipelined MMAD 或分段预取 API；
+  `git diff --check` 通过。本机无 CANN/`ccec`；Clang 检查在缺少 Catlass 头文件处
+  停止，不能证明设备编译或精度通过。待 A5 构建及首/多 chunk、实际尾块、
+  initial/final state 组合的设备精度与同步回归。
+- 公共 preload header 的原签名调用方包括本算子 A5 MODE1 preload、旧通用 H
+  preload，以及 `chunk_gated_delta_rule_fwd_h` 的通用/A5 preload；原调用语义保留，
+  这些模板仍需随公共 header 改动进行设备编译回归。
+
 ## MODE2 saturated-core path
 
 - A5 natural-exp, fixed-length, V=128 and no-gk only: `floor(P/2) < T <= P`
