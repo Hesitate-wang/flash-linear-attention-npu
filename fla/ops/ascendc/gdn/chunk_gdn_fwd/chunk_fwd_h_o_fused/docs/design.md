@@ -175,7 +175,7 @@ FwdO 的每个 consumer 固定负责一个 head task，并在 stage0/stage1 之�
 
 ### 2.6 IB 通信专用 UB 区域
 
-A5 H/O kernel 统一使用 `chunk_fwd_h_o_fused_ub_layout.h` 声明 UB 布局。O 的数据区和 IB 通信区划分为：
+A5 普通 H/O kernel 的默认布局由 `chunk_fwd_h_o_fused_ub_layout.h` 声明；下列分区描述普通 A5 O/MODE1 epilogue 的地址合同。MODE2 fused epilogue 显式选择 `chunk_fwd_ho_fused_a5_single_slot_ub_layout.h` 中按临时变量存活期分配的独立数据区，通信保留区仍沿用相同边界：
 
 ```text
 [0 KiB,   71 KiB)  base region
@@ -190,11 +190,14 @@ A5 H/O kernel 统一使用 `chunk_fwd_h_o_fused_ub_layout.h` 声明 UB 布局。
 
 当前 arch35 exp2 专用 O 仍保留原有阶段边界同步；mode-0 H/O 握手只用于自然指数路径。
 
+MODE2 fused layout 的完整变量区间、跨阶段 alias 和交接条件见下方
+“MODE2 Local Event 与 UB 生命周期”。普通 O epilogue 使用默认构造参数，不读取该 fused layout。
+
 ## 3. Host tiling 约束
 
 MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`consumerCoreBase=T` 和 `scheduleMode=1`，要求 `T <= floor(P/2)`。A5 MODE2 在 `floor(P/2) < T <= P` 时设置 `activeCoreNum=T`、`executionMode=2` 和 `singleCoreTaskNum=T`，producer/consumer 分区字段置零以避免误入 MODE1 handoff。当前 MODE2 限定自然指数、定长、V=128、无 gk；不支持的 saturated-range 输入显式失败。两种路径均拒绝变长 `cuSeqlens`/`chunkIndices`。
 
-MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `hv2HReadyForHc1`（供 HC1 消费）；之后每个 HV2 完成重新发布该信号。每 chunk 的依赖为：AIC `OC1 -> HC1(wait hv2HReadyForHc1) -> OC2 -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。HC1 已在加载 H 前消费 H-ready 信号，顺序执行的 OC2 使用同一份 H，无需再次等待。尾块 HC1/OC2 由上一 chunk 的完成信号保护。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
+MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `hv2HReadyForHc1`（供 HC1 消费）；非尾块 HV2 完成后才发布下一代信号。每 chunk 的依赖为：AIC `OC1 -> HC1(wait hv2HReadyForHc1) -> OC2 -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。HC1 已在加载 H 前消费 H-ready 信号，顺序执行的 OC2 使用同一份 H，无需再次等待。尾块不发布仅供下一 chunk 消费的 `hv2HReadyForHc1` 和 `ov2ChunkFinished`，避免 kernel 结束时遗留跨核 token。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
 MODE2 所有 chunk（包括尾块）统一按实际 `blockTokens` 组装 MMAD shape 和 Vector 长度，不设尾块专用执行分支。H 的四个 stage、成员和初始化直接归入 `gdn_fwd_ho_fused_kernel.hpp`，HC1/HC2 使用私有 single-slot preload epilogue 和共享 H_DIRECT UB 输出。五个矩阵均使用 `MmadPingpongTlaPreload`：H 保留带 `vecDone` 的重载；OC1/OC2/OC3 调用不带 `vecDone` 的四参数重载，跨核等待由 driver 的 chunk gate 和 OC3 ready token 保证。HC1 使用 L1 [0,128 KiB)，OC2 使用 [128,256 KiB)，OC3 保持 [192,320 KiB)；OC2 执行完整 preload 调用，不再单独提前预取。当前工作区的 Cube event 生命周期为循环前一次 preset、循环后一次 drain；本次 Vector 事件隔离不修改该生命周期。OC2 完成后 OC3 才复用重叠 L1 地址。最终状态无需保存时的 HC2/HV2 跳过属于状态输出条件，不是尾块 shape 分支。
 
@@ -205,7 +208,7 @@ O 使用 ID0-3，两个 H single-slot epilogue 将原 ID0-3 完整映射到 ID4-
 
 | 所有者 | ID | 协议 |
 | --- | --- | --- |
-| O epilogue | 0-3 | 保留调用内 Set/Wait；OV2 在返回前 drain 输出 ping/pong token |
+| O epilogue | 0-3 | 保留调用内 Set/Wait；MODE2 OV2 使用单输出槽并在每段复用前等待 MTE3 |
 | H output | 4 | `MTE3_V` 在 driver preset，HV1/HV2 wait 后 republish，退出 drain |
 | H transfer/init | 5 | epilogue 调用内配对；初始化返回前 drain MTE3，不遗留 token |
 | H input | 6 | `MTE3_MTE2` 在 driver preset，HV2 wait 后 republish，退出 drain |
@@ -221,30 +224,38 @@ HV1 在 `Vec1PostVF` 最后读取 H_DIRECT 并完成 V→MTE3 依赖后，才发
 AIV 顺序为 `初始化 → mask/OV1 → O→H fence → HV1 → HV2 → H→O fence → OV2`。
 每个 fence 配对 `MTE2_V`，执行 `PipeBarrier<PIPE_V>`，再配对 `V_MTE3`、
 `MTE3_V`、`MTE3_MTE2`，将前阶段的读、计算、写队列交接给后阶段；不用全核屏障。
-HV2 跳过仍执行 H→O fence，以覆盖 HV1 输出。OV2 内部 token drain 后再执行 O fence，
-随后发布 chunk-finished；下一轮 mask 重建之前也执行 O fence。
+HV2 跳过仍执行 H→O fence，以覆盖 HV1 输出。OV2 内部 token drain 后再执行 O fence；
+仅非尾块随后发布 `ov2ChunkFinished`，供下一轮 AIC chunk gate 消费。尾块不发布该 token，
+下一轮 mask 重建之前的 O fence 只在确有下一轮时才会执行。
 
-以下区间为每个 AIV 的最大实际访问跨度，单位 KiB，右端不含：
+AIC 在每轮开始先等待上一轮的 `ov2ChunkFinished`，再发射 OC1/HC1/OC2/HC2/OC3。
+不能把该等待移到 HC1 之后：AIV 的 OV2 等待当前轮 OC2/OC3 ready，而 OC2/OC3
+由 AIC 在 HC1 后产生；若 AIC 先等 OV2 完成再发 OC2/OC3，会形成环形等待。同时，
+入口 chunk gate 保证下一轮 HC1 不会与上一轮 OV2 对 `H_DIRECT` 的复用并发。
 
-| UB view | 最大区间 | 存活期/复用约束 |
+MODE2 的 O epilogue 显式启用统一 UB layout；普通 A5 O kernel 使用默认构造分支，
+保留原地址和行为。以下区间为每个 AIV 的实际最大访问跨度，单位 KiB，右端不含：
+
+| 临时变量 | 区间 | 存活期/复用约束 |
 | --- | --- | --- |
-| 初始化状态 staging | [32,64) | 首 chunk 前；返回前输出完成 |
-| H calc | [0,32) | HV1/HV2；覆盖 O mask/base，需阶段 fence |
-| H u/V_new/VUpdate | [64,80) | HV1 内按原流水复用 |
-| H input/低精度输出 | [80,96) | HV2 内按原流水复用 |
-| H gate/input/last | [96,100) | HV1/HV2；保留区仍为 [96,117) |
-| H_DIRECT | [135,199) | HC1/HC2 Fixpipe；HV1/HV2 读取，FP32 final 写回最多 [135,167) |
-| O mask/base | [0,71) | OV1/OV2；OV1 与 HC1 并发时不覆盖 H_DIRECT |
-| OV1 a/out/out_half | [199,239) | 内部 alias；与 HC1/HC2 写入区不重叠 |
-| OV2 V/H work ping | [71,103)/[103,135) | OV2 的 GM staging/gated H |
-| OV2 V/H work pong | [135,167)/[167,199) | 仅 H→O fence 后可覆盖 H_DIRECT |
-| OV2 out FP32/low ping | [199,215)/[215,223) | 内部每 32 行分段 |
-| OV2 out FP32/low pong | [223,239)/[239,247) | 内部翻转 ping/pong，最高访问终点 247 KiB |
+| 初始状态/H handoff | `[0,32)` / `[32,64)` | 初始化依次读写；初始写回结束后由后续变量复用 |
+| causal mask / H calc | `[0,16)` / `[0,32)` | OV1 mask 先用；O→H fence 后 H calc 覆盖 mask |
+| QK left/up/gcomp/BRC scratch | `[16,36)` / `[36,52)` / `[52,53)` / `[53,69)` | OV1 同时存活；OV1→HV1 fence 后整段转作 H/OV2 临时区 |
+| U/V_NEW/VUpdate / H tile | `[32,48)` / `[48,64)` | HV1、HV2 依序使用；不与初始化 staging 同时存活 |
+| QK a/out/out_low | `[71,87)` / `[87,103)` / `[103,111)` | OV1 活跃 scratch；与并发 Fixpipe 区分离；OV1 完成后可复用 |
+| H_DIRECT | `[117,181)` | AIC HC1/HC2 Fixpipe 目标，AIV 后续读取；HV1 最后读取完成前不可覆盖 |
+| gate / G_LAST | `[181,182)` | OV1/HV1 gate 与 HV2 G_LAST 使用同一 float 槽；HV1→HV2 顺序保证不同时存活 |
+| gate input | `[182,183)` | 低精度输入暂存；与 gate float 分槽，覆盖 O/H 所需 dtype |
+| OV2 A/H work | `[0,16)` / `[16,48)` | 单份 A 16 KiB、H 32 KiB；每次处理一个 32 行片 |
+| OV2 output FP32/low | `[48,64)` / `[64,72)` | 单份；下一个片段开始前等待前一段 MTE3 写回完成 |
 
-旧 H update scratch [199,231) 和尾块地址常量不是当前 driver 的活动 view。
-实际容量为 `247 KiB < 248 KiB` 保留边界；布局静态断言检查容量、OV1 与
-Fixpipe 并发区间、OV2 输出 ping/pong 不重叠及 pong work 对 H_DIRECT 的复用范围。
-下一 HC1 受 chunk-finished 约束，不能与上一 OV2 覆盖 H_DIRECT 并发。
+`[0,117)` 按 `初始化 → OV1 → HV1/HV2 → OV2` 依次复用；QK scratch 的释放由
+OV1→HV1 fence 保护。`[117,181)` 在 OV1 时专供 H_DIRECT，HV2（包括被跳过时的
+对应 fence）结束后才由 OV2 work 覆盖。gate/G_LAST 的共享只利用 H 内 HV1→HV2
+顺序；gate float 和低精度 gate input 不互相覆盖。OV2 每次复用输出槽前等待异步
+GM DataCopy 完成，不保留 ping/pong。最高活动终点为 `183 KiB`，低于 `[248,256) KiB`
+通信保留区；下一 HC1 仍由 chunk-finished 约束，不能与上一 OV2 并发覆盖 H_DIRECT。
+布局静态断言检查并发不相交、变量容量、顺序 alias 关系、输出双缓冲和峰值。
 离线回归检查事件状态与源码交接顺序，不代替硬件流水线/跨核代次验证。
 
 ## 4. TilingData ABI

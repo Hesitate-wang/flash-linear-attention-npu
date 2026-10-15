@@ -17,6 +17,7 @@
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
 #include "../../chunk_fwd_h_o_fused_ub_layout.h"
+#include "../../chunk_fwd_ho_fused_a5_single_slot_ub_layout.h"
 #include "../../../chunk_fwd_h_o_fused_sync.h"
 // regbase.hpp 自身无 include guard，本算子 kernel 会同时包含 qkmask 与 output 两个
 // epilogue 头，此处用算子私有宏防止同一编译单元内重复包含（重定义 constexpr/inline 符号）
@@ -242,7 +243,7 @@ public:
     static constexpr uint32_t MULTIPLIER = 2;
 
     CATLASS_DEVICE
-    BlockEpilogue(Arch::Resource<ArchTag> &resource)
+    BlockEpilogue(Arch::Resource<ArchTag> &resource, bool useFusedUbLayout = false)
     {
         // UB layout (l0c2ub, shared contract with the kernel and qkmask epilogue —
         // see docs/agents/chunk_fwd_o_l0c2ub_ub2l1_design.md §4.1):
@@ -286,6 +287,39 @@ public:
         constexpr uint32_t G_UB_TENSOR_OFFSET = SHARE_UB_TENSOR_OFFSET + FLOAT_UB_TENSOR_SIZE;
         constexpr uint32_t G_HALF_UB_TENSOR_OFFSET = G_UB_TENSOR_OFFSET + G_FLOAT_UB_TENSOR_SIZE;
 
+        if (useFusedUbLayout) {
+            maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_MASK_OFFSET);
+            gbrcLeftcastUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_LEFT_OFFSET);
+            gbrcUpUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_UP_OFFSET);
+            shareUbTensor = resource.ubBuf.template GetBufferByByte<uint8_t>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_BROADCAST_SCRATCH_OFFSET);
+            gUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_O_GATE_OFFSET);
+            gUbFPTensorPing = resource.ubBuf.template GetBufferByByte<GElementInput>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_O_GATE_INPUT_OFFSET);
+            gUbBFTensorPing = gUbFPTensorPing;
+            aUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET);
+            hUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_H_OFFSET);
+            aUbTensorPong = aUbTensorPing;
+            hUbTensorPong = hUbTensorPing;
+            outUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_O_OUT_OFFSET);
+            outUbFPTensorPing = resource.ubBuf.template GetBufferByByte<HElementOutput>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_O_OUT_LOW_OFFSET);
+            outUbBFTensorPing = outUbFPTensorPing;
+            outUbTensorPong = outUbTensorPing;
+            outUbFPTensorPong = outUbFPTensorPing;
+            outUbBFTensorPong = outUbBFTensorPing;
+            gUbTensorPong = gUbTensorPing;
+            gUbFPTensorPong = gUbFPTensorPing;
+            gUbBFTensorPong = gUbBFTensorPing;
+        } else {
+
         // Vec scratch above the slot region, time-shared with Vec1's a/out tiles
         // (Vec1 and Vec2 never run concurrently within one AIV subBlock).
         // out fp32 + out half need REAL ping/pong copies: the MTE3 DataCopy that
@@ -323,6 +357,7 @@ public:
         aUbTensorPong = resource.ubBuf.template GetBufferByByte<float>(UB_V_WORK_PONG_OFFSET);
         hUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(UB_H_WORK_PING_OFFSET);
         hUbTensorPong = resource.ubBuf.template GetBufferByByte<float>(UB_H_WORK_PONG_OFFSET);
+        }
     }
     CATLASS_DEVICE
     ~BlockEpilogue()
@@ -859,7 +894,8 @@ public:
         uint32_t &pingpongFlag,
         Arch::CrossCoreFlag cube2Ready,
         Arch::CrossCoreFlag cube3Ready,
-        Arch::CrossCoreFlag* releaseFlag)
+        Arch::CrossCoreFlag* releaseFlag,
+        bool singleUbBuffer = false)
     {
         const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         const uint32_t rowsPerSubBlock = CeilDiv(rows, AscendC::GetSubBlockNum());
@@ -874,7 +910,9 @@ public:
         }
 
         AscendC::ResetMask();
-        AscendC::LocalTensor<float> gatedH = pingpongFlag == 0 ? hUbTensorPing : hUbTensorPong;
+        AscendC::LocalTensor<float> gatedH = singleUbBuffer
+            ? hUbTensorPing
+            : (pingpongFlag == 0 ? hUbTensorPing : hUbTensorPong);
         AscendC::LocalTensor<float> gateUb = gUbTensorPing;
         AscendC::LocalTensor<GElementInput> gateLowUb = gUbFPTensorPing;
         AscendC::DataCopyParams gateParams{
@@ -916,22 +954,29 @@ public:
 
         Arch::CrossCoreWaitFlag(cube3Ready);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        if (!singleUbBuffer) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        }
         for (uint32_t row = rowBegin; row < rowEnd;) {
             const uint32_t tileRows = rowEnd - row < 32 ? rowEnd - row : 32;
-            AscendC::LocalTensor<float> attnUb = pingpongFlag == 0 ? aUbTensorPing : aUbTensorPong;
-            AscendC::LocalTensor<float> outUb = pingpongFlag == 0 ? outUbTensorPing : outUbTensorPong;
+            const uint32_t bufferIndex = singleUbBuffer ? 0 : pingpongFlag;
+            if (singleUbBuffer) {
+                // Serialize segments before reusing the one output slot.
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            }
+            AscendC::LocalTensor<float> attnUb = bufferIndex == 0 ? aUbTensorPing : aUbTensorPong;
+            AscendC::LocalTensor<float> outUb = bufferIndex == 0 ? outUbTensorPing : outUbTensorPong;
             AscendC::LocalTensor<HElementOutput> outLowUb =
-                pingpongFlag == 0 ? outUbFPTensorPing : outUbFPTensorPong;
+                bufferIndex == 0 ? outUbFPTensorPing : outUbFPTensorPong;
 
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + bufferIndex);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + bufferIndex);
             AscendC::DataCopy(attnUb, attnInput[row * cols], tileRows * cols);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + bufferIndex);
             if (releaseFlag && row + tileRows == rowEnd) {
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE2>(*releaseFlag);
             }
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + bufferIndex);
             {
                 auto outAddr = reinterpret_cast<uint64_t>(outUb.GetPhyAddr());
                 auto hAddr = reinterpret_cast<uint64_t>(gatedH.GetPhyAddr()) +
@@ -941,22 +986,32 @@ public:
                                  (__ubuf__ float*)aAddr, tileRows, cols, scale);
                 AscendC::PipeBarrier<PIPE_V>();
             }
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
+            if (!singleUbBuffer) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + bufferIndex);
+            }
             if constexpr (std::is_same<HElementOutput, half>::value) {
                 AscendC::Cast(outLowUb, outUb, AscendC::RoundMode::CAST_NONE, tileRows * cols);
             } else {
                 AscendC::Cast(outLowUb, outUb, AscendC::RoundMode::CAST_RINT, tileRows * cols);
             }
             AscendC::PipeBarrier<PIPE_V>();
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + bufferIndex);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + bufferIndex);
             CopyOutputToGm(output[row * outputStride], outLowUb, tileRows, cols, outputStride);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
-            pingpongFlag = 1 - pingpongFlag;
+            if (singleUbBuffer) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            } else {
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + bufferIndex);
+            }
+            if (!singleUbBuffer) {
+                pingpongFlag = 1 - pingpongFlag;
+            }
             row += tileRows;
         }
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        if (!singleUbBuffer) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        }
     }
 
 private:

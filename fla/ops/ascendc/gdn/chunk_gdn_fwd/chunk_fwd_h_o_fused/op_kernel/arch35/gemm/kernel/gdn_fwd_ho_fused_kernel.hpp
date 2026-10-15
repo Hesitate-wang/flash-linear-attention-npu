@@ -324,9 +324,9 @@ public:
         gmOHWorkspace.SetGlobalBuffer((__gm__ ElementOinter *)(user + oHWorkspaceOffset));
 
         ubVWork = resource.ubBuf.template GetBufferByByte<ElementVWork>(
-            GDN::CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET);
+            GDN::CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET);
         ubHUpdate = resource.ubBuf.template GetBufferByByte<ElementHWork>(
-            GDN::CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET);
+            GDN::CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET);
 
         uint32_t mixedCoreIdx = 0;
         if ASCEND_IS_AIV {
@@ -479,7 +479,6 @@ private:
 
             // ---- HC1: W @ h[i] ------------------------------------------
             StageC1(h);
-
             // ---- OC2: Q @ h[i] -> FP32 oH workspace (GM) ----------------
             // HC1 already waited for this H before loading it.
             {
@@ -573,12 +572,12 @@ private:
         const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         const uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
-        EpilogueOQkmask epilogueQkmask(resource);
-        EpilogueOOutput epilogueOutput(resource);
+        EpilogueOQkmask epilogueQkmask(resource, true);
+        EpilogueOOutput epilogueOutput(resource, true);
 
         AscendC::LocalTensor<float> maskUbTensor =
             resource.ubBuf.template GetBufferByByte<float>(
-                GDN::CHUNK_FWD_HO_FUSED_UB_O_MASK_OFFSET);
+            GDN::CHUNK_FWD_HO_FUSED_UB_VAR_MASK_OFFSET);
 
         WriteInitialHandoffState(subBlockIdx, subBlockNum);
         // Only these two H tokens persist across stage calls. O owns ids 0-3.
@@ -615,7 +614,10 @@ private:
             // stored; both sides take the same decision.
             const bool needStage2 = NeedStage2(h.isFinalState);
             StageV2(h, needStage2);
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv2HReadyForHc1);
+            // HC1 of the next chunk is the only consumer of this token.
+            if (!scheduler.IsFinalChunk()) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv2HReadyForHc1);
+            }
 
             // ---- OV2: (exp(g) * oH + oV) * scale -> O --------------------
             // OV2 pong work reuses H_DIRECT; also fence HV1 if HV2 was skipped.
@@ -624,12 +626,16 @@ private:
                 gmO[o.ovOffset], gmG[o.gOffset],
                 gmOVWorkspace[o.hvWorkOffset], gmOHWorkspace[o.hvWorkOffset],
                 scale, o.blockTokens, o.vBlockDim, vHeadDim, pingpongFlag,
-                oc2QhReady, oc3AttentionVReady, nullptr);
+                oc2QhReady, oc3AttentionVReady, nullptr, true);
             pingpongFlag = 0;  // single slot
 
             // OV2 finished: allow the next chunk to reuse all single-slot buffers.
             FenceOToH();
-            Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished);
+            // The next AIC loop iteration consumes this token; do not leave a
+            // final generation pending after the task's last chunk.
+            if (!scheduler.IsFinalChunk()) {
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished);
+            }
 
             if (!scheduler.Next()) {
                 break;
@@ -663,10 +669,10 @@ private:
 
         AscendC::LocalTensor<ElementInitialState> stateUb =
             resource.ubBuf.template GetBufferByByte<ElementInitialState>(
-                GDN::CHUNK_FWD_HO_FUSED_UB_H_CALC_OFFSET);
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_INIT_STATE_OFFSET);
         AscendC::LocalTensor<ElementH> hUb =
             resource.ubBuf.template GetBufferByByte<ElementH>(
-                GDN::CHUNK_FWD_HO_FUSED_UB_H_SLOT_OFFSET);
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_INIT_H_OFFSET);
 
         if (useInitialState) {
             if constexpr (!std::is_same<ElementInitialState, ElementH>::value) {

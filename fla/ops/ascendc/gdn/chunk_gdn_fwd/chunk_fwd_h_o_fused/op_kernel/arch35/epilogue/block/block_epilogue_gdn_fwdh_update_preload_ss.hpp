@@ -50,14 +50,13 @@ public:
     BlockEpilogue(Arch::Resource<ArchTag> &resource)
     {
 
-        constexpr uint32_t CALC_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_CALC_OFFSET;
-        constexpr uint32_t SLOT_BUF_0_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_DIRECT_OFFSET;
-        constexpr uint32_t SLOT_BUF_1_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_STAGING_OFFSET + 16U * 1024U;
-        constexpr uint32_t SLOT_BUF_2_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_STAGING_OFFSET + 32U * 1024U;
-        constexpr uint32_t SLOT_BUF_3_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_STAGING_OFFSET + 48U * 1024U;
-        constexpr uint32_t SLOT_G_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_SMALL_OFFSET + 2U * 1024U;
-        constexpr uint32_t SLOT_G_SUB_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_SMALL_OFFSET + 2U * 1024U;
-        constexpr uint32_t SLOT_G_INPUT_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_SMALL_OFFSET + 3U * 1024U;
+        constexpr uint32_t CALC_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_CALC_OFFSET;
+        constexpr uint32_t SLOT_BUF_0_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET;
+        constexpr uint32_t SLOT_BUF_2_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_V_TILE_OFFSET;
+        constexpr uint32_t SLOT_BUF_3_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_H_TILE_OFFSET;
+        constexpr uint32_t SLOT_G_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_GATE_OFFSET;
+        constexpr uint32_t SLOT_G_SUB_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_OFFSET;
+        constexpr uint32_t SLOT_G_INPUT_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_OFFSET;
 
 
         calcUbTensor = resource.ubBuf.template GetBufferByByte<float>(CALC_BUF_OFFSET);

@@ -1,5 +1,31 @@
 # 开发阶段验证记录
 
+## 2026-10-15 MODE2 UB 临时变量统一布局
+
+- MODE2 fused UB 从 H/O 阶段分区改为变量/生存期布局；共享 `gate`/`G_LAST` 地址，
+  mask、初始化 staging、QK scratch、H_DIRECT 与 OV2 work/output buffer 按阶段交接复用。
+- MODE2 OV2 work/output 改为单份 UB，分段开始前等待上一段 MTE3 写回完成；普通 O
+  路径保持原 ping/pong。H_DIRECT 仅在 H→O fence 后允许 OV2 work 复用，OV1 并发期仍与
+  Fixpipe/QK scratch 分离。最高活动地址为 183 KiB，低于 `[248,256) KiB` 通信保留区。
+- 普通 A5 O epilogue 默认仍使用原 layout；仅 fused MODE2 通过显式构造参数使用新布局。
+  MODE1 调用点、计算路径与共享 O epilogue 行为未改。
+- `python3 -m unittest discover -s tests -p test_chunk_fwd_ho_mode2_sync.py -v`：6 项通过，
+  覆盖事件模型、交接次序、变量容量/alias、单缓冲写回等待及 footprint 上界。
+- `clang++ -std=c++17 -x c++ -fsyntax-only` 对 fused UB 布局头检查通过；
+  `git diff --check` 通过。该检查不编译 Ascend kernel。
+- 本机无 CANN/`ccec` 和 A5 设备；设备构建、ATK 精度、MODE1 设备回归及多 chunk 超时
+  验收未执行，不据此宣称设备死锁风险已经验证消除。
+
+## 2026-10-15 AIC chunk gate 顺序修正
+
+- 静态依赖检查发现，若 AIC 将 `ov2ChunkFinished` 等待放在 HC1 后，会形成环：AIC
+  等待 AIV 的 OV2 完成，AIV 的 OV2 又等待 AIC 后续产生的 OC2/OC3 ready。
+  HC1 还会与上一轮复用 `H_DIRECT` 的 OV2 并发。
+- 已将等待恢复到 AIC 每轮入口、OC1/HC1 之前；新增源码顺序回归，约束 gate 先于
+  OC1、HC1，且每轮只消费一次该 flag。
+- 这是静态依赖图结论；本机无 CANN/`ccec` 和 A5 设备，尚未完成设备编译及多 chunk
+  超时验证。
+
 ## 2026-10-14 MODE2 H/O Local Event 隔离与 UB 交接
 
 - H single-slot epilogue 的 local ID0-3 映射为具名 ID4-7；O 仍使用 ID0-3。
@@ -9,13 +35,15 @@
   未改共享 O/MODE1 epilogue、host tiling、公开 ABI、实际 shape 或数学公式。
 - HV1 的 HC2-ready 通知移到最后一次 H_DIRECT 读取之后；flag ID、消费者及
   每 chunk 生产次数不变。OV2 pong work 仅在 H fence 后复用 H_DIRECT。
-- 按实际 view 修正 UB 注释：HV2 低精度 staging 为 [80,96) KiB，FP32 final
-  写回使用 H_DIRECT；O 输出 pong 末端为 247 KiB，低于 248 KiB 保留边界。
+- 当时按旧布局记录的 HV2 低精度 staging `[80,96)` KiB 与 O 输出 pong 247 KiB
+  已由 2026-10-15 变量生命周期布局取代；当前 MODE2 fused 活动区终点为 183 KiB。
 - 离线命令：`python3 -m unittest discover -s tests -p test_chunk_fwd_ho_mode2_sync.py -v`。
-  6 项通过：事件域隔离、初始化分支闭环、错误事件拒绝、多 chunk/最终状态跳过/
-  空行 token 状态、阶段顺序与 H_DIRECT 释放、UB 区间/实际尾块跨度。
+  8 项通过：事件域隔离、初始化分支闭环、错误事件拒绝、多 chunk/最终状态跳过/
+  空行 token 状态、阶段顺序与 H_DIRECT 释放、尾块不发布下一 chunk 的 CrossCore token、
+  UB 区间/实际尾块跨度。
   事件模型读取真实 Set/Wait 和分支，以逻辑 token 检查重复 Set/无生产者 Wait；
-  H 条件使用保守分支超集，O 模拟内部 32 行分段与 ping/pong 翻转。
+  H 条件使用保守分支超集；MODE2 OV2 事件模型按单缓冲逐 32 行片段等待写回，
+  普通 O 路径仍使用原 ping/pong。
   UB 检查结合区间与源码交接顺序，不是硬件队列调度或跨核协议仿真。
 - `clang++ -std=c++17 -x c++ -fsyntax-only` 编译 single-slot UB 布局头通过，
   布局容量/区间静态断言成立；`git diff --check` 通过。此命令未编译 Ascend kernel。
@@ -54,8 +82,9 @@ O、H、V_new、final state，并重复多 chunk 检查事件代次。单次 ker
 - Dedicated MODE2 kernel/helper/epilogue files contain the single-slot path;
   MODE1 H/O kernels and shared MODE1 epilogues remain unchanged.
 - The local mode-`0x2` graph seeds `hv2HReadyForHc1` before chunk 0.
-  Each HV2 republishes it; OC2 follows HC1 and needs no second H-ready wait; OV2 waits for OC2/OC3; chunk completion is signaled
-  after OV2. Device checks still required: CANN build, one-/multi-chunk CPU and
+  Non-final HV2 republishes it; the final chunk omits both next-chunk tokens
+  (`hv2HReadyForHc1`, `ov2ChunkFinished`). OC2 follows HC1 and needs no second
+  H-ready wait; OV2 waits for OC2/OC3. Device checks still required: CANN build, one-/multi-chunk CPU and
   composed precision, initial/final-state combinations, and T boundary cases.
 - Local environment has no `ccec`/CANN toolchain or Ascend device; only static
   source checks are available here.

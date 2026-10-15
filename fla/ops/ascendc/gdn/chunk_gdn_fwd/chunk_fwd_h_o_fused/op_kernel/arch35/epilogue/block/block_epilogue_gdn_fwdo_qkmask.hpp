@@ -17,6 +17,7 @@
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
 #include "../../chunk_fwd_h_o_fused_ub_layout.h"
+#include "../../chunk_fwd_ho_fused_a5_single_slot_ub_layout.h"
 #include "../../../chunk_fwd_h_o_fused_sync.h"
 
 // regbase.hpp 自身无 include guard，本算子 kernel 会同时包含 qkmask 与 output 两个
@@ -222,7 +223,7 @@ public:
     static constexpr uint32_t MULTIPLIER = 2;
 
     CATLASS_DEVICE
-    BlockEpilogue(Arch::Resource<ArchTag> &resource)
+    BlockEpilogue(Arch::Resource<ArchTag> &resource, bool useFusedUbLayout = false)
     {
         // UB layout (ub2l1, shared contract with the kernel and output epilogue —
         // see docs/agents/chunk_fwd_o_l0c2ub_ub2l1_design.md §4.1):
@@ -260,6 +261,38 @@ public:
         constexpr uint32_t G_UB_TENSOR_OFFSET = SHARE_UB_TENSOR_OFFSET + FLOAT_UB_TENSOR_SIZE;
         constexpr uint32_t G_HALF_UB_TENSOR_OFFSET = G_UB_TENSOR_OFFSET + G_FLOAT_UB_TENSOR_SIZE;
 
+        if (useFusedUbLayout) {
+            maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_MASK_OFFSET);
+            gbrcLeftcastUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_LEFT_OFFSET);
+            gbrcUpUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_UP_OFFSET);
+            gcompUbTensor = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_GCOMP_OFFSET);
+            shareUbTensor = resource.ubBuf.template GetBufferByByte<uint8_t>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_BROADCAST_SCRATCH_OFFSET);
+            gUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_GATE_OFFSET);
+            gUbFPTensorPing = resource.ubBuf.template GetBufferByByte<GElementInput>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_GATE_INPUT_OFFSET);
+            gUbBFTensorPing = gUbFPTensorPing;
+            aUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_A_OFFSET);
+            outUbTensorPing = resource.ubBuf.template GetBufferByByte<float>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_OUT_OFFSET);
+            outUbFPTensorPing = resource.ubBuf.template GetBufferByByte<AElementOutput>(
+                GDN::CHUNK_FWD_HO_FUSED_UB_VAR_QK_OUT_LOW_OFFSET);
+            outUbBFTensorPing = outUbFPTensorPing;
+            gUbTensorPong = gUbTensorPing;
+            gUbFPTensorPong = gUbFPTensorPing;
+            gUbBFTensorPong = gUbBFTensorPing;
+            aUbTensorPong = aUbTensorPing;
+            outUbTensorPong = outUbTensorPing;
+            outUbFPTensorPong = outUbFPTensorPing;
+            outUbBFTensorPong = outUbFPTensorPing;
+        } else {
+
         constexpr uint32_t A_UB_TENSOR_OFFSET = UB_SLOT_REGION_END;
         constexpr uint32_t OUT_UB_TENSOR_OFFSET = A_UB_TENSOR_OFFSET + FLOAT_UB_TENSOR_SIZE;
         constexpr uint32_t OUT_HALF_UB_TENSOR_OFFSET = OUT_UB_TENSOR_OFFSET + FLOAT_UB_TENSOR_SIZE;
@@ -284,6 +317,7 @@ public:
         outUbTensorPong = outUbTensorPing;
         outUbFPTensorPong = outUbFPTensorPing;
         outUbBFTensorPong = outUbBFTensorPing;
+        }
     }
 
     CATLASS_DEVICE

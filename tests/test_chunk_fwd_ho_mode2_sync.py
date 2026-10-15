@@ -43,6 +43,24 @@ def events(text):
     return EVENT_RE.findall(text)
 
 
+def select_if(text, condition, keep_body):
+    pattern = re.compile(r"if\s*\(\s*" + re.escape(condition) + r"\s*\)")
+    while True:
+        match = pattern.search(text)
+        if not match:
+            return text
+        body, end = braced(text, match.end())
+        tail = text[end:]
+        otherwise = re.match(r"\s*else\s*", tail)
+        other_body = ""
+        tail_end = end
+        if otherwise:
+            other_body, other_end = braced(tail, otherwise.end())
+            tail_end = end + other_end
+        selected = body if keep_body else other_body
+        text = text[:match.start()] + selected + text[tail_end:]
+
+
 def expression(expr, constants, variables=None):
     names = dict(constants)
     names.update(variables or {})
@@ -128,6 +146,7 @@ class Mode2SyncTest(unittest.TestCase):
         cls.hv2 = method(source(BLOCK / "block_epilogue_gdn_fwdh_update_preload_ss.hpp"), "void operator()")
         cls.ov1 = method(source(BLOCK / "block_epilogue_gdn_fwdo_qkmask.hpp"), "void operator()")
         cls.ov2 = method(source(BLOCK / "block_epilogue_gdn_fwdo_output.hpp"), "void ProcessNarrowSplit(")
+        cls.aic = method(cls.kernel, "void ProcessAic()")
         cls.driver = method(cls.kernel, "void ProcessAiv()")
         cls.fence = events(method(cls.kernel, "void FenceVectorUbReuse()"))
 
@@ -169,20 +188,26 @@ class Mode2SyncTest(unittest.TestCase):
             return  # The empty-row path only consumes cross-core flags.
         loop = self.ov2.index("for (uint32_t row")
         body, end = braced(self.ov2, loop)
-        state.run(events(self.ov2[:loop]), pingpongFlag=0)
-        ping = 0
+        prefix = select_if(self.ov2[:loop], "!singleUbBuffer", False)
+        prefix = select_if(prefix, "singleUbBuffer", True)
+        body = select_if(body, "!singleUbBuffer", False)
+        body = select_if(body, "singleUbBuffer", True)
+        suffix = select_if(self.ov2[end:], "!singleUbBuffer", False)
+        suffix = select_if(suffix, "singleUbBuffer", True)
+        state.run(events(prefix), pingpongFlag=0, bufferIndex=0)
         for _ in range((rows + 31) // 32):
-            state.run(events(body), pingpongFlag=ping)
-            ping = 1 - ping
-        state.run(events(self.ov2[end:]), pingpongFlag=ping)
+            state.run(events(body), pingpongFlag=0, bufferIndex=0)
+        state.run(events(suffix), pingpongFlag=0, bufferIndex=0)
 
     def test_event_domains_and_closed_fences(self):
         for text in (self.hv1, self.hv2):
             self.assertNotIn("EVENT_ID", text)
             self.assertTrue(all(4 <= expression(e, self.values) <= 7 for _, _, e in events(text)))
         for text in (self.ov1, self.ov2):
-            self.assertTrue(all(0 <= expression(e, self.values, {"pingpongFlag": ping}) <= 3
-                                for _, _, e in events(text) for ping in (0, 1)))
+            self.assertTrue(all(0 <= expression(
+                e, self.values, {"pingpongFlag": ping, "bufferIndex": index}) <= 3
+                for _, _, e in events(text)
+                for ping, index in itertools.product((0, 1), repeat=2)))
         for event_id in (3, 7):
             state = EventState(self.values)
             state.ready = self.persistent().copy()
@@ -230,19 +255,16 @@ class Mode2SyncTest(unittest.TestCase):
         state.run([("SetFlag", "MTE3_V", "0")])
         with self.assertRaisesRegex(AssertionError, "duplicate Set"):
             state.run([("SetFlag", "MTE3_V", "0")])
-        # Reproduce the original H/O collision using O's actual entry preset.
+        # The serialized MODE2 output path requires a producer before reusing
+        # its single MTE3_V slot.
         loop = self.ov2.index("for (uint32_t row")
-        state = EventState(self.values)
-        state.run([("SetFlag", "MTE3_V", "0")])
-        with self.assertRaisesRegex(AssertionError, "duplicate Set"):
-            state.run(events(self.ov2[:loop]), pingpongFlag=0)
         state = EventState(self.values)
         with self.assertRaisesRegex(AssertionError, "Wait without producer"):
             state.run([("WaitFlag", "MTE3_V", "4")])
-        preset, _ = self.driver_events()
-        state.run(preset)
         with self.assertRaisesRegex(AssertionError, "Wait without producer"):
-            state.run(events(self.ov2[loop:]), pingpongFlag=0)
+            single_path = select_if(self.ov2[loop:], "!singleUbBuffer", False)
+            single_path = select_if(single_path, "singleUbBuffer", True)
+            state.run(events(single_path), pingpongFlag=0, bufferIndex=0)
 
     def test_stage_boundaries_and_direct_slot_release(self):
         ordered = ("WriteInitialHandoffState(", "while (scheduler.isRunning)",
@@ -259,40 +281,102 @@ class Mode2SyncTest(unittest.TestCase):
         self.assertIn("WaitFlag<AscendC::HardEvent::V_MTE3>", self.hv1[post:release])
         self.assertNotIn("SyncAll", self.driver)
 
+    def test_aic_chunk_gate_precedes_all_chunk_work(self):
+        loop = self.aic.index("while (scheduler.isRunning)")
+        gate = self.aic.index("Arch::CrossCoreWaitFlag(ov2ChunkFinished);", loop)
+        oc1 = self.aic.index("blockMmadQK(tileQ, tileK, tileAttn, shape);", loop)
+        hc1 = self.aic.index("StageC1(h);", loop)
+        oc2 = self.aic.index("blockMmadQH(tileQ, tileH, tileHWork, shape);", loop)
+        self.assertLess(gate, oc1)
+        self.assertLess(oc1, hc1)
+        self.assertLess(hc1, oc2)
+        self.assertEqual(self.aic[loop:].count("CrossCoreWaitFlag(ov2ChunkFinished)"), 1)
+
+    def test_tail_does_not_publish_next_chunk_tokens(self):
+        for flag in ("hv2HReadyForHc1", "ov2ChunkFinished"):
+            set_call = f"Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>({flag});"
+            set_pos = self.driver.rindex(set_call)
+            guard_pos = self.driver.rfind("if (!scheduler.IsFinalChunk())", 0, set_pos)
+            self.assertGreaterEqual(guard_pos, 0, f"{flag} must only be set when a next chunk exists")
+            self.assertLess(set_pos - guard_pos, 100)
+
+        # Both tokens are seeded for chunk 0. Each chunk consumes one
+        # generation; only non-final chunks publish the next generation.
+        for chunk_count in (1, 2, 128):
+            pending = {"hv2HReadyForHc1": 1, "ov2ChunkFinished": 1}
+            for chunk_idx in range(chunk_count):
+                for flag in pending:
+                    self.assertEqual(pending[flag], 1)
+                    pending[flag] -= 1
+                if chunk_idx + 1 < chunk_count:
+                    for flag in pending:
+                        pending[flag] += 1
+            self.assertEqual(pending, {"hv2HReadyForHc1": 0, "ov2ChunkFinished": 0})
+
     def test_ub_intervals_and_lifetimes(self):
-        def region(suffix, size_suffix=None):
-            return (self.value("UB_" + suffix + "_OFFSET"),
-                    self.value("UB_" + suffix + "_OFFSET") + self.value("UB_" + (size_suffix or suffix) + "_BYTES"))
+        def region(suffix, size_suffix=None, offset_suffix=None):
+            size_suffix = size_suffix or suffix
+            offset_suffix = offset_suffix or suffix
+            return (self.value("UB_VAR_" + offset_suffix + "_OFFSET"),
+                    self.value("UB_VAR_" + offset_suffix + "_OFFSET")
+                    + self.value("UB_VAR_" + size_suffix + "_BYTES"))
 
         def overlap(a, b):
             return max(a[0], b[0]) < min(a[1], b[1])
 
         direct = region("H_DIRECT")
-        # Only OV1 is concurrent with HC1/HC2 writes. Its aliases stay outside.
-        for name in ("O_BASE", "O_V1_A", "O_V1_OUT", "O_V1_OUT_HALF"):
-            self.assertFalse(overlap(direct, region(name)), name)
-        for name, size in (("O_V2_VWORK_PONG", "O_V2_VWORK"),
-                           ("O_V2_HWORK_PONG", "O_V2_HWORK")):
-            self.assertTrue(overlap(direct, region(name, size)))
-        views = [region("O_V2_OUT"), region("O_V2_OUT_HALF"),
-                 region("O_V2_OUT_PONG", "O_V2_OUT"),
-                 region("O_V2_OUT_HALF_PONG", "O_V2_OUT_HALF")]
-        for a, b in itertools.combinations(views, 2):
+        qk_scratch = [region("QK_A"), region("QK_OUT"), region("QK_OUT_LOW")]
+        for a, b in itertools.combinations(qk_scratch, 2):
             self.assertFalse(overlap(a, b))
-        self.assertEqual(max(end for _, end in views), self.value("UB_USED_MAX"))
-        self.assertEqual(self.value("UB_USED_MAX"), 247 * 1024)
+        for view in qk_scratch:
+            self.assertFalse(overlap(direct, view))
+        work_a = region("O_WORK_A")
+        work_h = region("O_WORK_H")
+        out = region("O_OUT")
+        out_low = region("O_OUT_LOW")
+        self.assertFalse(overlap(work_a, work_h))
+        self.assertFalse(overlap(work_h, out))
+        self.assertFalse(overlap(out, out_low))
+        self.assertEqual(out[0], 48 * 1024)
+        self.assertEqual(out_low[1], 72 * 1024)
+        self.assertEqual(self.value("UB_USED_MAX"), 183 * 1024)
         self.assertLess(self.value("UB_USED_MAX"), 248 * 1024)
+        self.assertEqual(self.value("UB_VAR_GATE_OFFSET"), self.value("UB_VAR_G_LAST_OFFSET"))
+        self.assertEqual(self.value("UB_VAR_GATE_OFFSET"), self.value("UB_VAR_O_GATE_OFFSET"))
+        self.assertEqual(self.value("UB_VAR_GATE_INPUT_OFFSET"),
+                         self.value("UB_VAR_O_GATE_INPUT_OFFSET"))
+        h_vnew = source(BLOCK / "block_epilogue_gdn_fwdh_vnew_preload_ss.hpp")
+        self.assertIn("GetBufferByByte<GElementInput>(SLOT_G_INPUT_BUF_OFFSET)", h_vnew)
+        self.assertEqual(self.value("UB_VAR_O_WORK_END"), 48 * 1024)
+        self.assertEqual(self.value("UB_VAR_O_WORK_END"), self.value("UB_VAR_O_OUT_OFFSET"))
+        self.assertEqual(self.value("UB_VAR_H_DIRECT_END"), self.value("UB_VAR_GATE_OFFSET"))
+        # QK scratch is reused by H/OV2 only after the OV1->HV1 and H->O fences.
+        self.assertLess(self.value("UB_VAR_QK_SCRATCH_END"), self.value("UB_VAR_H_DIRECT_OFFSET"))
         for tokens in (1, 31, 32, 33, 63, 64, 65, 127, 128):
             for lane in (0, 1):
                 rows = (tokens + 1) // 2 if lane == 0 else tokens // 2
                 self.assertLessEqual(rows * 128 * 4, 32 * 1024)
-                # Each 32-row output tile fits both ping/pong scratch formats.
-                self.assertLessEqual(min(rows, 32) * 128 * 4, self.value("UB_O_V2_OUT_BYTES"))
-                self.assertLessEqual(min(rows, 32) * 128 * 2, self.value("UB_O_V2_OUT_HALF_BYTES"))
-        # H's active update output is at staging+48 KiB, not legacy 199 KiB.
-        update = source(BLOCK / "block_epilogue_gdn_fwdh_update_preload_ss.hpp")
-        self.assertIn("H_STAGING_OFFSET + 48U * 1024U", update)
-        self.assertNotIn("H_UPDATE_SCRATCH_OFFSET", update)
+                self.assertLessEqual(min(rows, 32) * 128 * 4,
+                                     self.value("UB_VAR_O_OUT_BYTES"))
+                self.assertLessEqual(min(rows, 32) * 128 * 2,
+                                     self.value("UB_VAR_O_OUT_LOW_BYTES"))
+        kernel = self.kernel
+        self.assertIn("EpilogueOQkmask epilogueQkmask(resource, true)", kernel)
+        self.assertIn("EpilogueOOutput epilogueOutput(resource, true)", kernel)
+        output = source(BLOCK / "block_epilogue_gdn_fwdo_output.hpp")
+        self.assertIn("bool useFusedUbLayout = false", output)
+        self.assertIn("if (useFusedUbLayout)", output)
+        self.assertIn("aUbTensorPong = aUbTensorPing", output)
+        self.assertIn("outUbTensorPong = outUbTensorPing", output)
+        narrow = method(output, "void ProcessNarrowSplit(")
+        self.assertLess(narrow.index("WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0)",
+                                     narrow.index("for (uint32_t row")),
+                        narrow.index("OutputAddScaleVf"))
+        self.assertIn("if (singleUbBuffer)", narrow)
+        self.assertIn("WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0)", narrow)
+        # MODE1's default branch retains its original local address plan.
+        mode1 = source(ARCH / "gemm/kernel/gdn_fwd_o_kernel.hpp")
+        self.assertIn("EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource)", mode1)
 
 
 if __name__ == "__main__":
