@@ -122,7 +122,7 @@ public:
         DispatchPolicyO, L1TileShapeO, L0TileShapeO, INPUT_TYPE, INPUT_TYPE,
         WORKSPACE_TYPE, void, TileCopyQK>;
 
-    // OC2 keeps its own L1 base; OC3 reuses part of that window after OC2.
+    // OC2 and OC3 use disjoint L1 windows to reduce address reuse.
     using TileCopyQH = Catlass::Gemm::Tile::PackedTileCopyTla<
         ArchTag, INPUT_TYPE, layout::RowMajor, INPUT_TYPE, layout::RowMajor,
         WORKSPACE_TYPE, layout::RowMajor>;
@@ -141,6 +141,21 @@ public:
                       BlockMmadQH::L1A_TILE_SIZE * BlockMmadQH::L1A_STAGES +
                       BlockMmadQH::L1B_TILE_SIZE * BlockMmadQH::L1B_STAGES <= ArchTag::L1_SIZE,
                   "OC2 L1 allocation exceeds the architecture capacity");
+    static_assert(GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE1_BASE +
+                      BlockMmadQK::L1A_TILE_SIZE * BlockMmadQK::L1A_STAGES +
+                      BlockMmadQK::L1B_TILE_SIZE * BlockMmadQK::L1B_STAGES <=
+                      GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE,
+                  "OC1 L1 allocation overlaps OC2");
+    static_assert(GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE +
+                      BlockMmadQH::L1A_TILE_SIZE * BlockMmadQH::L1A_STAGES +
+                      BlockMmadQH::L1B_TILE_SIZE * BlockMmadQH::L1B_STAGES <=
+                      GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE,
+                  "OC2 L1 allocation overlaps OC3");
+    static_assert(GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE +
+                      BlockMmadAttenVNEW::L1A_TILE_SIZE * BlockMmadAttenVNEW::L1A_STAGES +
+                      BlockMmadAttenVNEW::L1B_TILE_SIZE * BlockMmadAttenVNEW::L1B_STAGES <=
+                      ArchTag::L1_SIZE,
+                  "OC3 L1 allocation exceeds the architecture capacity");
 
     using DispatchPolicyOQkmask = Epilogue::EpilogueAtlasGDNFwdOQkmask;
     using EpilogueOQkmask = Epilogue::Block::BlockEpilogue<
@@ -433,7 +448,7 @@ private:
     {
         const uint32_t coreNum = AscendC::GetBlockNum();
 
-        BlockMmadQK blockMmadQK(resource);
+        BlockMmadQK blockMmadQK(resource, GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE1_BASE);
         BlockMmadQH blockMmadQH(resource, GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE);
         BlockMmadAttenVNEW blockMmadAttenVNEW(
             resource, GDN::CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE);
@@ -620,7 +635,8 @@ private:
             }
 
             // ---- OV2: (exp(g) * oH + oV) * scale -> O --------------------
-            // OV2 pong work reuses H_DIRECT; also fence HV1 if HV2 was skipped.
+            // Keep OV2's work buffers separate from H_DIRECT; fence HV1 even
+            // when HV2 was skipped before OV2 starts.
             FenceHToO();
             epilogueOutput.ProcessNarrowSplit(
                 gmO[o.ovOffset], gmG[o.gOffset],

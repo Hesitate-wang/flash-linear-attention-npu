@@ -199,7 +199,7 @@ MODE1 Host 设置 `producerCoreNum=consumerCoreNum=T`、`activeCoreNum=2*T`、`c
 
 MODE2 每个 MIX core 单槽处理 chunk。首轮 AIV 预置 `hv2HReadyForHc1`（供 HC1 消费）；非尾块 HV2 完成后才发布下一代信号。每 chunk 的依赖为：AIC `OC1 -> HC1(wait hv2HReadyForHc1) -> OC2 -> HC2(wait HV1) -> OC3(wait OV1/HV1 token)`；AIV `OV1(wait OC1) -> HV1(wait HC1) -> HV2(wait HC2) -> OV2(wait OC2, OC3)`。HC1 已在加载 H 前消费 H-ready 信号，顺序执行的 OC2 使用同一份 H，无需再次等待。尾块不发布仅供下一 chunk 消费的 `hv2HReadyForHc1` 和 `ov2ChunkFinished`，避免 kernel 结束时遗留跨核 token。所有这些通知均使用核内 mode `0x2`；MODE1 的 kernel 和 mode-0 producer/consumer 协议不变。
 
-MODE2 所有 chunk（包括尾块）统一按实际 `blockTokens` 组装 MMAD shape 和 Vector 长度，不设尾块专用执行分支。H 的四个 stage、成员和初始化直接归入 `gdn_fwd_ho_fused_kernel.hpp`，HC1/HC2 使用私有 single-slot preload epilogue 和共享 H_DIRECT UB 输出。五个矩阵均使用 `MmadPingpongTlaPreload`：H 保留带 `vecDone` 的重载；OC1/OC2/OC3 调用不带 `vecDone` 的四参数重载，跨核等待由 driver 的 chunk gate 和 OC3 ready token 保证。HC1 使用 L1 [0,128 KiB)，OC2 使用 [128,256 KiB)，OC3 保持 [192,320 KiB)；OC2 执行完整 preload 调用，不再单独提前预取。当前工作区的 Cube event 生命周期为循环前一次 preset、循环后一次 drain；本次 Vector 事件隔离不修改该生命周期。OC2 完成后 OC3 才复用重叠 L1 地址。最终状态无需保存时的 HC2/HV2 跳过属于状态输出条件，不是尾块 shape 分支。
+MODE2 所有 chunk（包括尾块）统一按实际 `blockTokens` 组装 MMAD shape 和 Vector 长度，不设尾块专用执行分支。H 的四个 stage、成员和初始化直接归入 `gdn_fwd_ho_fused_kernel.hpp`，HC1/HC2 使用私有 single-slot preload epilogue 和共享 H_DIRECT UB 输出。五个矩阵均使用 `MmadPingpongTlaPreload`：H 保留带 `vecDone` 的重载；OC1/OC2/OC3 调用不带 `vecDone` 的四参数重载，跨核等待由 driver 的 chunk gate 和 OC3 ready token 保证。HC1/HC2 共用 L1 [0,128 KiB)，OC1、OC2、OC3 分别使用 [128,256)、[256,384)、[384,512) KiB，三个 O 窗口彼此独立；OC2 执行完整 preload 调用，不再单独提前预取。L1 footprint 由编译期断言检查。当前工作区的 Cube event 生命周期为循环前一次 preset、循环后一次 drain；本次 Vector 事件隔离不修改该生命周期。最终状态无需保存时的 HC2/HV2 跳过属于状态输出条件，不是尾块 shape 分支。
 
 ### MODE2 Local Event 与 UB 生命周期
 
@@ -238,24 +238,22 @@ MODE2 的 O epilogue 显式启用统一 UB layout；普通 A5 O kernel 使用默
 
 | 临时变量 | 区间 | 存活期/复用约束 |
 | --- | --- | --- |
-| 初始状态/H handoff | `[0,32)` / `[32,64)` | 初始化依次读写；初始写回结束后由后续变量复用 |
-| causal mask / H calc | `[0,16)` / `[0,32)` | OV1 mask 先用；O→H fence 后 H calc 覆盖 mask |
-| QK left/up/gcomp/BRC scratch | `[16,36)` / `[36,52)` / `[52,53)` / `[53,69)` | OV1 同时存活；OV1→HV1 fence 后整段转作 H/OV2 临时区 |
+| 初始状态/H handoff | `[183,215)` / `[215,247)` | 初始化专用 staging；与运行期 calc 分离 |
+| causal mask / H calc | `[231,247)` / `[0,32)` | mask 独立于 calc；每 chunk 在 OV1 写入 |
+| QK left/up/gcomp/BRC scratch | `[16,36)` / `[36,52)` / `[52,53)` / `[53,69)` | OV1 同时存活；O→H fence 后与 H calc/V tile 按阶段复用 |
 | U/V_NEW/VUpdate / H tile | `[32,48)` / `[48,64)` | HV1、HV2 依序使用；不与初始化 staging 同时存活 |
-| QK a/out/out_low | `[71,87)` / `[87,103)` / `[103,111)` | OV1 活跃 scratch；与并发 Fixpipe 区分离；OV1 完成后可复用 |
+| QK a/out/out_low | `[71,87)` / `[87,103)` / `[103,111)` | OV1 活跃 scratch；与并发 Fixpipe 区分离；OV2 output 在 OV1 结束后复用其中部分区间 |
 | H_DIRECT | `[117,181)` | AIC HC1/HC2 Fixpipe 目标，AIV 后续读取；HV1 最后读取完成前不可覆盖 |
-| gate / G_LAST | `[181,182)` | OV1/HV1 gate 与 HV2 G_LAST 使用同一 float 槽；HV1→HV2 顺序保证不同时存活 |
+| gate / G_LAST | `[181,182)` / `[247,248)` | 独立 float 槽；避免 HV1/HV2 地址复用 |
 | gate input | `[182,183)` | 低精度输入暂存；与 gate float 分槽，覆盖 O/H 所需 dtype |
-| OV2 A/H work | `[0,16)` / `[16,48)` | 单份 A 16 KiB、H 32 KiB；每次处理一个 32 行片 |
-| OV2 output FP32/low | `[48,64)` / `[64,72)` | 单份；下一个片段开始前等待前一段 MTE3 写回完成 |
+| OV2 A/H work | `[183,199)` / `[199,231)` | 单份 A 16 KiB、H 32 KiB；与 H_DIRECT 独立 |
+| OV2 output FP32/low | `[72,88)` / `[88,96)` | 单份；下一个片段开始前等待前一段 MTE3 写回完成 |
 
-`[0,117)` 按 `初始化 → OV1 → HV1/HV2 → OV2` 依次复用；QK scratch 的释放由
-OV1→HV1 fence 保护。`[117,181)` 在 OV1 时专供 H_DIRECT，HV2（包括被跳过时的
-对应 fence）结束后才由 OV2 work 覆盖。gate/G_LAST 的共享只利用 H 内 HV1→HV2
-顺序；gate float 和低精度 gate input 不互相覆盖。OV2 每次复用输出槽前等待异步
-GM DataCopy 完成，不保留 ping/pong。最高活动终点为 `183 KiB`，低于 `[248,256) KiB`
-通信保留区；下一 HC1 仍由 chunk-finished 约束，不能与上一 OV2 并发覆盖 H_DIRECT。
-布局静态断言检查并发不相交、变量容量、顺序 alias 关系、输出双缓冲和峰值。
+`[117,181)` 专供 H_DIRECT，OV2 不再复用该区域。OV1 QK scratch、HV 临时区和
+OV2 output 仍按阶段有序复用；阶段切换由既有 fence 保证。OV2 每次复用输出槽前等待
+异步 GM DataCopy 完成，不保留 ping/pong。最高活动终点为 `248 KiB`，紧邻但不进入
+`[248,256) KiB` 通信保留区。L1 的 OC1/HC1、OC2、OC3 窗口调整为互不重叠；静态断言
+检查各窗口容量和 UB 数据上界。
 离线回归检查事件状态与源码交接顺序，不代替硬件流水线/跨核代次验证。
 
 ## 4. TilingData ABI

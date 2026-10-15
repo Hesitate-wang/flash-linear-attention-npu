@@ -337,21 +337,50 @@ class Mode2SyncTest(unittest.TestCase):
         self.assertFalse(overlap(work_a, work_h))
         self.assertFalse(overlap(work_h, out))
         self.assertFalse(overlap(out, out_low))
-        self.assertEqual(out[0], 48 * 1024)
-        self.assertEqual(out_low[1], 72 * 1024)
-        self.assertEqual(self.value("UB_USED_MAX"), 183 * 1024)
-        self.assertLess(self.value("UB_USED_MAX"), 248 * 1024)
-        self.assertEqual(self.value("UB_VAR_GATE_OFFSET"), self.value("UB_VAR_G_LAST_OFFSET"))
+        self.assertEqual(out[0], 72 * 1024)
+        self.assertEqual(out_low[1], 96 * 1024)
+        self.assertEqual(self.value("UB_USED_MAX"), 248 * 1024)
+        self.assertLessEqual(self.value("UB_USED_MAX"), 248 * 1024)
+        self.assertNotEqual(self.value("UB_VAR_GATE_OFFSET"), self.value("UB_VAR_G_LAST_OFFSET"))
         self.assertEqual(self.value("UB_VAR_GATE_OFFSET"), self.value("UB_VAR_O_GATE_OFFSET"))
         self.assertEqual(self.value("UB_VAR_GATE_INPUT_OFFSET"),
                          self.value("UB_VAR_O_GATE_INPUT_OFFSET"))
+        init_state = region("INIT_STATE")
+        init_h = region("INIT_H")
+        calc = region("CALC")
+        mask = region("MASK")
+        g_last = region("G_LAST")
+        self.assertFalse(overlap(init_state, init_h))
+        self.assertFalse(overlap(init_state, calc))
+        self.assertFalse(overlap(mask, calc))
+        self.assertFalse(overlap(mask, direct))
+        self.assertFalse(overlap(g_last, region("GATE")))
         h_vnew = source(BLOCK / "block_epilogue_gdn_fwdh_vnew_preload_ss.hpp")
         self.assertIn("GetBufferByByte<GElementInput>(SLOT_G_INPUT_BUF_OFFSET)", h_vnew)
-        self.assertEqual(self.value("UB_VAR_O_WORK_END"), 48 * 1024)
-        self.assertEqual(self.value("UB_VAR_O_WORK_END"), self.value("UB_VAR_O_OUT_OFFSET"))
+        self.assertEqual(self.value("UB_VAR_O_WORK_END"), 231 * 1024)
+        self.assertFalse(overlap(work_a, direct))
+        self.assertFalse(overlap(work_h, direct))
+        self.assertFalse(overlap(out, direct))
         self.assertEqual(self.value("UB_VAR_H_DIRECT_END"), self.value("UB_VAR_GATE_OFFSET"))
-        # QK scratch is reused by H/OV2 only after the OV1->HV1 and H->O fences.
+        # QK-to-H and init-to-runtime aliases are separated by their stage order.
         self.assertLess(self.value("UB_VAR_QK_SCRATCH_END"), self.value("UB_VAR_H_DIRECT_OFFSET"))
+        l1 = source(ARCH / "chunk_fwd_ho_fused_a5_single_slot_l1_layout.h")
+        l1_values = {}
+        for name, value in re.findall(r"constexpr uint32_t (\w+)\s*=\s*([^;]+);", l1):
+            l1_values[name] = expression(value, l1_values)
+        h_window = (l1_values["CHUNK_FWD_HO_FUSED_L1_H_STAGE_BASE"],
+                    l1_values["CHUNK_FWD_HO_FUSED_L1_H_STAGE_BASE"] + 128 * 1024)
+        oc1_window = (l1_values["CHUNK_FWD_HO_FUSED_L1_O_CUBE1_BASE"],
+                      l1_values["CHUNK_FWD_HO_FUSED_L1_O_CUBE1_BASE"] + 128 * 1024)
+        oc2_window = (l1_values["CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE"],
+                      l1_values["CHUNK_FWD_HO_FUSED_L1_O_CUBE2_BASE"] + 128 * 1024)
+        oc3_window = (l1_values["CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE"],
+                      l1_values["CHUNK_FWD_HO_FUSED_L1_O_CUBE3_BASE"] + 128 * 1024)
+        self.assertFalse(overlap(h_window, oc2_window))
+        self.assertFalse(overlap(h_window, oc3_window))
+        self.assertFalse(overlap(h_window, oc1_window))
+        self.assertFalse(overlap(oc1_window, oc2_window))
+        self.assertFalse(overlap(oc2_window, oc3_window))
         for tokens in (1, 31, 32, 33, 63, 64, 65, 127, 128):
             for lane in (0, 1):
                 rows = (tokens + 1) // 2 if lane == 0 else tokens // 2
