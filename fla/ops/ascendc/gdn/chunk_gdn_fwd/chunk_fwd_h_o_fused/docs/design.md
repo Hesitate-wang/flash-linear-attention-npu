@@ -239,7 +239,7 @@ MODE2 的 O epilogue 显式启用统一 UB layout；普通 A5 O kernel 使用默
 | 临时变量 | 区间 | 存活期/复用约束 |
 | --- | --- | --- |
 | 初始状态/H handoff | `[183,215)` / `[215,247)` | 初始化专用 staging；与运行期 calc 分离 |
-| causal mask / H calc | `[231,247)` / `[0,32)` | mask 独立于 calc；每 chunk 在 OV1 写入 |
+| causal mask / H calc | `[231,247)` / `[0,32)` | mask 为每个 AIV 初始化一次的只读常量；全 kernel 期间独占该区间，OV1 各 chunk 复用 |
 | QK left/up/gcomp/BRC scratch | `[16,36)` / `[36,52)` / `[52,53)` / `[53,69)` | OV1 同时存活；O→H fence 后与 H calc/V tile 按阶段复用 |
 | U/V_NEW/VUpdate / H tile | `[32,48)` / `[48,64)` | HV1、HV2 依序使用；不与初始化 staging 同时存活 |
 | QK a/out/out_low | `[71,87)` / `[87,103)` / `[103,111)` | OV1 活跃 scratch；与并发 Fixpipe 区分离；OV2 output 在 OV1 结束后复用其中部分区间 |

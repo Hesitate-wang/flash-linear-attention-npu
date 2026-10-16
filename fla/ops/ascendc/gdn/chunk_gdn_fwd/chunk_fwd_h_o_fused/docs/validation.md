@@ -1,5 +1,13 @@
 # 开发阶段验证记录
 
+## 2026-10-16 MODE2 causal mask 单次初始化
+
+- MODE2 mask 已有专用 UB 区间 `[231,247) KiB`，QK-mask epilogue 只读取该 64x64
+  下三角矩阵。将 `RebuildCausalMask` 从 chunk 循环内移至循环前，每个 AIV 实例只构造
+  一次；保留每 chunk 阶段 fence 和其他数据同步。
+- 源码回归检查初始化位于循环前且调用仅一次。性能收益未在 A5 设备上 profiling；本机无
+  CANN/`ccec` 和 NPU，未执行设备构建或精度验收。
+
 ## 2026-10-15 MODE2 UB 临时变量统一布局
 
 - MODE2 fused UB 从 H/O 阶段分区改为变量/生存期布局；共享 `gate`/`G_LAST` 地址，

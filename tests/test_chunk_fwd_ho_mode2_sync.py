@@ -267,14 +267,17 @@ class Mode2SyncTest(unittest.TestCase):
             state.run(events(single_path), pingpongFlag=0, bufferIndex=0)
 
     def test_stage_boundaries_and_direct_slot_release(self):
-        ordered = ("WriteInitialHandoffState(", "while (scheduler.isRunning)",
-                   "FenceOToH();", "RebuildCausalMask(", "epilogueQkmask(",
+        ordered = ("WriteInitialHandoffState(", "RebuildCausalMask(",
+                   "while (scheduler.isRunning)", "FenceOToH();", "epilogueQkmask(",
                    "FenceOToH();", "StageV1(h);", "StageV2(h, needStage2);",
                    "FenceHToO();", "epilogueOutput.ProcessNarrowSplit(",
                    "FenceOToH();", "Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished)")
         cursor = 0
         for marker in ordered:
             cursor = self.driver.index(marker, cursor) + len(marker)
+        self.assertEqual(self.driver.count("RebuildCausalMask("), 1)
+        self.assertLess(self.driver.index("RebuildCausalMask("),
+                        self.driver.index("while (scheduler.isRunning)"))
         post = self.hv1.index("Vec1PostVF(")
         release = self.hv1.index("Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv1VUpdateReadyForHc2)")
         self.assertLess(post, release)

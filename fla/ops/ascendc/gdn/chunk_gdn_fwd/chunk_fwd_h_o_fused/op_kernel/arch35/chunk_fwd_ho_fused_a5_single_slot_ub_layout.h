@@ -35,7 +35,8 @@
  *   I2. H_DIRECT stays disjoint from all OV1 views while Cube Fixpipe and AIV
  *       QK-mask execute concurrently; OV2 has a separate work/output range.
  *       The next HC1 cannot start until OV2 retires the chunk.
- *   I3. The causal mask has a dedicated OV1 range and is rebuilt every chunk.
+ *   I3. The causal mask has a dedicated OV1 range, is initialized once per
+ *       AIV, and remains read-only for all chunks.
  *
  * Full and partial chunks use the same preload/epilogue path with actual
  * blockTokens. Cross-family UB reuse is protected by local stage fences.

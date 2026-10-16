@@ -35,8 +35,8 @@
  * ov2ChunkFinished after OV2 retires the chunk.
  *
  * FwdH Cube results use the shared H_DIRECT Fixpipe window; the AIV consumes
- * each result before the next H Cube stage writes it. The 64x64 causal mask
- * is rebuilt by the AIV before every OV1.
+ * each result before the next H Cube stage writes it. Each AIV initializes the
+ * immutable 64x64 causal mask once, then reuses it for every OV1 chunk.
  *
  * v1 scope (enforced by host tiling): A5, natural exp, fixed length, K = V =
  * 128 and no q/k gating.
@@ -466,7 +466,6 @@ private:
         while (scheduler.isRunning) {
             // Chunk gate: the previous chunk's AIV retired every single-slot
             // workspace and wrote h[i] back to GM.
-            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
 
             const HOffsets &h = scheduler.offsets.h;
             const OOffsets &o = scheduler.offsets.o;
@@ -494,6 +493,7 @@ private:
 
             // ---- HC1: W @ h[i] ------------------------------------------
             StageC1(h);
+            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
             // ---- OC2: Q @ h[i] -> FP32 oH workspace (GM) ----------------
             // HC1 already waited for this H before loading it.
             {
@@ -603,14 +603,17 @@ private:
         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished);
         Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(hv2HReadyForHc1);
 
+        // The mask has a dedicated UB range and is read-only in every QK-mask
+        // epilogue, so construct it once per AIV instead of once per chunk.
+        RebuildCausalMask(maskUbTensor);
+
         uint32_t pingpongFlag = 0;  // Each O call starts at ping; OV2 may flip internally.
         while (scheduler.isRunning) {
             const HOffsets &h = scheduler.offsets.h;
             const OOffsets &o = scheduler.offsets.o;
 
-            // Retire O's previous UB accesses before rebuilding the shared mask.
+            // Retire O's previous UB accesses before reusing single-slot storage.
             FenceOToH();
-            RebuildCausalMask(maskUbTensor);
 
             // ---- OV1: gate difference / exp / causal mask, masked QK -----
             Arch::CrossCoreWaitFlag(oc1QkReady);
