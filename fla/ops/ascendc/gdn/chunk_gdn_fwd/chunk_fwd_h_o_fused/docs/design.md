@@ -213,7 +213,7 @@ O 使用 ID0-3，两个 H single-slot epilogue 将原 ID0-3 完整映射到 ID4-
 | H transfer/init | 5 | epilogue 调用内配对；初始化返回前 drain MTE3，不遗留 token |
 | H input | 6 | `MTE3_MTE2` 在 driver preset，HV2 wait 后 republish，退出 drain |
 | H scalar/fence | 7 | scalar 事件调用内配对；H→O fence 使用不同方向的事件 |
-| O→H fence | 3 | 前阶段返回后使用，方法内 Set/Wait，不保留 token |
+| O→H fence | 3 | OV1→HV2、OV2→下一 chunk OV1 前配对 Set/Wait，不保留 token |
 
 H 入口/出口只保留 ID4、6 的上述两个持续 token；最终 HV2 跳过时不改变它们。
 空 token 行也必须走原有事件协议，不能引入未配对的早退。
@@ -221,8 +221,11 @@ H 入口/出口只保留 ID4、6 的上述两个持续 token；最终 HV2 跳过
 HV1 在 `Vec1PostVF` 最后读取 H_DIRECT 并完成 V→MTE3 依赖后，才发布
 `hv1VUpdateReadyForHc2`，防止 HC2 Fixpipe 提前覆盖同一槽。
 
-AIV 顺序为 `初始化 → mask/OV1 → O→H fence → HV1 → HV2 → H→O fence → OV2`。
-每个 fence 配对 `MTE2_V`，执行 `PipeBarrier<PIPE_V>`，再配对 `V_MTE3`、
+AIV 顺序为 `初始化 → mask/OV1 → HV1 → O→H fence → HV2 → H→O fence → OV2`。
+OV1 与 HV2 复用 QK output/update scratch，HV1 与 OV2 复用 H_DIRECT/work 区域。
+因此 HV1 不等待 OV1 的整段 MTE3；只有 HV2 覆盖 OV1 scratch 前执行 O→H fence，
+只有 OV2 覆盖 HV1 区域前执行 H→O fence。OV2 完成后仍执行 O fence，保护下一 chunk
+重新进入 OV1 时对 `[71,103)` 的复用。每个 fence 配对 `MTE2_V`，执行 `PipeBarrier<PIPE_V>`，再配对 `V_MTE3`、
 `MTE3_V`、`MTE3_MTE2`，将前阶段的读、计算、写队列交接给后阶段；不用全核屏障。
 HV2 跳过仍执行 H→O fence，以覆盖 HV1 输出。OV2 内部 token drain 后再执行 O fence；
 仅非尾块随后发布 `ov2ChunkFinished`，供下一轮 AIC chunk gate 消费。尾块不发布该 token，
@@ -238,19 +241,20 @@ MODE2 的 O epilogue 显式启用统一 UB layout；普通 A5 O kernel 使用默
 
 | 临时变量 | 区间 | 存活期/复用约束 |
 | --- | --- | --- |
-| 初始状态/H handoff | `[183,215)` / `[215,247)` | 初始化专用 staging；与运行期 calc 分离 |
+| 初始状态/H handoff | `[183,215)` / `[215,247)` | 初始化专用 staging；与运行期临时区分离 |
 | causal mask / H calc | `[231,247)` / `[0,32)` | mask 为每个 AIV 初始化一次的只读常量；全 kernel 期间独占该区间，OV1 各 chunk 复用 |
-| QK left/up/gcomp/BRC scratch | `[16,36)` / `[36,52)` / `[52,53)` / `[53,69)` | OV1 同时存活；O→H fence 后与 H calc/V tile 按阶段复用 |
+| QK left/up/gcomp/BRC scratch | `[16,36)` / `[36,52)` / `[52,53)` / `[53,69)` | OV1 同时存活；OV2 后续可复用 left/up/BRC |
 | U/V_NEW/VUpdate / H tile | `[32,48)` / `[48,64)` | HV1、HV2 依序使用；不与初始化 staging 同时存活 |
-| QK a/out/out_low | `[71,87)` / `[87,103)` / `[103,111)` | OV1 活跃 scratch；与并发 Fixpipe 区分离；OV2 output 在 OV1 结束后复用其中部分区间 |
+| QK a/out/out_low | `[71,87)` / `[87,103)` / `[103,111)` | OV1 活跃 scratch；HV2 update scratch 复用 `[71,103)` |
 | H_DIRECT | `[117,181)` | AIC HC1/HC2 Fixpipe 目标，AIV 后续读取；HV1 最后读取完成前不可覆盖 |
 | gate / G_LAST | `[181,182)` / `[247,248)` | 独立 float 槽；避免 HV1/HV2 地址复用 |
 | gate input | `[182,183)` | 低精度输入暂存；与 gate float 分槽，覆盖 O/H 所需 dtype |
-| OV2 A/H work | `[183,199)` / `[199,231)` | 单份 A 16 KiB、H 32 KiB；与 H_DIRECT 独立 |
+| HV2 update scratch | `[71,103)` | 32 KiB；OV1 完成后复用 QK A/out |
+| OV2 A/H work | `[117,133)` / `[133,165)` | 单份 A 16 KiB、H 32 KiB；H→O fence 后复用 H_DIRECT |
 | OV2 output FP32/low | `[72,88)` / `[88,96)` | 单份；下一个片段开始前等待前一段 MTE3 写回完成 |
 
-`[117,181)` 专供 H_DIRECT，OV2 不再复用该区域。OV1 QK scratch、HV 临时区和
-OV2 output 仍按阶段有序复用；阶段切换由既有 fence 保证。OV2 每次复用输出槽前等待
+`[117,181)` 由 H_DIRECT 与 OV2 A/H work 按阶段复用；OV1 QK scratch、HV 临时区和
+OV2 output 也按阶段有序复用。阶段切换由 OV1→HV2、HV1→OV2 和 OV2→下一 OV1 的 fence 保证。OV2 每次复用输出槽前等待
 异步 GM DataCopy 完成，不保留 ping/pong。最高活动终点为 `248 KiB`，紧邻但不进入
 `[248,256) KiB` 通信保留区。L1 的 OC1/HC1、OC2、OC3 窗口调整为互不重叠；静态断言
 检查各窗口容量和 UB 数据上界。

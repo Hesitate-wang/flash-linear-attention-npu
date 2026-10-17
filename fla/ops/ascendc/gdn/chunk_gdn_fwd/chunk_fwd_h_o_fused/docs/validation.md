@@ -1,5 +1,25 @@
 # 开发阶段验证记录
 
+## 2026-10-17 MODE2 OV1/HV2 与 HV1/OV2 分组复用
+
+- MODE2 UB 按执行重叠关系重排：OV1 与 HV1 保持独立，OV1 的 `[71,103) KiB`
+  在 HV2 开始前复用为 H update scratch；HV1 的 H_DIRECT `[117,181) KiB`
+  在 H→O 交接后复用为 OV2 A/H work `[117,165) KiB`。
+- AIV 顺序改为 `OV1 -> HV1 -> O→H fence -> HV2 -> H→O fence -> OV2`。
+  删除 OV1→HV1 的整段 fence；保留 HV2 覆盖 OV1 区域前、OV2 覆盖 HV1 区域前，
+  以及 OV2→下一 chunk OV1 的 fence。
+- 已更新布局常量、H update epilogue 引用和静态布局回归。设备编译、精度和性能结果待 A5 环境验证。
+
+## 2026-10-17 MODE2 mask 与 HV2 g_last 地址冲突修正
+
+- 复核发现 `epilogueUpdate` 的旧 `glast` 地址 `[231,232) KiB` 位于 MODE2
+  永久 causal mask `[231,247) KiB` 内。此前每 chunk 重建 mask 会掩盖该覆盖，
+  mask 改为单次初始化后会在 HV2 之后破坏 mask。
+- MODE2 `epilogueUpdate` 现在使用 `[247,248) KiB` 的专用单值临时区；MODE1/旧路径
+  继续使用原地址。布局静态断言已覆盖该区域。
+- AIC `ov2ChunkFinished` 曾位于 HC1 之后；因 OV2 复用 H_DIRECT，已移到每轮
+  OC1/HC1 之前，源码回归已验证该顺序。
+
 ## 2026-10-16 MODE2 causal mask 单次初始化
 
 - MODE2 mask 已有专用 UB 区间 `[231,247) KiB`，QK-mask epilogue 只读取该 64x64

@@ -11,30 +11,30 @@
  * serially through one UB slot:
  *
  *   AIC : [chunk gate] OC1 -> HC1 -> OC2 -> HC2 -> [wait HV1] OC3
- *   AIV : [mask] OV1 -> [O/H fence] HV1 -> HV2 -> [H/O fence] OV2
- *         -> [O fence, chunk finished]
+ *   AIV : [mask] OV1 -> HV1 -> [OV1/HV2 fence] HV2
+ *         -> [HV1/HV2-to-OV2 fence] OV2 -> [O fence, chunk finished]
  *
  * Variable/lifetime layout (V128; per AIV, KiB half-open):
  *
  *   Init:  state [183,215), H handoff [215,247).
  *   OV1:   QK scratch [16,111), H_DIRECT [117,181), gate/input [181,183),
  *          mask [231,247).
- *   HV:    calc [0,32), V tile [32,48), H tile [48,64), H_DIRECT [117,181),
- *          gate/input [181,183), G_LAST [247,248).
- *   OV2:   output [72,96), A/H work [183,231), gate/input [181,183).
+ *   HV:    calc [0,32), V tile [215,231), H tile [48,64), H_DIRECT [117,181),
+ *          update output [71,103), gate/input [181,183), G_LAST [247,248).
+ *   OV2:   output [72,96), A/H work [117,165), gate/input [181,183).
  *
- * Init staging is moved out of calc, mask is disjoint from calc, G_LAST has a
- * dedicated slot, and OV2 work no longer aliases H_DIRECT. Ordered phase
- * reuse remains only where the 248 KiB data limit requires it. [248,256) is
- * reserved for communication; the active high-water mark is 248 KiB.
+ * OV1 QK output and HV2 update output reuse [71,103); OV2 output reuses the
+ * same interval after HV2. OV2 work reuses H_DIRECT after HV1/HV2 complete.
+ * The two phase handoffs permit HV1 to run after OV1 without waiting on O MTE3.
+ * [248,256) is reserved for communication; the active high-water mark is 248 KiB.
  *
  * Invariants enforced by the fused kernel:
  *   I1. HC1/HC2 write H_DIRECT through Fixpipe and the matching AIV epilogue
  *       reads that same window in place. HC1/HC2 readiness uses mode-0x2
  *       flags; HV1 publishes HC2's input only after reading HC1's result.
- *   I2. H_DIRECT stays disjoint from all OV1 views while Cube Fixpipe and AIV
- *       QK-mask execute concurrently; OV2 has a separate work/output range.
- *       The next HC1 cannot start until OV2 retires the chunk.
+ *   I2. H_DIRECT stays disjoint from OV1 views while Cube Fixpipe and AIV
+ *       QK-mask execute concurrently. OV2 reuses H_DIRECT only after HV2 has
+ *       consumed the HC2 result; the next HC1 waits for OV2 to retire.
  *   I3. The causal mask has a dedicated OV1 range, is initialized once per
  *       AIV, and remains read-only for all chunks.
  *
@@ -53,9 +53,9 @@
 namespace GDN {
 
 // MODE2 UB is allocated by temporary variable, independent of H/O ownership.
-// Each interval is half-open and per AIV. Keep phase temporaries in distinct
-// ranges where the 248 KiB data limit permits; remaining aliases are ordered
-// by ProcessAiv fences. OV2 serializes row tiles before reusing its output slot.
+// Each interval is half-open and per AIV. Ordered aliases are documented by
+// phase below and are protected at OV1->HV2, HV2->OV2, and OV2->next OV1.
+// OV2 serializes row tiles before reusing its output slot.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_CALC_OFFSET = 0U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_CALC_BYTES = 32U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_INIT_STATE_OFFSET = 183U * 1024U;
@@ -65,8 +65,7 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_MASK_BYTES = 16U * 1024U;
 
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_INIT_H_OFFSET = 215U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_INIT_H_BYTES = 32U * 1024U;
-constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_V_TILE_OFFSET =
-    CHUNK_FWD_HO_FUSED_UB_VAR_INIT_H_OFFSET;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_V_TILE_OFFSET = 215U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_V_TILE_BYTES = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_TILE_OFFSET = 48U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_TILE_BYTES = 16U * 1024U;
@@ -83,6 +82,11 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_GATE_OFFSET = 181U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_GATE_BYTES = 1U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_OFFSET = 247U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_BYTES = 1U * 1024U;
+// HV2 uses one scalar g_last after HV1 has finished consuming this slot. Keep
+// it outside the permanent mask, which occupies [231,247) KiB.
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_G_OFFSET =
+    CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_OFFSET;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_G_BYTES = 1U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_GATE_INPUT_OFFSET = 182U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_GATE_INPUT_BYTES = 1U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_QK_A_OFFSET = 71U * 1024U;
@@ -96,10 +100,13 @@ constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_QK_OUT_LOW_BYTES = 8U * 1024U;
 // region and does not alias H_DIRECT.
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET = 117U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_BYTES = 64U * 1024U;
-constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET = 183U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET = 117U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_BYTES = 16U * 1024U;
-constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_H_OFFSET = 199U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_H_OFFSET = 133U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_H_BYTES = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_OFFSET =
+    CHUNK_FWD_HO_FUSED_UB_VAR_QK_A_OFFSET;
+constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_BYTES = 32U * 1024U;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_GATE_OFFSET =
     CHUNK_FWD_HO_FUSED_UB_VAR_GATE_OFFSET;
 constexpr uint32_t CHUNK_FWD_HO_FUSED_UB_VAR_O_GATE_BYTES = 1U * 1024U;
@@ -242,11 +249,13 @@ static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_QK_A_OFFSET +
                       CHUNK_FWD_HO_FUSED_UB_VAR_MASK_BYTES <=
                       CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_OFFSET,
               "OV1 scratch must be disjoint from concurrent H Fixpipe output");
+static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_G_OFFSET +
+                      CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_G_BYTES <=
+                  CHUNK_FWD_HO_FUSED_UB_USED_MAX,
+              "HV2 g_last temporary must remain inside the fused UB footprint");
 static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_GATE_OFFSET +
                       CHUNK_FWD_HO_FUSED_UB_VAR_GATE_BYTES <=
                   CHUNK_FWD_HO_FUSED_UB_VAR_GATE_INPUT_OFFSET &&
-                  CHUNK_FWD_HO_FUSED_UB_VAR_GATE_END <=
-                  CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET &&
                   CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_END <=
                   CHUNK_FWD_HO_FUSED_UB_VAR_G_LAST_OFFSET &&
                   CHUNK_FWD_HO_FUSED_UB_VAR_O_GATE_OFFSET ==
@@ -277,13 +286,22 @@ static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET +
 static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET >=
                   CHUNK_FWD_HO_FUSED_UB_VAR_QK_SCRATCH_END,
               "AIC Fixpipe and OV1 scratch are live concurrently");
-static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET >=
-                      CHUNK_FWD_HO_FUSED_UB_VAR_GATE_END &&
+static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_OFFSET +
+                      CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_BYTES <=
+                  CHUNK_FWD_HO_FUSED_UB_VAR_QK_SCRATCH_END &&
+                  CHUNK_FWD_HO_FUSED_UB_VAR_O_OUT_OFFSET >=
+                      CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_OFFSET &&
+                  CHUNK_FWD_HO_FUSED_UB_VAR_O_OUT_END <=
+                      CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_OFFSET +
+                          CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_BYTES,
+              "OV1/HV2/OV2 phase-reused output interval is inconsistent");
+static_assert(CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_A_OFFSET ==
+                      CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET &&
                   CHUNK_FWD_HO_FUSED_UB_VAR_O_WORK_END <=
-                      CHUNK_FWD_HO_FUSED_UB_VAR_MASK_OFFSET &&
+                      CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_END &&
                   CHUNK_FWD_HO_FUSED_UB_VAR_O_OUT_END <=
                       CHUNK_FWD_HO_FUSED_UB_VAR_H_DIRECT_OFFSET,
-              "OV2 work/output must be disjoint from gate and H_DIRECT");
+              "OV2 work may reuse H_DIRECT only after the H-to-O handoff");
 static_assert(CHUNK_FWD_HO_FUSED_UB_USED_MAX <=
                   static_cast<uint32_t>(CHUNK_FWD_HO_FUSED_UB_DATA_LIMIT),
               "fused UB: footprint crosses the UB data limit");

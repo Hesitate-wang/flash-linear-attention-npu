@@ -55,7 +55,7 @@ public:
     using FinalStateElement = typename FinalStateType_::Element;
 
     CATLASS_DEVICE
-    BlockEpilogue(Arch::Resource<ArchTag> &resource)
+    BlockEpilogue(Arch::Resource<ArchTag> &resource, bool useFusedUbLayout = false)
     {
 
         constexpr uint32_t CALC_BUF_OFFSET = 0;
@@ -74,19 +74,24 @@ public:
         constexpr uint32_t PING_G_INPUT_BUF_OFFSET = 99U * 1024U;
         constexpr uint32_t PONG_G_INPUT_BUF_OFFSET = 99U * 1024U;
         constexpr uint32_t UPDATE_SCRATCH_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_UPDATE_SCRATCH_OFFSET;
-        constexpr uint32_t UPDATE_G_BUF_OFFSET = GDN::CHUNK_FWD_HO_FUSED_UB_H_UPDATE_G_OFFSET;
+        const uint32_t updateScratchOffset = useFusedUbLayout
+            ? GDN::CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_SCRATCH_OFFSET
+            : UPDATE_SCRATCH_BUF_OFFSET;
+        const uint32_t UPDATE_G_BUF_OFFSET = useFusedUbLayout
+            ? GDN::CHUNK_FWD_HO_FUSED_UB_VAR_H_UPDATE_G_OFFSET
+            : GDN::CHUNK_FWD_HO_FUSED_UB_H_UPDATE_G_OFFSET;
 
 
         calcUbTensor = resource.ubBuf.template GetBufferByByte<float>(CALC_BUF_OFFSET);
 
         hUpdateUbTensor_ping = resource.ubBuf.template GetBufferByByte<float>(PING_BUF_0_OFFSET);
-        hUbTensor_ping = resource.ubBuf.template GetBufferByByte<HElementOutput>(UPDATE_SCRATCH_BUF_OFFSET);
-        finalOutputUbTensor_ping = resource.ubBuf.template GetBufferByByte<FinalStateElement>(UPDATE_SCRATCH_BUF_OFFSET);
+        hUbTensor_ping = resource.ubBuf.template GetBufferByByte<HElementOutput>(updateScratchOffset);
+        finalOutputUbTensor_ping = resource.ubBuf.template GetBufferByByte<FinalStateElement>(updateScratchOffset);
         glastUbTensor_ping = resource.ubBuf.template GetBufferByByte<float>(UPDATE_G_BUF_OFFSET);
 
         hUpdateUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(PONG_BUF_0_OFFSET);
-        hUbTensor_pong = resource.ubBuf.template GetBufferByByte<HElementOutput>(UPDATE_SCRATCH_BUF_OFFSET);
-        finalOutputUbTensor_pong = resource.ubBuf.template GetBufferByByte<FinalStateElement>(UPDATE_SCRATCH_BUF_OFFSET);
+        hUbTensor_pong = resource.ubBuf.template GetBufferByByte<HElementOutput>(updateScratchOffset);
+        finalOutputUbTensor_pong = resource.ubBuf.template GetBufferByByte<FinalStateElement>(updateScratchOffset);
         glastUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(UPDATE_G_BUF_OFFSET);
 
         if constexpr (kGated) {

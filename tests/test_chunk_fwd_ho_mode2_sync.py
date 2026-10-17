@@ -236,11 +236,11 @@ class Mode2SyncTest(unittest.TestCase):
             state = EventState(self.values)
             state.run(preset)
             for chunk in range(chunks):
-                state.run(self.fence, EventId=3)
                 # OV1 processes both lanes even for a lane with zero token rows.
                 state.run(self.ov1_trace(rows), pingpongFlag=0)
-                state.run(self.fence, EventId=3)
                 state.run(hv1)
+                # OV1 QK output is reused by HV2, not HV1.
+                state.run(self.fence, EventId=3)
                 if store_final or chunk + 1 < chunks:
                     state.run(hv2)
                 state.run(self.fence, EventId=7)
@@ -268,8 +268,8 @@ class Mode2SyncTest(unittest.TestCase):
 
     def test_stage_boundaries_and_direct_slot_release(self):
         ordered = ("WriteInitialHandoffState(", "RebuildCausalMask(",
-                   "while (scheduler.isRunning)", "FenceOToH();", "epilogueQkmask(",
-                   "FenceOToH();", "StageV1(h);", "StageV2(h, needStage2);",
+                   "while (scheduler.isRunning)", "epilogueQkmask(",
+                   "StageV1(h);", "FenceOToH();", "StageV2(h, needStage2);",
                    "FenceHToO();", "epilogueOutput.ProcessNarrowSplit(",
                    "FenceOToH();", "Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(ov2ChunkFinished)")
         cursor = 0
@@ -360,10 +360,15 @@ class Mode2SyncTest(unittest.TestCase):
         self.assertFalse(overlap(g_last, region("GATE")))
         h_vnew = source(BLOCK / "block_epilogue_gdn_fwdh_vnew_preload_ss.hpp")
         self.assertIn("GetBufferByByte<GElementInput>(SLOT_G_INPUT_BUF_OFFSET)", h_vnew)
-        self.assertEqual(self.value("UB_VAR_O_WORK_END"), 231 * 1024)
-        self.assertFalse(overlap(work_a, direct))
-        self.assertFalse(overlap(work_h, direct))
+        self.assertEqual(self.value("UB_VAR_O_WORK_END"), 165 * 1024)
+        self.assertTrue(overlap(work_a, direct))
+        self.assertTrue(overlap(work_h, direct))
         self.assertFalse(overlap(out, direct))
+        update_scratch = region("H_UPDATE_SCRATCH")
+        self.assertEqual(update_scratch, (71 * 1024, 103 * 1024))
+        self.assertTrue(overlap(update_scratch, region("QK_A")))
+        self.assertTrue(overlap(update_scratch, region("QK_OUT")))
+        self.assertTrue(overlap(update_scratch, out))
         self.assertEqual(self.value("UB_VAR_H_DIRECT_END"), self.value("UB_VAR_GATE_OFFSET"))
         # QK-to-H and init-to-runtime aliases are separated by their stage order.
         self.assertLess(self.value("UB_VAR_QK_SCRATCH_END"), self.value("UB_VAR_H_DIRECT_OFFSET"))

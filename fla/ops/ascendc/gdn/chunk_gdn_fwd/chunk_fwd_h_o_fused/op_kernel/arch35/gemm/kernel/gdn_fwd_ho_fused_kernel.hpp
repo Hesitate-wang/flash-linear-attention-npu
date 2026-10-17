@@ -287,7 +287,7 @@ public:
 
     __aicore__ inline GDNFwdHOFusedKernel()
         : blockMmadWH(resource), blockMmadKV(resource),
-          epilogueVnew(resource), epilogueUpdate(resource) {}
+          epilogueVnew(resource), epilogueUpdate(resource, true) {}
 
     __aicore__ inline void Init(
         GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR initialState,
@@ -470,6 +470,10 @@ private:
             const HOffsets &h = scheduler.offsets.h;
             const OOffsets &o = scheduler.offsets.o;
 
+            // OV2 reuses H_DIRECT. Do not let this chunk's HC1 Fixpipe write
+            // the same UB window until the previous chunk's OV2 has retired it.
+            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
+
             // ---- OC1: Q @ K^T -> attn workspace (GM) --------------------
             {
                 auto attenLayout = tla::MakeLayout<ElementAtten, LayoutAtten>(
@@ -493,7 +497,6 @@ private:
 
             // ---- HC1: W @ h[i] ------------------------------------------
             StageC1(h);
-            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
             // ---- OC2: Q @ h[i] -> FP32 oH workspace (GM) ----------------
             // HC1 already waited for this H before loading it.
             {
@@ -612,9 +615,6 @@ private:
             const HOffsets &h = scheduler.offsets.h;
             const OOffsets &o = scheduler.offsets.o;
 
-            // Retire O's previous UB accesses before reusing single-slot storage.
-            FenceOToH();
-
             // ---- OV1: gate difference / exp / causal mask, masked QK -----
             Arch::CrossCoreWaitFlag(oc1QkReady);
             epilogueQkmask(
@@ -624,12 +624,14 @@ private:
                 o.batchIdx, o.headIdx, o.chunkIdx, nullptr);
 
             // ---- HV1: VUpdate + V_new ------------------------------------
-            FenceOToH();
+            // OV1's QK output shares its UB interval with HV2's state output.
+            // HV1 does not touch that interval, so it can run before the handoff.
             StageV1(h);
 
             // ---- HV2: h[i+1] = h[i] * gate + h work ---------------------
             // Stage 2 is skipped for the final chunk unless the final state is
             // stored; both sides take the same decision.
+            FenceOToH();
             const bool needStage2 = NeedStage2(h.isFinalState);
             StageV2(h, needStage2);
             // HC1 of the next chunk is the only consumer of this token.
