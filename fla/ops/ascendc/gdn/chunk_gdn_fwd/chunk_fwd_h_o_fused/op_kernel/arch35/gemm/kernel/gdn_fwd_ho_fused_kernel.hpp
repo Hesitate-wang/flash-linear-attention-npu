@@ -472,7 +472,7 @@ private:
 
             // OV2 reuses H_DIRECT. Do not let this chunk's HC1 Fixpipe write
             // the same UB window until the previous chunk's OV2 has retired it.
-            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
+            
 
             // ---- OC1: Q @ K^T -> attn workspace (GM) --------------------
             {
@@ -497,6 +497,7 @@ private:
 
             // ---- HC1: W @ h[i] ------------------------------------------
             StageC1(h);
+            Arch::CrossCoreWaitFlag(ov2ChunkFinished);
             // ---- OC2: Q @ h[i] -> FP32 oH workspace (GM) ----------------
             // HC1 already waited for this H before loading it.
             {
