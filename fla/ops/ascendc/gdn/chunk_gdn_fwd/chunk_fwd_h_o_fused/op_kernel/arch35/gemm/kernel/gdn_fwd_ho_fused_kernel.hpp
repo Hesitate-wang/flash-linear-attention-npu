@@ -287,7 +287,7 @@ public:
 
     __aicore__ inline GDNFwdHOFusedKernel()
         : blockMmadWH(resource), blockMmadKV(resource),
-          epilogueVnew(resource), epilogueUpdate(resource, true) {}
+          epilogueVnew(resource), epilogueUpdate(resource) {}
 
     __aicore__ inline void Init(
         GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR initialState,
