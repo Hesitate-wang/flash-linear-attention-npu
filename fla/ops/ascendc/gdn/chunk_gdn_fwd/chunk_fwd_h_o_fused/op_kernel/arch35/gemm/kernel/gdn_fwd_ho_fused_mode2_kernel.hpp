@@ -41,15 +41,15 @@ class GDNFwdHOFusedMode2Kernel {
     static_assert(decayL1 + 64U * 128U * sizeof(DataT) <= ArchTag::L1_SIZE);
     // 0x2: Cube producers 0..4, Vector producers 5..8. Every generation
     // has exactly one matching consumer, including the final chunk token.
-    static constexpr Arch::CrossCoreFlag oc1Ready = 0;
-    static constexpr Arch::CrossCoreFlag hc1Ready = 1;
-    static constexpr Arch::CrossCoreFlag oc2Ready = 2;
-    static constexpr Arch::CrossCoreFlag oc3Ready = 3;
-    static constexpr Arch::CrossCoreFlag hc2Ready = 4;
-    static constexpr Arch::CrossCoreFlag vnewReady = 5;
-    static constexpr Arch::CrossCoreFlag chunkFinished = 6;
-    static constexpr Arch::CrossCoreFlag decayReady = 7;
-    static constexpr Arch::CrossCoreFlag hReady = 8;
+    Arch::CrossCoreFlag oc1Ready = 0;
+    Arch::CrossCoreFlag hc1Ready = 1;
+    Arch::CrossCoreFlag oc2Ready = 2;
+    Arch::CrossCoreFlag oc3Ready = 3;
+    Arch::CrossCoreFlag hc2Ready = 4;
+    Arch::CrossCoreFlag vnewReady = 5;
+    Arch::CrossCoreFlag chunkFinished = 6;
+    Arch::CrossCoreFlag decayReady = 7;
+    Arch::CrossCoreFlag hReady = 8;
 
 public:
     CATLASS_DEVICE void Init(
