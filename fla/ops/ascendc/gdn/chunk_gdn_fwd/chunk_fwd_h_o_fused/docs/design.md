@@ -361,3 +361,187 @@ AIV 一次处理其负责的连续 64 行 state：一次 MTE2 搬入 `64 x 128` 
 `calcUbTensor`、Cube2 update UB 和低精度输出 UB 分别占 32 KiB、32 KiB 和 16 KiB，
 均在既有区域内；两个 AIV 的本地 UB 相互独立。带 GK 或非 DirectUb 的场景继续使用
 16 行通用 tile；final-state 分支沿用 fused 已有的 FP32 驻留和写回语义。
+
+
+## 固定 shape MODE2 QK-mask 独立实现（规则 V2，尚未接入调度）
+
+本节定义 `EpilogueAtlasGDNFusedMode2Qkmask` / `block_epilogue_gdn_fused_qkmask.hpp`
+的限定实现。仅覆盖自然指数、完整 chunk=64、K=V=128、每 MIX core 两个 AIV，
+不改变现有公开接口、host 支持范围或 MODE1/现有 MODE2 分派。
+本轮仅实现 OV1 构件；不能将它直接替换当前 epilogue 后声称整表已经接入。
+
+### OV1 数据、地址与公式
+
+AIV lane s=0/1 处理绝对行 `i=s*32+r`、`r∈[0,32)`，列 `j∈[0,64)`。
+输入 QK 为 FP32（GM搬入或OC1 Fixpipe直接写Ub::attn_ping），gate由调用方从GM
+FP16/BF16/FP32准备至UB；输出maskedQK为FP16/BF16，支持GM或64x64 zN L1。
+语义保持现有 QK-mask：有效位置计算 `QK[i,j]*exp(min(g[i]-g[j],0))`，
+未来位置输出精确零。指数使用 FP32、非正指数避免正向溢出；无效位置在 Exp 前选择安全零，
+乘法后再次选择零。该约束继承有限合法输入，未定义新的 NaN/Inf 公共接口语义。
+
+| UB 区域（每 AIV，KiB） | 大小 | 内容 / 生命周期 |
+| --- | --- | --- |
+| [0,8) | 8 KiB | QK 32×64 FP32，MTE2→VF |
+| [8,16) | 8 KiB | 行 gate 广播，VF 原地改为 maskedQK FP32 |
+| [16,24) | 8 KiB | 列 gate 广播，VF 后复用起始 4 KiB 作为 cast 输出 |
+| [24,28) | 4 KiB | 常驻 T32 下三角，由调用方在循环前初始化一次；两个 lane 内容相同 |
+| [28,28.125) | 128 B | 16 位 gate 输入；FP32 输入直接搬至 gate FP32 区 |
+| [28.5,28.75) | 256 B | 64 个 FP32 gate，由调用方每 chunk 准备一次，整 chunk 只读 |
+| [29,37) | 8 KiB | 两次 Broadcast 依次复用，结束后复用为临时 32×64 mask |
+
+`gdnFusedMode2UbMallocTable` 是本实现唯一地址来源。持久 mask 只有一份 4 KiB；
+临时全宽 mask 不增加分配。lane0 在工作区中组装 `[T32,0]`，lane1 组装 `[1,T32]`。
+`Copy(mask32, repeat=32, mask=32, strides={1,1,8,4})` 以 256 B 目的行距和
+128 B 源行距把 T32 放入对应半行，读取严格限制在 T32 的 4 KiB 区间。
+
+两次 Broadcast 间、Broadcast→临时 mask、mask→VF、VF→cast 均有 PIPE_V 屏障。
+一个不接收 attn 的 VF 遍历本 lane 的 32 行，完成 Sub→Mins→Exp→因果置零。
+广播、mask 组装和该 VF 均在 OC1 等待之前；随后等待 OC1→搬入 QK→MTE2_V→Mul→cast/MTE3。
+GM路径每lane输入8KiB QK、输出4KiB maskedQK；enableL0C2UB跳过QK的GM搬入，
+enableUB2L1将输出改为写入调用方提供的64x64 zN L1，开关独立且默认false。调用方每 chunk 另搬入一次
+gate 128/256 B 并按需转 FP32，供 OV1/HV1/HV2/OV2 共用。
+最大活动结束地址 37 KiB，HC1 新布局从 37 KiB 开始，与 OV1 并行区域分离。
+Broadcast 分配的 8 KiB 是否满足目标 CANN 对这两个 shape 的最小 workspace 要求，
+必须经该 SDK 的临时空间查询和设备验证确认；尚未据硬件证据确认。
+
+### 集成与双向同步约束
+
+- 创建本 specialization 前，确认 chunk=64、K=V=128、两个 AIV 和自然指数；尾 chunk
+  或其它 shape 留在原分派路径，不能调用本固定 shape 入口。
+- 调用方在 chunk 循环前初始化 T32 一次，将 mask 的 LocalTensor 传入构造函数；
+  epilogue 不获取或初始化 mask 地址。整表其它阶段不得覆盖 [24,28) KiB。
+- 调用方每 chunk 执行一次 `GateBuffer<GateT>::Prepare(gmG)`，并向所有 epilogue
+  构造函数传入其 `Tensor()`。当前 chunk 所有读者完成前不得准备下一 chunk。
+  GateBuffer 独占闭合的本地事件 7，不得被调用方额外预置 token。
+- OV1 调用参数只有 maskedQK、QK 当前 chunk 的 GM 起点，内部按 lane 加 `32*64` 元素行偏移；
+  调用方传入 `oc1Ready`，OV1 内部在 QK 的 GM→UB 搬运前等待该信号；调用方不得重复等待。
+  Cube 在 QK 写回完成后发布 ready。返回前 MTE3 完成，调用方才能发布 OV1 ready。
+- 上一 chunk 的消费者释放后才能再次写 GM workspace。构件只闭合自身
+  MTE2/V/MTE3 事件，不替代 AIC/AIV ready/free 协议。
+- 整体切换内存表还需同时迁移 HC1 目的 UB 到 37 KiB、HC2 到 141 KiB，
+  配套改写 HV1/HV2/OV2 以及初始化 staging，并重新验证所有阶段并发地址与释放条件。
+  现有布局的 HV calc [0,32) 会覆盖本表的常驻 T32，故本构件保持独立未被 driver 实例化。
+- 本轮方案评审：固定 shape 数量/地址/象限分解及事件配对经静态检查；设备资源与精度
+  验收保留为未完成，不宣称本独立构件已经可在生产调度直接启用。
+
+
+### 固定64/128其它构件的等待位置与RegBase边界
+
+独立HV1/HV2/OV2按最晚的数据依赖点等待Cube：HV1在HC1前完成u的搬运/cast和
+exp(g[63]-g[:])；HV2在HC2前完成旧状态h*exp(g[63])；OV2在OC2前准备exp(g[:])，
+在OC3前完成inter的搬运和逐行衰减。等待后的函数不再接收用于提前准备的raw gate。
+HV1/OV2分别复用29KiB开头256B存储衰减，不增加内存表分配，必须在OV1/HV1读者完成后交接。
+详细函数、顺序和本地检查见mode2_fixed64_hv_ov_epilogues.md的“其余构件的依赖边界检查”。
+
+### 固定64/128 OV1直连配置
+
+构造参数新增enableL0C2UB/enableUB2L1和可选L1输出tensor；前者要求OC1 Fixpipe以SPLIT_M
+将每AIV32x64 FP32、stride64写入UB偏移0，并在完成后发OC1 ready。后者要求完整64x64 zN L1
+目的，按四个16列panel分两AIV行区间写入，后续Cube按同一物理布局读取，不能套用128x128行距。
+Gate/mask提前计算顺序保持；GM fallback的MTE2_V只在实际搬运时执行；所有路径搬出完成才返回。
+该构件未接入driver；Cube输入UB复用和L1输出消费/释放的双向协议仍须由调用方配套。
+
+
+### 固定64/128 HV1/HV2/OV2的直连/GM配置
+
+三个新构件构造参数统一为resource、gate、enableL0C2UB=false、enableUB2L1=false及L1目标。
+HV1增加GM whInput（64x128），HV2增加GM hWorkInput（128x128），OV2沿用两份GM输入；
+仅false输入在对应ready后搬入。true输入使用37KiB WH、141KiB h_work、37/53KiB inter/intra。
+L1输出使用共享助手CopyRowsToL1Zn：HV1两块64x128 zN，HV2非末chunk一块128x128 zN，
+OV2一块64x128 zN；最终需保存的HV2 final_state始终按原dtype写GM。
+HV2在GM/L1两种输出路径均保留h_ping供下一chunk使用，Vec直接递推FP32结果，DataT副本仅供Cube读取；
+FP32 final_state递推保持原流程。h_ping独占跨chunk，同一task沿用同一UB，task首块重置初态。
+Cube直写37/53KiB前须等待HV1读者释放；ready只证明结果就绪，不能替代生产者覆盖前的free。
+所有新路径均未接入旧driver，L1槽由新调用方预留，布局和双AIV完成/释放协议见独立构件文档。
+
+
+### 固定64/128 HV1分段生产与ready
+
+按用户要求HV1先只计算vnewDecay，完成cast和GM/L1搬出后发decayReadyForHc2，
+再独立Sub计算vnew，完成cast与搬出后发vnewReadyForOc3。两个flag由调用方传入，
+内部用mode0x2/PIPE_MTE3发布；返回后的外部重复发布必须移除。
+两段共用53KiB的8KiB cast槽，61KiB的u_fp32和37KiB的WH保留到第二次Sub完成。
+早发HC2 ready不能作为输入UB free；HC2目的141KiB与这些存活输入不重叠。
+原FP32减法/衰减精度保持，decay计算不得提前舍入，vnew不能从舍入后的decay反推。
+
+
+### 固定64/128 HV2初态所有权
+
+初始state由driver在每task的chunk循环前准备到每AIV h_ping（64x128 FP32），
+完成必要清零/搬运/转换和同步后保持到首HV2。新HV2移除initialState/useInitialState参数；
+所有chunk直接原地消费并更新h_ping，不恢复state。hInput/isInitialState参数已删除，
+DataT staging仅承接Cube输入或最终输出转换；Vec递推始终保留FP32，不受storeFinalState影响。
+调用方另行准备首HC1/OC2所需H。示例见独立构件文档“初始state由driver在循环前准备”。
+
+
+### 固定64/128 HV2生产者通知
+
+HV2新增传入hReadyForHc1。非末chunk在GM/L1 H搬出及MTE3本地等待完成后，
+内部以mode0x2/PIPE_MTE3发布ready；末chunk不发布。调用方移除外部重复set，
+Cube侧等待协议及目的槽free仍由driver配套，当前新构件尚未接入旧driver。
+
+
+### 固定64/128 每AIV H空间压缩
+
+H总shape为128×128；每AIV64×128 FP32仅需32KiB。h_ping保持109KiB，
+h_work_ping改为141KiB，结束于173KiB。OV2复用37/53/69KiB地址不变，
+HV2 DataT暂存仍位于93KiB，避免与37KiB OC2目的重叠。
+
+
+### 固定64/128 独立OV2区域的编译期边界
+
+按当前内存表，OV2的inter/intra/out分别从173/189/207KiB开始，输出结束于215KiB；
+替代前述37/53/69KiB复用方案。内存表统一检查32B对齐及各存活区域相邻边界，
+包括h_work到o_inter、o_inter到o_intra、o_intra到o_out及o_out到248KiB通信保留区。
+允许205到207KiB之间保留空隙。OV2局部断言改为通信边界，HV2检查其与OC2目的的边界。
+
+
+### 固定64/128 OV2生产者完成通知
+
+OV2新增传入chunkFinished，GM/L1输出指令之后内部以mode0x2/PIPE_MTE3发布完成通知。
+调用方不重复set，每次调用发布一次；末chunk的token消费需在driver接入时配套。
+输入仍依次等待OC2/OC3 ready，保留当前本地事件设置。
+
+
+### Fixed64/128 Mode2 driver rewrite (2026-10-19)
+
+Add independent schedule/driver files; retain the legacy path for other shapes.
+Scope: fixed length, natural exp, K=V=128, chunk=64, complete chunks, one task per MIX core.
+Use uint64 offsets, value-head W/U/g and grouped Q/K. Cube: OC1/HC1/OC2/HC2/OC3.
+Vector: OV1/HV1/HV2/OV2. Cube outputs support GM or SPLIT_M UB; Vector intermediates
+support GM or independent L1. O/final_state remain GM. Default: Cube-to-UB plus Vector-to-GM (CubeToUB=true, VecToL1=false).
+All five Cube stages call the shared BlockMmadTla implementation in
+common/kernel_utils/block/block_mmad_pingpong_tla_preload.hpp. Configure one L1A,
+L1B, L0A, L0B and L0C stage for the single-slot design. Use each stage's exact
+compile-time M/N/K: OC1=64/64/128, HC1 and OC2=64/128/128,
+HC2=128/128/64, OC3=64/128/64. This preserves the external L1 zN strides.
+A private adapter only binds the protected L1 operand slots and substitutes a
+no-op GM-to-L1 copy for operands already produced in L1. The shared block owns
+L1-to-L0, MMAD, Fixpipe and local events. Each call presets and drains shared
+block events before another stage reuses the same scratch/L0; resident GM cache
+is disabled. Cross-core producer ready signals remain in the driver.
+L1 KiB: scratch=[0,64), H=[64,96), mask=[96,104), Vnew=[104,120), decay=[120,136).
+Actual M/N/K layouts must match CopyRowsToL1Zn FullRows.
+Initialize FP32 UB H, Cube H and the 32x32 mask before the loop. Publish initial H-ready.
+HC1 consumes H-ready; OC2 uses the same H before HV2 overwrites it.
+HV1 publishes decay-ready and Vnew-ready; HV2 publishes next H-ready only for nonfinal chunks.
+OV2 publishes finished for every chunk; Cube consumes it before the next chunk and at final exit.
+Skipped final HC2 still consumes decay-ready and publishes HC2-ready to match HV2.
+HV1's two casts reuse 53KiB within one chunk: set MTE3_V after decay copy and wait just
+before the Vnew cast, allowing Sub to overlap. No per-chunk HV2 drain. Driver fences
+final MTE3 completion before returning. Retain host ABI/workspace and legacy fallback.
+CPU checks are development evidence; CANN/NPU build, precision and pipeline validation remain required.
+
+
+### Mode2 final review and default transport (2026-10-19)
+
+Default CubeToUB=true, VecToL1=false as requested: the five Cube outputs go to UB;
+Vector intermediate outputs go to GM and the shared preload block loads them to L1.
+Vec-to-L1 remains an explicit optional template choice, not the default.
+OV2 sets V_MTE2 EVENT_ID7 immediately after ScaleInter completes the last use of
+gate/decay scratch. Each noninitial chunk waits for that event before the next
+gate DMA; kernel exit consumes the final chunk's event. There are N sets and N
+waits for N chunks, including the one-chunk case. This event releases gate/scratch;
+the existing final MTE3 fences remain responsible for output completion.
+Full OV1/HV1 overlap still requires splitting OV2 and adjusting Cube slot waits.
+FP32 final_state is copied only on the final chunk, matching the DataT state path.

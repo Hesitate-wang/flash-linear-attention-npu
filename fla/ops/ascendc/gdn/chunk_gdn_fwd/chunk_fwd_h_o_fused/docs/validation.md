@@ -311,3 +311,249 @@ O、H、V_new、final state，并重复多 chunk 检查事件代次。单次 ker
 - HC1/HC2 保留原内部缓冲配置，补齐 preSetFlags/finalWaitFlags 生命周期。OC2 预取后回收 HC1 事件，再初始化 OC2 L0 事件；HC2 的事件在 OC3 之前回收。
 - H L1 为 [0,128 KiB)，OC2 为 [128,256 KiB)，OC3 为 [192,320 KiB)。H 使用事件 0–3，OC2/OC3 在阶段结束后复用事件 4–7。
 - 本地完成源码顺序、完整 chunk 分支保护及 diff 格式检查；CANN 编译、设备精度和重叠收益仍待验证。
+
+
+## 2026-10-19 固定 64/128 的独立 MODE2 OV1 构件
+
+- 用户指定 `gdnFusedMode2UbMallocTable`；实现独立 policy、include guard 和模板 specialization，
+  避免与现有 O policy/epilogue 重定义。表内 constexpr 成员改为 static constexpr，单槽别名一致。
+- 基于既有 QK-mask 的数学语义，限制 full chunk=64、K=V=128、两 AIV，按一份 T32
+  组装两个 lane 的因果 mask。参考角色：既有 arch35 OV1 的广播、自然指数、cast 与事件 API；
+  没有修改 CPU 标杆或公开接口。详细数据流与集成约束见 design.md 新增小节。
+- 仅独立构件，未改 driver/host；原整算子 ATK 不能验证这个尚未实例化的新路径。
+- 验证计划：静态布局/编译 policy、CPU 象限分解与完整 64×64 因果参考对照，现有 MODE2
+  本地同步回归；目标 CANN 编译后运行 FP16/BF16/FP32 gate × 两种输出 dtype、两个 AIV、
+  多 chunk、自定义 gate 差值、对角线/上三角精确零、A5 内存检查。验证 8 KiB Broadcast
+  workspace 的目标 SDK 最小要求，接入整表后再跑全部受影响阶段与原场景回归。
+- 本机没有 ccec/CANN/A5 NPU：设备编译、Broadcast workspace 需求、设备精度/同步和内存
+  验收未执行，构件尚未达到算子正式验收条件。
+
+本轮本地结果：
+
+- policy 表使用最小 Catlass 类型桩通过 `clang++ -std=c++17 -fsyntax-only`，并验证 gate、
+  workspace、HC1、H/H-work 与单槽输出的地址静态断言。该结果仅验证普通 C++ 与常量，
+  不验证 AscendC API 或设备代码。
+- CPU 独立模拟两 AIV 的 T32→32×64 拼接、Copy 步长及门控公式，64 组随机 gate/QK，
+  合计 262144 个元素，与完整 64×64 因果参考及 FP16 舍入逐元素一致。
+  这不是新 epilogue 的 NPU 精度验收。
+- `python3 -m unittest discover -s tests -p test_chunk_fwd_ho_mode2_sync.py -v`：8 项中
+  7 项通过，`test_aic_chunk_gate_precedes_all_chunk_work` 失败。当前 driver 的
+  `ov2ChunkFinished` 等待在 HC1 之后；逐字节确认 driver 与 HEAD 相同，因此为本次未修改
+  路径的既有失败。本轮未调整 driver 或该测试的期望值。
+- `git diff --check` 通过；两个新增文件另外检查行尾空白。
+
+
+## 2026-10-19 固定 64/128 独立构件的 mask/gate 准备
+
+- 新 OV1 构造函数接收外部 mask/gate LocalTensor；内部不再初始化 mask 或搬运 gate。
+  调用方在 chunk 循环前初始化 T32，每 chunk 在前一代读者释放后执行一次 GateBuffer::Prepare。
+- 新 HV1/HV2/OV2 共享只读 FP32 gate，删除各自重复的 GM gate load/cast；HV2 两份输出合并一次同步，
+  OV2 移除 gate cast 被删除后多余的 V 屏障。旧 driver、旧 epilogue 和内存表未改。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py`：ASan/UBSan CPU 仿真通过实际四个新头文件，
+  六种数据/gate组合、两个lane、三chunk的OV1/HV1/OV2及48组HV2状态场景；检查mask/gate不被改写，
+  每chunk只搬运一次gate且至多转换一次。同步CPU桩不验证真实CANN签名和异步流水。
+- 新构件仍未接入 driver。本机无 CANN/NPU，设备构建、ATK精度及跨核 ready/free 验证待集成后执行。
+
+
+## 2026-10-19 固定 64/128 OV1 内部等待 OC1
+
+- OV1 新增传入的 `oc1Ready`，内部在 QK DataCopy 前执行 CrossCoreWaitFlag。
+- CPU 仿真为每个 lane/chunk 的 QK 读取加入 guard：未消费传入 ready 时读取直接失败，
+  并要求每次调用恰好等待该 flag 一次。六种 dtype 组合与原有状态场景回归通过。
+- 调用方示例同步删除外部 OC1 等待；旧 driver 未接入新构件，真实设备同步验证仍待执行。
+
+
+## 2026-10-19 OV1 延后等待与 gate/mask RegBase 拆分
+
+- 对齐现有 fwdo_qkmask 顺序：Broadcast→mask组装→PrepareGateMask VF→V屏障→OC1 wait→QK搬入→MTE2_V→Mul→cast。
+- RegBase 函数移除 attn 参数及 QK 乘法，只负责独立的 gate/mask 准备。
+- CPU 仿真增加等待点的完整 gate 衰减矩阵核对，要求独立计算已完成才等待OC1，且等待后才可读取QK。
+  原六种dtype、两个lane、三chunk及48组状态场景一并回归；设备验证仍待执行。
+
+
+## 2026-10-19 HV1/HV2/OV2 等待位置与 RegBase 边界
+
+- HV1拆分PrepareRelativeDecay/ComputeVnew，gate指数和u转换提前到HC1等待前；
+  HV2将ScaleState提前到HC2等待前，等待后仅Add；OV2拆分PrepareDecay/ScaleInter，
+  分别提前到OC2/OC3等待前，等待后仅Add/Muls/cast。函数只接收本阶段所依赖的参数。
+- HV1/OV2先后复用OV1已结束的29KiB工作区开头256B；保留末尾搬出等待和跨核token配对。
+  HV2无输入搬运的隐式零初态分支跳过空MTE2_V。
+- CPU仿真增加HC1/HC2/OC2/OC3等待点的完整独立计算结果检查及提前读取保护，
+  六种dtype、双lane、三chunk与48组状态场景通过ASan/UBSan；设备构建与异步同步/性能未验证。
+
+
+## 2026-10-19 OV1 Fixpipe输入 / L1输出配置
+
+- 构造参数enableL0C2UB/enableUB2L1分别控制跳过QK的GM搬运和改写L1，默认均false。
+  L1为调用方提供的64x64 zN，两个lane分别写32行；未改Cube或driver。
+- CPU仿真通过四条路径、六种dtype、两lane和三chunk，直连使用空GM参数，检查不搬运/不发QK的MTE2_V；
+  L1检查布局、边界、另一lane保留及搬出等待。原HV1/HV2/OV2精度和等待位置检查一并通过。
+- 不能用同步CPU桩证明真实Fixpipe/UB→L1签名和异步行为；CANN/NPU验证与driver配套待执行。
+
+
+## 2026-10-19 其余三个Vec构件的Fixpipe/GM与L1/GM路径
+
+- HV1/HV2/OV2新增两个默认false的构造开关及L1输出tensor；HV1/HV2补充GM Cube结果输入参数。
+  独立计算仍提前，ready后按需搬入或直接使用UB；L1输出复用私有CopyRowsToL1Zn助手。
+- HV2保留final_state GM语义；L1 H跨chunk保留于h_ping，下次使用按DataT舍入后扩宽，FP32状态链保持原语义。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py`：四个epilogue的4种路径×6种dtype×2个lane×3个chunk通过；
+  HV2有192组状态场景，覆盖初态、末态、保存开关、FP32/DataT状态及L1 H的保留递推。
+  验证空的未使用GM参数、按需MTE2_V、输出完成等待、L1布局/边界/另一lane不变和独立计算先于ready等待。
+- 无CANN/NPU，设备API、异步Fixpipe/UB→L1、精度与性能未验收。Cube/driver未接入；
+  OC2/OC3写37/53KiB前的HV1反向free及L1消费者释放必须由调用方配套，不能由单向ready推断。
+
+
+## 2026-10-19 HV1 vnewDecay / vnew分段计算与通知
+
+- ComputeVnewDecay只生产HC2的decay。搬出完成发vnewDecayReadyForHc2，再Sub计算vnew，搬出完成发vnewReadyForOc3。
+  两次各闭合搬出事件；两次cast仅复用53KiB原始u，保留61KiB的u_fp32供第二段使用。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --skip-qkmask`通过：六种dtype、四条路径、双lane、三chunk，
+  检查通知顺序、通知时搬出完成、HC2通知时vnew尚未计算、u_fp32未被覆盖及HC2独立h_work写入；
+  HV2的192组状态场景回归通过。
+- 默认全量命令失败于当前qkmask被注释的搬出等待与原断言不符。未修改该文件；skip选项明确只验证HV1/HV2/OV2。
+- 两份输出flag由新HV1内部发布，旧driver仍未接入。实际Cube消费/双AIV代次/异步重叠须设备验证，不能以CPU桩替代。
+
+
+## 2026-10-19 局部同步原地展开
+
+- 删除三个同步包装函数，将vnew/update/output及GateBuffer::Prepare共15处调用展开为原地SetFlag/WaitFlag。
+  事件类型、编号、条件和调用顺序保持不变，未改qkmask。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --skip-qkmask`通过原有事件计数、计算结果、两段通知及192组状态场景检查。
+  qkmask的独立改动仍按上一条记录隔离；本次为等价代码展开，未新增设备验证结论。
+
+
+## 2026-10-19 局部事件改用EVENT_ID常量
+
+- 删除HV1/HV2/OV2的kEvent别名，分别直接使用EVENT_ID4/5/6；GateBuffer准备使用EVENT_ID7。
+  OV1原EVENT_ID0保持，事件分配和顺序不变，跨核flag仍由调用方传入。
+- 源码扫描确认本组所有局部SetFlag/WaitFlag均使用EVENT_ID常量。
+  CPU仿真入口使用--skip-qkmask隔离既有QK改动，检查原事件编号和通知顺序。
+
+
+## 2026-10-19 HV2初态移交driver
+
+- 新HV2删除initialState/useInitialState参数与初态清零/搬入/转换；首chunk消费driver已准备的FP32 h_ping。
+  后续chunk保持FP32 state、GM DataT与L1保留H的恢复和舍入规则。
+- CPU仿真在chunk循环前初始化各AIV h_ping，首chunk hInput传空；验证首chunk没有状态输入DMA，
+  在HC2等待点核对衰减已完成，回归四条路径、六种dtype、双lane、192组状态场景。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --update-only`通过，启用ASan/UBSan，仅验证本次HV2修改。
+- 当前HV1也存在搬出等待被注释的修改，`--skip-qkmask`运行在HV1事件计数断言处失败；本次保留该修改，未宣称全量通过。
+- 当前独立构件未接入旧driver，循环前准备示例已更新；设备验证仍待执行。
+
+
+## 2026-10-19 HV2跨chunk常驻FP32 state
+
+- 删除hInput/isInitialState参数及全部chunk间状态恢复、DataT往返转换，所有chunk直接更新h_ping。
+  driver初态加载独立于storeFinalState，FP32初态直接加载，DataT初态仅在循环前扩宽一次。
+- CPU参考改为FP32连续递推，逐chunk核对UB保留的未舍入结果；破坏GM副本验证后续chunk不读回state。
+- 验证命令：`python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --update-only`；
+  192组三chunk场景、六种dtype组合、四种输入输出路径、双AIV，启用ASan/UBSan。
+  该记录替代上一节中的chunk间恢复规则。其余epilogue的独立修改与设备验证限制保持。
+
+
+## 2026-10-19 HV2内部发布HC1 ready
+
+- 新增hReadyForHc1入参，非末chunk在GM/L1输出及搬出等待后内部set，末chunk不set。
+- CPU仿真在set回调核对输出内容、HC2已等待、MTE3搬出等待已执行、每AIV恰好一次通知，
+  并检查末chunk无通知（保存/不保存均覆盖）。
+- 命令：`python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --update-only`，
+  覆盖192组三chunk状态场景、四种输入输出路径、六种dtype组合及双AIV，启用ASan/UBSan。
+  同步CPU仿真不验证真实跨核代次或双AIV汇合，仍需driver接入后的设备验证。
+
+
+## 2026-10-19 按AIV分块重新计算H内存偏移
+
+- h_ping=[109,141)KiB，h_work_ping=[141,173)KiB；OV2的37/53/69KiB复用偏移不变。
+- 更新内存表、容量断言、HV2直连注释和设计说明；测试的模拟Fixpipe目的引用表中偏移自动更新。
+- 当前用户已将HV2 ready移至H搬出后的MTE3队列，本轮保留该位置；测试在set时检查输出及V_MTE3，
+  返回后继续检查MTE3_V/MTE3_MTE2完成，避免要求set必须位于本地drain之后。
+- 命令：`python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --update-only`，192组三chunk场景，
+  启用ASan/UBSan；实际HC2 Fixpipe地址接线及异步流水仍待driver接入后的设备验证。
+
+
+## 2026-10-19 完善独立OV2布局的断言
+
+- 内存表补齐OV1、gate/mask、HV1、HV2和OV2各边界及32B对齐检查，保留用户的207KiB输出起点。
+  OV2移除依赖77KiB v_new_ping的旧断言，HV2改为检查h_work不得覆盖o_inter。
+- 临时C++编译检查：当前布局通过；地址未对齐、HC2/OC2重叠、OC2/OC3重叠、OC3/cast重叠、
+  输出进入通信保留区五类错误偏移均被预期static_assert拒绝。
+- `--skip-qkmask`已通过全部相关模板编译；运行仍在既有HV1搬出等待计数检查失败，未修改该同步逻辑。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --update-only`用于HV2的192组三chunk回归，
+  启用ASan/UBSan。未执行CANN/NPU验证。
+
+
+## 2026-10-19 HV2去除逐次本地drain的强制断言
+
+- CPU仿真不再要求每次HV2调用执行MTE3_V/MTE3_MTE2；保留V_MTE3、HC2等待、
+  GM/L1输出内容及非末chunk恰好一次MTE3 H-ready通知的检查。
+- 依赖MTE3 H-ready→HC1→HV1→HC2→下一HV2的跨chunk链保护源UB复用；
+  末task输出完成到新task初态写入的同步仍由driver保证，不由同步CPU桩推断。
+- 验证命令：`python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --update-only`，
+  192组三chunk场景、六种dtype、四条输入输出路径、双AIV，启用ASan/UBSan。
+  本次仅调整HV2对应检查，未改HV1两次同chunk cast槽复用的断言。
+
+
+## 2026-10-19 OV2内部发布完成信号
+
+- OV2新增chunkFinished参数，GM/L1输出之后内部在MTE3上发布一次；所有调用示例同步更新。
+- 新增`--output-only`入口，独立验证OV2，避免受既有HV1同chunk暂存复用检查影响。
+  在set回调检查输出内容、OC2/OC3等待顺序、V_MTE3与恰好一次通知，覆盖六种dtype、四条路径、
+  三chunk及双AIV，启用ASan/UBSan。同步桩不验证实际设备异步顺序或跨task token管理。
+
+
+## 2026-10-19 Mode2新schedule/driver联调
+
+- 新建独立scheduler、私有单tile Cube块和driver，固定64/128整chunk入口接新实现，其他场景回退原driver。
+- 默认Fixpipe→UB、Vec→GM（整体复查后按用户要求调整），模板保留四种组合；按当前UB表与实际L1布局连接全部生产者/消费者。
+- 初态和mask循环前初始化，H FP32常驻；9个跨核flag按chunk平衡，最后OV2 token在Cube退出前消费。
+- HV1同chunk共享cast槽恢复一组MTE3_V set/wait，wait推迟到第二次cast前，保留Sub重叠；
+  HV2逐chunkdrain保持删除。原epilogue测试调整过时的本地drain计数检查，保留必要的ready、内容和顺序检查。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py`：四epilogue全量CPU仿真通过，
+  六种Data/Gate组合、四条路径、双AIV、三chunk及192组HV2状态场景，ASan/UBSan。
+- `python3 tests/check_gdn_fused_mode2_driver_cpu.py`：实际scheduler/driver/Cube块/epilogue的
+  三线程CPU联调，覆盖四种搬运组合、1/3 chunks、8种Input/Gate/State组合与初态/终态开关，共256场景；
+  独立参考核对O/final_state，所有flag无残留；scheduler额外检查多batch/GQA、inactive core、大于32位偏移与fallback条件。
+- 当前为开发验证：没有CANN编译器、Catlass vendor头和NPU；不能据此宣称SDK构建通过、
+  实际异步同步正确或达到性能目标。正式ATK/Example/ST、mssanitizer与设备profiling待目标环境执行。
+
+
+## 2026-10-19 Mode2公共Cube preload复用修正
+
+- 原Mode2私有块仅借用TileMmad类型，未调用公共BlockMmadTla流水。现改为继承并实际调用
+  common/kernel_utils/block/block_mmad_pingpong_tla_preload.hpp的operator()、preSetFlags和finalWaitFlags。
+- 私有适配只绑定Vec生产的L1操作数和跳过其GM→L1搬运；五个Stage使用各自精确M/N/K，
+  单槽L1/L0配置；公共头和旧driver均未修改。
+- python3 tests/check_gdn_fused_mode2_driver_cpu.py：256场景通过，ASan/UBSan；本轮测试直接包含
+  实际公共preload头，仅模拟设备/TLA基础类型与tile原语。核对O/state、四条搬运组合、跨核token收支，
+  并检查Cube本地事件重复set、空wait、退出残留及B/C槽preset/release计数。
+- 无CANN/NPU环境；CPU事件检查不等价于硬件流水/可见性验证，SDK编译和设备精度/同步检查尚待执行。
+
+
+## 2026-10-19 整体复查结果
+
+- driver默认CubeToUB=true、VecToL1=false；通过不传这两个参数的真实模板实例验证默认选择。
+  默认Cube输入不从GM workspace重复搬入Vec，GM H/Vnew快照与独立参考一致。
+- 修正非首chunk gate/U的复用边界：在gate.Prepare之前用V_MTE2 EVENT_ID7约束下一批MTE2。
+  保留OV2已有MTE3_V，不恢复HV1/HV2内部被去除的逐次drain。
+- HV2仅在末chunk写FP32 final_state，清理嵌套重复判断；修正UB表与OV1异步返回的过时注释。
+- 核对入口条件、host workspace、GQA与batch偏移、各UB/L1区间、五阶段精确M/N/K、
+  公共preload调用、九个跨核信号的首末chunk计数、末chunk跳过更新及退出回收。
+- python3 tests/check_gdn_fused_mode2_driver_cpu.py：304场景通过，ASan/UBSan。
+  其中256个既有组合、16个默认模板场景、32个多batch/GQA场景。
+  多batch/GQA采用B=2/HK=2/HV=8，对16个task分别执行GM/L1路径，逐task三个线程；
+  不模拟不同物理Cube核心并发。核对O/state、GM H/Vnew快照和未选task的输出保护，
+  并核对跨核token、本地事件收支、直连输入跳过GM搬运及跨chunk V→MTE2依赖。
+- python3 tests/check_gdn_fused_mode2_epilogues_cpu.py：四epilogue全量通过，6种Data/Gate组合、
+  四路径、双AIV与3 chunks、192组HV2状态场景；新增检查非末chunk不写final_state。
+- git diff --check通过；本地无ccec/CANN/NPU。CPU仿真不覆盖真实硬件流水、跨核可见性、
+  vendor头类型匹配、性能和正式ATK/ST验收，不将本轮结果记为设备验收通过。
+
+
+## 2026-10-19 用户移动EVENT_ID7后的复查
+
+- 重新读取确认：OV2在ScaleInter及PIPE_V barrier之后set V_MTE2 EVENT_ID7，
+  driver非首chunk入口wait，循环退出再wait一次。N个chunk对应N次set和N次wait，无首轮空等或末轮残留。
+- 最终MTE3_V/MTE3_MTE2仍保留；早期V_MTE2仅释放gate/scratch，不替代最终输出完成依赖。
+  Cube仍在chunk入口等待chunkFinished，Vec仍按完整OV2后进入下一轮，尚未实现跨chunk OV1/HV1交错执行。
+- 算子源码未改；仅同步CPU测试的HardEvent枚举和N次set计数，并对Vec EVENT_ID7增加重复set、空wait和退出残留检查。
+- driver 304场景及四epilogue全量CPU验证重新通过，ASan/UBSan；不代表设备异步流水验收。

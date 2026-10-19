@@ -21,6 +21,7 @@ using ChunkGatedDeltaRuleFwdHTilingData = ChunkFwdHOFusedHStageTilingData;
 #undef CATLASS_ARCH
 #include "gemm/kernel/gdn_fwd_o_kernel.hpp"
 #include "gemm/kernel/gdn_fwd_ho_fused_kernel.hpp"
+#include "gemm/kernel/gdn_fwd_ho_fused_mode2_kernel.hpp"
 #include "chunk_fwd_o_a5.h"
 #include <cstddef>
 
@@ -273,6 +274,14 @@ __aicore__ inline void RunSingleCoreChunkFused(
     GM_ADDR q, GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR o,
     GM_ADDR tiling, GM_ADDR userWorkspace)
 {
+    const auto *data = reinterpret_cast<const __gm__ GDN::ChunkFwdHOFusedTilingData *>(tiling);
+    if (Catlass::Gemm::Block::BlockSchedulerGdnFwdHOFusedMode2::Supports(data)) {
+        Catlass::Gemm::Kernel::GDNFwdHOFusedMode2Kernel<InputT, GateT, StateT> kernel;
+        kernel.Init(k, w, u, g, initialState, q, h, vNew, finalState, o,
+                    tiling, userWorkspace);
+        kernel.Process();
+        return;
+    }
     Catlass::Gemm::Kernel::GDNFwdHOFusedKernel<InputT, GateT, StateT, float, false>
         kernel;
     kernel.Init(k, w, u, g, initialState, q, h, vNew, finalState, o,
