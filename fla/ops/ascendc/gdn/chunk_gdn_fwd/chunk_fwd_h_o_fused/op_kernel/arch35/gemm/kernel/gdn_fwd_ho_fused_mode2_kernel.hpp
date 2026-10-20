@@ -130,7 +130,7 @@ private:
             const Chunk &c = scheduler_.offsets;
             // This closes reuse of all previous-generation Cube destinations.
             // The first chunk has no previous OV2 token to consume.
-            if (!c.first) Arch::CrossCoreWaitFlag(chunkFinished);
+            
             Mmad<layout::RowMajor, layout::ColumnMajor, 64, 64, 128>(q_[c.qk], k_[c.qk],
                 attn_[c.attnWork], Ub::attn_ping);
             Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc1Ready);
@@ -140,6 +140,7 @@ private:
                 wh_[c.tokenWork], Ub::v_work_ping, {}, l1H);
             Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc1Ready);
             // OC2 must consume this H before HC2 makes HV2 runnable.
+            if (!c.first) Arch::CrossCoreWaitFlag(chunkFinished);
             Mmad<layout::RowMajor, layout::RowMajor, 64, 128, 128, false, VecToL1>(q_[c.qk], h_[c.hInput],
                 inter_[c.tokenWork], Ub::o_inter_ping, {}, l1H);
             Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc2Ready);
