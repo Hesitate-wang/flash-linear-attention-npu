@@ -106,7 +106,6 @@ private:
         auto tb = tla::MakeTensor(b, tla::MakeLayout<DataT, LayoutB>(K, N), Arch::PositionGM{});
         Block::BlockMmadGdnFusedMode2<DataT, LayoutA, LayoutB, M, N, K,
             CubeToUB, ExternalA, ExternalB> block(resource_, l1A, l1B);
-        block.preSetFlags();
         if constexpr (CubeToUB) {
             auto tc = tla::MakeTensor(resource_.ubBuf.template GetBufferByByte<float>(ubOffset),
                 tla::MakeLayout<float, layout::RowMajor>(M, N), Arch::PositionUB{});
@@ -116,12 +115,15 @@ private:
                 Arch::PositionGM{});
             block(ta, tb, tc, {M, N, K});
         }
-        block.finalWaitFlags();
     }
 
     CATLASS_DEVICE void ProcessCube()
     {
-        AscendC::SetHF32Mode(false);
+        // Every Mode2 block uses one stage and the same A/B/C event IDs.
+        // Seed these shared free-slot tokens once; each Mmad passes them on.
+        Block::BlockMmadGdnFusedMode2<DataT, layout::RowMajor, layout::ColumnMajor,
+            64, 64, 128, CubeToUB> pipeline(resource_);
+        pipeline.preSetFlags();
         auto l1H = resource_.l1Buf.template GetBufferByByte<DataT>(hL1);
         auto l1Mask = resource_.l1Buf.template GetBufferByByte<DataT>(maskL1);
         auto l1Vnew = resource_.l1Buf.template GetBufferByByte<DataT>(vnewL1);
@@ -160,6 +162,7 @@ private:
         // OV2 always publishes, including the last generation. Do not leave
         // a stale completion token at kernel exit.
         Arch::CrossCoreWaitFlag(chunkFinished);
+        pipeline.finalWaitFlags();
     }
 
     CATLASS_DEVICE void InitializeState()

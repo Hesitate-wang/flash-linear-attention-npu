@@ -51,8 +51,15 @@ class BlockMmadGdnFusedMode2 : public BlockMmadTla<
         MmadPingpongTlaPreload<Arch::Ascend950, false, false, 1, false, 1, 1, 1, 1>,
         Shape, Shape, DataT, DataT, float, void, Copy>;
     static_assert(sizeof(DataT) == 2, "Mode2 Cube operands must be FP16/BF16");
-    static_assert((M * K + K * N) * sizeof(DataT) <= 64U * 1024U,
-                  "Mode2 scratch must stay below persistent L1 operands");
+    // All shapes share the same event IDs, so their A/B scratch slots must
+    // also share fixed, disjoint addresses across successive Mmad calls.
+    static constexpr uint32_t L1_A_OFFSET = 0U;
+    static constexpr uint32_t L1_B_OFFSET = 16U * 1024U;
+    static constexpr uint32_t L1_SCRATCH_END = 64U * 1024U;
+    static_assert(L1_A_OFFSET + M * K * sizeof(DataT) <= L1_B_OFFSET,
+                  "Mode2 A scratch exceeds its fixed L1 slot");
+    static_assert(L1_B_OFFSET + K * N * sizeof(DataT) <= L1_SCRATCH_END,
+                  "Mode2 B scratch overlaps persistent L1 operands");
     static_assert(!ExternalA || std::is_same_v<typename Copy::LayoutTagL1A, layout::zN>,
                   "Vec L1 A must match CopyRowsToL1Zn");
     static_assert(!ExternalB || std::is_same_v<typename Copy::LayoutTagL1B, layout::zN>,
@@ -62,6 +69,8 @@ public:
         AscendC::LocalTensor<DataT> externalA = {}, AscendC::LocalTensor<DataT> externalB = {})
         : Base(resource)
     {
+        this->l1ATensorList[0] = resource.l1Buf.template GetBufferByByte<DataT>(L1_A_OFFSET);
+        this->l1BTensorList[0] = resource.l1Buf.template GetBufferByByte<DataT>(L1_B_OFFSET);
         if constexpr (ExternalA) this->l1ATensorList[0] = externalA;
         if constexpr (ExternalB) this->l1BTensorList[0] = externalB;
     }

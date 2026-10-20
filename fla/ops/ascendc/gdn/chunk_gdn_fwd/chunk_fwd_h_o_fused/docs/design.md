@@ -517,9 +517,14 @@ compile-time M/N/K: OC1=64/64/128, HC1 and OC2=64/128/128,
 HC2=128/128/64, OC3=64/128/64. This preserves the external L1 zN strides.
 A private adapter only binds the protected L1 operand slots and substitutes a
 no-op GM-to-L1 copy for operands already produced in L1. The shared block owns
-L1-to-L0, MMAD, Fixpipe and local events. Each call presets and drains shared
-block events before another stage reuses the same scratch/L0; resident GM cache
-is disabled. Cross-core producer ready signals remain in the driver.
+L1-to-L0, MMAD, Fixpipe and local events. All shapes bind scratch A at 0 KiB
+(capacity 16 KiB) and scratch B at 16 KiB (capacity 48 KiB, ending at 64 KiB).
+The driver presets shared block events once before the entire Cube chunk loop
+and drains them once after the loop. Each block consumes and releases the same
+single-stage A/B/C tokens, allowing operand loading to overlap the preceding
+Fixpipe without overwriting live L1/L0 data. One L0C slot still serializes its
+reuse between Fixpipe and the next MMAD. Resident GM cache is disabled.
+Cross-core producer ready signals remain in the driver.
 L1 KiB: scratch=[0,64), H=[64,96), mask=[96,104), Vnew=[104,120), decay=[120,136).
 Actual M/N/K layouts must match CopyRowsToL1Zn FullRows.
 Initialize FP32 UB H, Cube H and the 32x32 mask before the loop. Publish initial H-ready.

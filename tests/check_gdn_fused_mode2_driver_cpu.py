@@ -176,6 +176,15 @@ struct CpuCopy {
    d.storage.p[d.shape.offset(r,c)]=s.storage.p[s.shape.offset(r,c)];
  }
 };
+template<unsigned Offset,unsigned Capacity> struct CpuCopyGmToL1:CpuCopy {
+ template<class D,class S> void operator()(D d,S s) {
+  auto* expected=Model::l1.bytes.data()+Offset;
+  if(reinterpret_cast<unsigned char*>(d.storage.p)!=expected ||
+     d.shape.rows*d.shape.cols*sizeof(*d.storage.p)>Capacity)
+   throw std::runtime_error("GM-to-L1 operand escaped its fixed A/B scratch slot");
+  CpuCopy::operator()(d,s);
+ }
+};
 struct CpuMmad {
  template<class C,class A,class B> void operator()(C c,A a,B b,unsigned m,unsigned n,unsigned k,bool,uint8_t) {
   for(unsigned r=0;r<m;++r)for(unsigned col=0;col<n;++col) {
@@ -194,8 +203,8 @@ template<class Arch,class A,class LA,class B,class LB,class C,class LC,class Bia
  static constexpr bool HAS_BIAS=false;
  using LayoutTagL1A=layout::zN;using LayoutTagL1B=layout::zN;
  using LayoutTagL0A=layout::RowMajor;using LayoutTagL0B=layout::RowMajor;
- template<class> using CopyGmToL1A=CpuCopy;
- template<class> using CopyGmToL1B=CpuCopy;
+ template<class> using CopyGmToL1A=CpuCopyGmToL1<0,16*1024>;
+ template<class> using CopyGmToL1B=CpuCopyGmToL1<16*1024,48*1024>;
  using CopyL1ToL0A=CpuCopy;using CopyL1ToL0B=CpuCopy;
  template<class> using CopyL0CToDst=CpuCopy;
 };
@@ -342,10 +351,14 @@ void run(unsigned chunks,bool initial,bool store,unsigned core=0,unsigned batche
    if(role==0) {
     for(auto& event:AscendC::localPending)for(bool pending:event)check(!pending,"Cube local event leaked");
     unsigned calls=chunks*5-(store?0:1);
-    check(AscendC::eventSets[unsigned(AscendC::HardEvent::MTE1_MTE2)][1]==2*calls,
-          "shared preload B slot preset/release count");
-    check(AscendC::eventSets[unsigned(AscendC::HardEvent::FIX_M)][0]==2*calls,
-          "shared preload C slot preset/release count");
+    for(unsigned id:{0U,1U}) {
+     check(AscendC::eventSets[unsigned(AscendC::HardEvent::MTE1_MTE2)][id]==calls+1,
+           "L1 slot must be seeded once and released once per Mmad");
+     check(AscendC::eventSets[unsigned(AscendC::HardEvent::M_MTE1)][id]==calls+1,
+           "L0 operand slot must be seeded once and released once per Mmad");
+    }
+    check(AscendC::eventSets[unsigned(AscendC::HardEvent::FIX_M)][0]==calls+1,
+          "L0C slot must be seeded once and released once per Mmad");
    } else {
     check(cubeGmReads==(Direct?0:chunks*5-(store?0:1)),"Cube-to-UB must skip GM input copies");
     check(AscendC::eventSets[unsigned(AscendC::HardEvent::V_MTE2)][7]==chunks,
@@ -400,7 +413,7 @@ int main() {
  routes<_Float16,_Float16,float>();routes<_Float16,_Float16,_Float16>();
  routes<Bf16,float,float>();routes<Bf16,float,Bf16>();
  routes<Bf16,Bf16,float>();routes<Bf16,Bf16,Bf16>();
- std::cout<<"PASS: real Mode2 scheduler/driver/Cube block and epilogues; 304 cases (including default transport and multi-task GQA), all four transports, 1/3 chunks, 8 input/gate/state dtype combinations, initial/final state switches, three threads, reference O/state and balanced cross-core/local events; GQA/64-bit/fallback scheduler checks\n";
+ std::cout<<"PASS: real Mode2 scheduler/driver/Cube block and epilogues; 304 cases (including default transport and multi-task GQA), all four transports, 1/3 chunks, 8 input/gate/state dtype combinations, initial/final state switches, three threads, reference O/state, fixed L1 A/B slots and once-per-loop event seeding/drain; GQA/64-bit/fallback scheduler checks\n";
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mode2-driver-') as folder:

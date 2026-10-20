@@ -557,3 +557,15 @@ O、H、V_new、final state，并重复多 chunk 检查事件代次。单次 ker
   Cube仍在chunk入口等待chunkFinished，Vec仍按完整OV2后进入下一轮，尚未实现跨chunk OV1/HV1交错执行。
 - 算子源码未改；仅同步CPU测试的HardEvent枚举和N次set计数，并对Vec EVENT_ID7增加重复set、空wait和退出残留检查。
 - driver 304场景及四epilogue全量CPU验证重新通过，ASan/UBSan；不代表设备异步流水验收。
+
+## 2026-10-20 Fixed64 Mode2 Cube 持续流水
+
+- 仅调整新 fixed64 Mode2 私有 adapter/driver。固定 scratch A=[0,16) KiB、
+  B=[16,64) KiB，实际最大 B 使用到48 KiB；编译期分别检查 A/B 容量。
+  外部 L1 操作数仍绑定 H/mask/Vnew/decay 的独立区域。
+- preSetFlags/finalWaitFlags 从每次 Mmad 移至整个 Cube chunk 循环两端，
+  L1、L0A/B、L0C 空闲 token 由各次公共 Mmad 消费并释放；单 L0C 继续等待 FIX_M。
+- `python3 tests/check_gdn_fused_mode2_driver_cpu.py`：304 场景通过。覆盖固定 A/B
+  地址和容量、每个空闲事件仅初始化一次、最终无残留，以及全部四种传输路径、
+  单/多 chunk、初始/最终状态和多 task/GQA。`git diff --check` 通过。
+- CPU 仿真不模拟异步硬件队列；CANN 设备构建、ATK 精度/内存验收及同条件性能对比待 NPU 环境验证。

@@ -412,7 +412,7 @@ H在Vec中始终FP32原地递推，Cube读取转换后的DataT副本。
 
 L1 KiB区间：scratch=[0,64)，H=[64,96)，masked QK=[96,104)，
 Vnew=[104,120)，decay=[120,136)。L1布局以实际M/N/K构造，匹配Vec的FullRows，
-不能用128×128的layout代替64×64的masked QK。Cube块逐次调用公共preSetFlags/operator()/finalWaitFlags，闭合scratch/L0事件后才复用同一资源。
+不能用128×128的layout代替64×64的masked QK。Cube块共享持续的单stage事件；整个Cube chunk循环前调用一次preSetFlags，循环后调用一次finalWaitFlags。
 
 Cube顺序为OC1→HC1→OC2→HC2→OC3；Vec顺序为OV1→HV1→HV2→OV2。
 Cube从第二chunk起先等待上一OV2完成，末尾额外等待最后一代完成，故OV2发布的token全部被消费。
@@ -441,7 +441,7 @@ Mode2适配只绑定公共块的L1输入槽，并对外部L1操作数跳过GM→
 各阶段精确tile为OC1=64/64/128、HC1与OC2=64/128/128、HC2=128/128/64、
 OC3=64/128/64（顺序M/N/K）。外部L1的zN行距必须与Vec写入的FullRows一致。
 L1A/L1B/L0A/L0B/L0C阶段数均为1，与单槽资源规划一致；关闭GM resident缓存。
-每次调用前preset、调用后drain，使不同形状实例共享scratch/L0时事件成对回收。
+所有shape固定L1 A起点0KiB、容量16KiB，B起点16KiB、容量48KiB；外部L1操作数继续绑定其独立地址。循环前preset一次、循环后drain一次，每次调用内部传递同一组A/B/C空闲token。
 跨核ready仍由driver在对应阶段后发布。
 
 CPU联调现直接包含仓库的公共preload头，而非用stub替换该头。
