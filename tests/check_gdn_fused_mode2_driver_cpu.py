@@ -148,11 +148,13 @@ struct Layout {
  unsigned offset(unsigned r,unsigned c) const {
   if(kind==1)return c*rows+r;
   if(kind==2)return(c/16)*rows*16+r*16+c%16;
+  if(kind==3)return(r/16)*cols*16+(c/16)*256+r%16+(c%16)*16;
   return r*cols+c;
  }
 };
 template<class T,class L> constexpr Layout MakeLayout(unsigned r,unsigned c) {
- return {r,c,std::is_same_v<L,Catlass::layout::ColumnMajor>?1:std::is_same_v<L,Catlass::layout::zN>?2:0};
+ return {r,c,std::is_same_v<L,Catlass::layout::ColumnMajor>?1:
+  std::is_same_v<L,Catlass::layout::nZ>?3:std::is_same_v<L,Catlass::layout::zN>?2:0};
 }
 template<class T> constexpr Layout MakeLayout(T n){return{1,unsigned(n),0};}
 inline Layout MakeLayoutL0C(unsigned r,unsigned c) {return{r,c,0};}
@@ -201,7 +203,8 @@ template<class Arch,class A,class LA,class B,class LB,class C,class LC,class Bia
  using CopyL1ToBT=CpuCopy;
  using L1AAlignHelper=void;using L1BAlignHelper=void;
  static constexpr bool HAS_BIAS=false;
- using LayoutTagL1A=layout::zN;using LayoutTagL1B=layout::zN;
+ using LayoutTagL1A=std::conditional_t<std::is_same_v<LA,layout::nZ>,layout::nZ,layout::zN>;
+ using LayoutTagL1B=layout::zN;
  using LayoutTagL0A=layout::RowMajor;using LayoutTagL0B=layout::RowMajor;
  template<class> using CopyGmToL1A=CpuCopyGmToL1<0,16*1024>;
  template<class> using CopyGmToL1B=CpuCopyGmToL1<16*1024,48*1024>;

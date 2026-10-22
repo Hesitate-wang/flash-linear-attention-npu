@@ -71,6 +71,8 @@ public:
         : mask_(mask), gate_(gate), l1Output_(l1Output),
           enableL0C2UB_(enableL0C2UB), enableUB2L1_(enableUB2L1)
     {
+        tileInput_ = resource.ubBuf.template GetBufferByByte<uint16_t>(Ub::nz_convert_src);
+        tileTransposed_ = resource.ubBuf.template GetBufferByByte<uint16_t>(Ub::nz_convert_dst);
         attn_ = resource.ubBuf.template GetBufferByByte<float>(Ub::attn_ping);
         left_ = resource.ubBuf.template GetBufferByByte<float>(Ub::g_left_ping);
         up_ = resource.ubBuf.template GetBufferByByte<float>(Ub::g_up_ping);
@@ -87,7 +89,7 @@ public:
     // enableL0C2UB: OC1 Fixpipe must deliver 32x64 FP32 row-major per AIV
     // to Ub::attn_ping (0 B), using SPLIT_M and stride 64. OC1 ready must
     // order completion of those writes. The GM attn argument is unused.
-    // enableUB2L1: caller supplies an exclusive 64x64 zN L1 tile; its GM
+    // enableUB2L1: caller supplies an exclusive 64x64 nZ L1 tile; its GM
     // output argument is unused. Cube must consume that same layout directly.
     // Arguments refer to the beginning of the current chunk, not to an AIV tile.
     // This fixed-shape entry deliberately has no tail, stage or ping/pong branch.
@@ -146,26 +148,19 @@ public:
     }
 
 private:
-    // Fixed 64x64 zN layout: [column/16, row, column%16]. Each AIV writes
-    // its own 32 rows in all four C0 panels; the shared L1 halves are disjoint.
-    // Same column-panel DataCopy scheme as fwdo_qkmask::CopyOutputToL1.
+    // Fixed 64x64 nZ output. Each AIV writes its own two 16-row tiles
+    // across all four column tiles; the lane row ranges are disjoint.
     CATLASS_DEVICE void CopyOutputToL1(uint32_t rowBegin)
     {
-        constexpr uint32_t c0 = 16;
-        constexpr uint32_t rows = 32;
-        constexpr uint32_t fullRows = 64;
-        constexpr uint32_t columns = 64;
-        AscendC::DataCopyParams params{rows, 1, columns / c0 - 1, 0};
-        for (uint32_t panel = 0; panel < columns / c0; ++panel) {
-            AscendC::DataCopy(l1Output_[panel * fullRows * c0 + rowBegin * c0],
-                             output_[panel * c0], params);
-        }
+        mode2_fixed64_detail::CopyRowsToL1Nz<64, 64, 32>(
+            l1Output_, output_, tileInput_, tileTransposed_, rowBegin);
     }
 
     AscendC::LocalTensor<float> attn_, left_, up_, mask_, gate_, expandedMask_;
     AscendC::LocalTensor<uint8_t> scratch_;
     AscendC::LocalTensor<AElementOutput> output_;
     AscendC::LocalTensor<AElementOutput> l1Output_;
+    AscendC::LocalTensor<uint16_t> tileInput_, tileTransposed_;
     bool enableL0C2UB_;
     bool enableUB2L1_;
 

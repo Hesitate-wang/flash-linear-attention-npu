@@ -374,7 +374,7 @@ AIV 一次处理其负责的连续 64 行 state：一次 MTE2 搬入 `64 x 128` 
 
 AIV lane s=0/1 处理绝对行 `i=s*32+r`、`r∈[0,32)`，列 `j∈[0,64)`。
 输入 QK 为 FP32（GM搬入或OC1 Fixpipe直接写Ub::attn_ping），gate由调用方从GM
-FP16/BF16/FP32准备至UB；输出maskedQK为FP16/BF16，支持GM或64x64 zN L1。
+FP16/BF16/FP32准备至UB；输出maskedQK为FP16/BF16，支持GM或64x64 nZ L1。
 语义保持现有 QK-mask：有效位置计算 `QK[i,j]*exp(min(g[i]-g[j],0))`，
 未来位置输出精确零。指数使用 FP32、非正指数避免正向溢出；无效位置在 Exp 前选择安全零，
 乘法后再次选择零。该约束继承有限合法输入，未定义新的 NaN/Inf 公共接口语义。
@@ -398,7 +398,8 @@ FP16/BF16/FP32准备至UB；输出maskedQK为FP16/BF16，支持GM或64x64 zN L1�
 一个不接收 attn 的 VF 遍历本 lane 的 32 行，完成 Sub→Mins→Exp→因果置零。
 广播、mask 组装和该 VF 均在 OC1 等待之前；随后等待 OC1→搬入 QK→MTE2_V→Mul→cast/MTE3。
 GM路径每lane输入8KiB QK、输出4KiB maskedQK；enableL0C2UB跳过QK的GM搬入，
-enableUB2L1将输出改为写入调用方提供的64x64 zN L1，开关独立且默认false。调用方每 chunk 另搬入一次
+enableUB2L1将输出改为写入调用方提供的64x64 nZ L1，开关独立且默认false。OV1为OC3的左操作数A，
+按A5约束使用nZ；通过16x16 UB分形转置后写入L1。调用方每 chunk 另搬入一次
 gate 128/256 B 并按需转 FP32，供 OV1/HV1/HV2/OV2 共用。
 最大活动结束地址 37 KiB，HC1 新布局从 37 KiB 开始，与 OV1 并行区域分离。
 Broadcast 分配的 8 KiB 是否满足目标 CANN 对这两个 shape 的最小 workspace 要求，
@@ -436,8 +437,8 @@ HV1/OV2分别复用29KiB开头256B存储衰减，不增加内存表分配，必�
 ### 固定64/128 OV1直连配置
 
 构造参数新增enableL0C2UB/enableUB2L1和可选L1输出tensor；前者要求OC1 Fixpipe以SPLIT_M
-将每AIV32x64 FP32、stride64写入UB偏移0，并在完成后发OC1 ready。后者要求完整64x64 zN L1
-目的，按四个16列panel分两AIV行区间写入，后续Cube按同一物理布局读取，不能套用128x128行距。
+将每AIV32x64 FP32、stride64写入UB偏移0，并在完成后发OC1 ready。后者要求完整64x64 nZ L1
+目的，按16x16 tile转置并分两AIV行区间写入，后续Cube按A=nZ读取，不能套用128x128矩阵布局。
 Gate/mask提前计算顺序保持；GM fallback的MTE2_V只在实际搬运时执行；所有路径搬出完成才返回。
 该构件未接入driver；Cube输入UB复用和L1输出消费/释放的双向协议仍须由调用方配套。
 

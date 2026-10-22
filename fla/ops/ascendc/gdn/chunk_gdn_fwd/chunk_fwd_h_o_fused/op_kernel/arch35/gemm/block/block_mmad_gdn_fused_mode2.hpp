@@ -60,8 +60,8 @@ class BlockMmadGdnFusedMode2 : public BlockMmadTla<
                   "Mode2 A scratch exceeds its fixed L1 slot");
     static_assert(L1_B_OFFSET + K * N * sizeof(DataT) <= L1_SCRATCH_END,
                   "Mode2 B scratch overlaps persistent L1 operands");
-    static_assert(!ExternalA || std::is_same_v<typename Copy::LayoutTagL1A, layout::zN>,
-                  "Vec L1 A must match CopyRowsToL1Zn");
+    static_assert(!ExternalA || std::is_same_v<typename Copy::LayoutTagL1A, layout::nZ>,
+                  "Vec L1 A must use the Ascend 950 nZ operand format");
     static_assert(!ExternalB || std::is_same_v<typename Copy::LayoutTagL1B, layout::zN>,
                   "Vec L1 B must match CopyRowsToL1Zn");
 public:

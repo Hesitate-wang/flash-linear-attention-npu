@@ -385,7 +385,8 @@ O、H、V_new、final state，并重复多 chunk 检查事件代次。单次 ker
 ## 2026-10-19 OV1 Fixpipe输入 / L1输出配置
 
 - 构造参数enableL0C2UB/enableUB2L1分别控制跳过QK的GM搬运和改写L1，默认均false。
-  L1为调用方提供的64x64 zN，两个lane分别写32行；未改Cube或driver。
+  L1为调用方提供的64x64 nZ，两个lane分别写32行；OC3的左操作数布局随VecToL1切换为nZ。
+  UB 16x16 tile转置后写入，右操作数继续使用zN。
 - CPU仿真通过四条路径、六种dtype、两lane和三chunk，直连使用空GM参数，检查不搬运/不发QK的MTE2_V；
   L1检查布局、边界、另一lane保留及搬出等待。原HV1/HV2/OV2精度和等待位置检查一并通过。
 - 不能用同步CPU桩证明真实Fixpipe/UB→L1签名和异步行为；CANN/NPU验证与driver配套待执行。
@@ -569,3 +570,15 @@ O、H、V_new、final state，并重复多 chunk 检查事件代次。单次 ker
   地址和容量、每个空闲事件仅初始化一次、最终无残留，以及全部四种传输路径、
   单/多 chunk、初始/最终状态和多 task/GQA。`git diff --check` 通过。
 - CPU 仿真不模拟异步硬件队列；CANN 设备构建、ATK 精度/内存验收及同条件性能对比待 NPU 环境验证。
+
+## 2026-10-21 Mode2 OV1 UB→L1 nZ
+
+- 按 Ascend 950 A/B 分形约束修正 OC3 左操作数路径：OV1 UB 的 row-major 16-bit
+  tile 按 16x16 收集并转置，写入 64x64 nZ L1；`VecToL1=true` 时 OC3 的 A layout
+  选择 nZ。OC3 右操作数及其他右操作数保持 zN。转换 scratch 使用每 AIV [215,217) KiB，
+  32B 对齐且位于通信保留区之前。
+- `python3 tests/check_gdn_fused_mode2_driver_cpu.py`：304 场景通过，覆盖 L1 传输路径和
+  reference O/state；CPU layout 映射按 nZ/zN 分别索引。
+- `python3 tests/check_gdn_fused_mode2_epilogues_cpu.py --skip-qkmask` 和
+  `--output-only` 通过。完整 epilogues 检查在其 CPU stub `Copy` 处报 mismatch；driver
+  集成检查通过，但该单测失败尚未定位。CANN 编译及 Ascend 950 设备精度/访存验证未执行。

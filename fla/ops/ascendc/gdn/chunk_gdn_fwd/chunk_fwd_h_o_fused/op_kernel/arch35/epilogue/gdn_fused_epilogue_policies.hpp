@@ -94,6 +94,10 @@ struct gdnFusedMode2UbMallocTable
     static constexpr uint32_t o_out_ping = 207 * 1024U; // 32 * 128 * 2 = 8KB
     static constexpr uint32_t o_out_pong = o_out_ping; // single slot, end at 215KB
 
+    // One 16x16 uint16 tile for ND->nZ conversion, per AIV.
+    static constexpr uint32_t nz_convert_src = 215 * 1024U;
+    static constexpr uint32_t nz_convert_dst = nz_convert_src + 512U;
+
     // DataCopy block addresses must remain 32-byte aligned.
     static_assert(attn_ping % 32U == 0 && g_left_ping % 32U == 0 &&
                   g_up_ping % 32U == 0 && mask % 32U == 0 &&
@@ -103,7 +107,8 @@ struct gdnFusedMode2UbMallocTable
                   v_new_ping % 32U == 0 && v_new_decay_ping % 32U == 0 &&
                   h_ping % 32U == 0 && h_work_ping % 32U == 0 &&
                   o_inter_ping % 32U == 0 && o_intra_ping % 32U == 0 &&
-                  o_out_ping % 32U == 0,
+                  o_out_ping % 32U == 0 && nz_convert_src % 32U == 0 &&
+                  nz_convert_dst % 32U == 0,
                   "MODE2 UB addresses must be 32-byte aligned");
 
     // OV1 and the shared gate/mask remain separate from Cube destinations.
@@ -151,6 +156,9 @@ struct gdnFusedMode2UbMallocTable
                   "OC3 output overlaps cast output");
     static_assert(o_out_ping + 32U * 128U * 2U <= 248U * 1024U,
                   "MODE2 output crosses the reserved communication region");
+    static_assert(nz_convert_src + 512U <= nz_convert_dst &&
+                  nz_convert_dst + 512U <= 248U * 1024U,
+                  "MODE2 nZ conversion scratch exceeds its reserved UB range");
 };
 
 }  // namespace Catlass::Epilogue

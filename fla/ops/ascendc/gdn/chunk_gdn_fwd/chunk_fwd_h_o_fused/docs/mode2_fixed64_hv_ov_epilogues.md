@@ -198,7 +198,7 @@ WH/h_work/GM inter/intra。六种 dtype、两个 lane、三 chunk 与48组状态
 两者默认false保持GM路径，最后接收L1输出LocalTensor（仅L1输出开启时必传）：
 
 ```cpp
-// l1MaskedQk must denote the full 64x64 zN tile, not a lane-sliced pointer.
+// l1MaskedQk must denote the full 64x64 nZ tile, not a lane-sliced pointer.
 OV1 ov1(resource, mask, gate.Tensor(), true, true, l1MaskedQk);
 ov1(gmMaskedQk, gmQk, oc1Ready);
 ```
@@ -219,10 +219,10 @@ gate广播、mask组装与PrepareGateMask始终先完成，再等待OC1。true�
 Fixpipe目的为每个AIV的 `Ub::attn_ping=0`，8KiB；OC1 ready在这些写入完成后发布。
 该0..8KiB区域与提前执行的gate/mask计算分离。
 
-L1输出契约：调用方提供共享且独占的64x64 zN tile（8KiB），元素偏移为
-`(col/16)*64*16 + row*16 + col%16`。每lane写自身32行的4个16列panel，
-复用参考fwdo_qkmask中按列panel的DataCopy方案，blockCount=32、blockLen=1、srcGap=3、dstGap=0。
-后续Cube应按同样64x64物理布局直接读取；128x128 L1槽的物理行距不同，不能直接传入。
+L1输出契约：调用方提供共享且独占的64x64 nZ tile（8KiB）。每AIV将负责的32行按16行分块，
+从UB收集16x16 tile，调用AscendC::Transpose交换tile内行列，再按
+`(row/16)*64*16 + (col/16)*256 + (col%16)*16 + row%16`写入nZ分形。
+后续OC3以A=nZ布局读取；其余右操作数仍使用zN。128x128 L1槽的物理stride不同，不能直接传入。
 Cube消费完L1后才能复用，两个AIV输出完成的聚合ready由driver负责。
 
 本轮未修改Cube/driver：使用true开关前必须配套上述输入地址、输出布局和双向ready/free。

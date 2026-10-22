@@ -64,6 +64,7 @@ inline void ResetMask() {}
 template<class T> struct LocalTensor {
  T* p=nullptr;
  LocalTensor operator[](uint32_t i) const {return {p+i};}
+ template<class U> LocalTensor<U> ReinterpretCast() const {return {reinterpret_cast<U*>(p)};}
  void SetSize(uint32_t) {}
  T* GetPhyAddr() {return p;}
 };
@@ -83,6 +84,9 @@ struct DataCopyParams {
 template<class T> void DataCopy(LocalTensor<T> d,LocalTensor<T> s,DataCopyParams p) {
  for(unsigned b=0;b<p.blockCount;++b) for(unsigned i=0;i<p.blockLen*32/sizeof(T);++i)
   d.p[b*(p.blockLen+p.dstGap)*32/sizeof(T)+i]=s.p[b*(p.blockLen+p.srcGap)*32/sizeof(T)+i];
+}
+template<class T> void Transpose(LocalTensor<T> d,LocalTensor<T> s) {
+ for(unsigned r=0;r<16;++r)for(unsigned c=0;c<16;++c)d.p[c*16+r]=s.p[r*16+c];
 }
 template<class D,class S> void Cast(LocalTensor<D> d,LocalTensor<S> s,RoundMode,uint32_t n) {
  if(n==64) ++gateCasts;

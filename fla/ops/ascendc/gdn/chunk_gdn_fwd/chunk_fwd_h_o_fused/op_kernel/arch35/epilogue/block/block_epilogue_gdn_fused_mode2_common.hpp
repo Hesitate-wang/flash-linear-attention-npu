@@ -30,6 +30,47 @@ CATLASS_DEVICE void CopyRowsToL1Zn(
     }
 }
 
+// Row-major UB -> nZ L1. Each 16x16 tile is transposed in UB so the
+// row-inner dimension is contiguous in nZ; AIV lanes own disjoint row tiles.
+template <uint32_t FullRows, uint32_t Columns, uint32_t Rows, class T>
+CATLASS_DEVICE void CopyRowsToL1Nz(
+    AscendC::LocalTensor<T> dst, AscendC::LocalTensor<T> src,
+    AscendC::LocalTensor<uint16_t> tileInput,
+    AscendC::LocalTensor<uint16_t> tileTransposed, uint32_t rowBegin)
+{
+    static_assert(sizeof(T) == 2 && FullRows % 16 == 0 && Columns % 16 == 0);
+    static_assert(Rows % 16 == 0 && FullRows == 2 * Rows);
+    constexpr uint32_t c0 = 16;
+    constexpr uint32_t tileElements = c0 * c0;
+    constexpr uint32_t columnTiles = Columns / c0;
+    AscendC::DataCopyParams gatherRows{c0, 1, Columns / c0 - 1, 0};
+    auto srcBits = src.template ReinterpretCast<uint16_t>();
+    auto dstBits = dst.template ReinterpretCast<uint16_t>();
+
+    for (uint32_t localRow = 0; localRow < Rows; localRow += c0) {
+        const uint32_t fullRow = rowBegin + localRow;
+        for (uint32_t columnTile = 0; columnTile < columnTiles; ++columnTile) {
+            const uint32_t srcOffset = localRow * Columns + columnTile * c0;
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::DataCopy(tileInput, srcBits[srcOffset], gatherRows);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+
+            AscendC::Transpose(tileTransposed, tileInput);
+            AscendC::PipeBarrier<PIPE_V>();
+
+            const uint32_t rowTile = fullRow / c0;
+            const uint32_t dstOffset = rowTile * Columns * c0 + columnTile * tileElements;
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::DataCopy(dstBits[dstOffset], tileTransposed, tileElements);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        }
+    }
+}
+
 template <class GateT>
 class GateBuffer {
 public:

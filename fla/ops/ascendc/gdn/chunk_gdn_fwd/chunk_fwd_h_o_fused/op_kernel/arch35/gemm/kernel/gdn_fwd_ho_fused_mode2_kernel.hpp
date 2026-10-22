@@ -5,6 +5,7 @@
 #ifndef CATLASS_GDN_FWD_HO_FUSED_MODE2_KERNEL_HPP
 #define CATLASS_GDN_FWD_HO_FUSED_MODE2_KERNEL_HPP
 
+#include <type_traits>
 #include "catlass/gemm/gemm_type.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
 #include "../block/block_scheduler_gdn_fwd_ho_fused_mode2.hpp"
@@ -155,7 +156,8 @@ private:
             // Publish a token even when the last update was skipped.
             Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(hc2Ready);
             Arch::CrossCoreWaitFlag(vnewReady);
-            Mmad<layout::RowMajor, layout::RowMajor, 64, 128, 64, VecToL1, VecToL1>(masked_[c.attnWork], vnew_[c.uv],
+            Mmad<std::conditional_t<VecToL1, layout::nZ, layout::RowMajor>,
+                layout::RowMajor, 64, 128, 64, VecToL1, VecToL1>(masked_[c.attnWork], vnew_[c.uv],
                 intra_[c.tokenWork], Ub::o_intra_ping, l1Mask, l1Vnew);
             Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(oc3Ready);
         } while (scheduler_.Next());
