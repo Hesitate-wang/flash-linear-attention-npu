@@ -383,8 +383,7 @@ public:
                     // vec1Done is published only after both AttnMask and V_new
                     // are visible. Cube3 owns L1A events 4/5 and L1B 6/7.
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[streamId]);
-                    // GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
-                    //     coreIdx - producerCoreNum);
+                    // GDN::ActiveChunkFwdHOSync::AicVReadySetWait();
                     if (cube3Offsets.vBlockDim <= 128) {
                         blockMmadAttenVNEW128.preSetL1Flags();
                         blockMmadAttenVNEW128.copyGmToL1BOnly(

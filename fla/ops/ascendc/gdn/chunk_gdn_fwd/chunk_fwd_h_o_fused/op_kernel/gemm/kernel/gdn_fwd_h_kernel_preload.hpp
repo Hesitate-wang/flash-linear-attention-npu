@@ -251,9 +251,7 @@ public:
                         blockMmadWH(
                             tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape,
                             cubeBlockScheduler.vec2Done[i],
-                            static_cast<int32_t>(GDN::ChunkFwdHOReadyFlag(
-                                GDN::CHUNK_FWD_HO_H_READY_EVENT_BASE,
-                                cubeBlockScheduler.cubeCoreIdx)));
+                            static_cast<int32_t>(GDN::CHUNK_FWD_HO_H_READY_FLAG));
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
                     }
                 } else {
@@ -279,12 +277,10 @@ public:
                             auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
                             blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape,
                                         cubeBlockScheduler.vec1Done,
-                                        static_cast<int32_t>(GDN::ChunkFwdHOReadyFlag(
-                                            GDN::CHUNK_FWD_HO_V_READY_EVENT_BASE,
-                                            cubeBlockScheduler.cubeCoreIdx)));
+                                        static_cast<int32_t>(GDN::CHUNK_FWD_HO_V_READY_FLAG));
                         } else {
                             AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done);
-                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait(cubeBlockScheduler.cubeCoreIdx);
+                            GDN::ActiveChunkFwdHOSync::AicVReadySetWait();
                         }
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
                     }

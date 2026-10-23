@@ -3,7 +3,7 @@
 ## 2026-10-22 Mode1 支持范围收敛
 
 - 当前分支仅保留 H producer/O consumer mode1：`P=B*HV`，要求
-  `P <= min(floor(TOTAL_CORE/2), 21)`；`blockDim=2P`，超限直接由 tiling 拒绝。
+  `P <= floor(TOTAL_CORE/2)`；`blockDim=2P`，超限直接由 tiling 拒绝。
 - Host tiling 与 ACLNN 前置校验现仅接受 `chunkSize=32`、`K=V=128`；tiling
   固定产生 V128 key。A2/A5 exp2、V256、chunk64/128 均不属于当前支持范围。
 - A5 natural-exp H dispatch 的 DirectUb 条件覆盖 chunk32（`16<=chunk<=64`，
@@ -19,7 +19,7 @@
 | `T` 对生产者/消费者核 | Host tiling 检查 `T<=floor(P/2)`，并设置相等的 producer/consumer 数、`consumerCoreBase=T` 和 `activeCoreNum=2T` |
 | 完整 H/`v_new` 交接区 | Host 的 `FillWorkspace`；kernel 的 `handoffHWorkspaceOffset` 和 `handoffVWorkspaceOffset` |
 | 启动事件初始化 | A2/A5 统一入口不再初始化同步区或执行额外启动屏障；自然指数路径不访问 IB event table |
-| 逐 chunk 的 H 到 O 发布 | mode `0x0` 的 `H_READY=12`、`V_READY=13` 按 chunk 执行全体 AIV `Set→Wait`；本核 `cube1Done/cube2Done/vec1Done` 继续使用 mode `0x2` |
+| 逐 chunk 的 H 到 O 发布 | mode `0x0` 的 H_READY 全体使用 flag `12`、V_READY 全体使用 flag `13`；同一轮所有活动逻辑核按相同顺序参与；本核 `cube1Done/cube2Done/vec1Done` 继续使用 mode `0x2` |
 | A5 的 H 到 O 阶段边界 | 自然指数路径按 chunk 执行 CrossCore H/V rendezvous；exp2 专用 O 仍使用既有 `SyncAll<false>()` 阶段边界 |
 | A5 临时区所有权 | Host 的 `FillWorkspaceA5`；自然指数通用 O offset 或 exp2 的 `oAPrimeWorkspaceOffset` |
 | 不依赖同级算子的私有实现 | 所有 H/O kernel、调度器和收尾文件都位于当前算子目录内 |
@@ -64,16 +64,16 @@
   随后由全部活动 AIC/AIV 执行一次启动 rendezvous；A5 不依赖未初始化的
   ACLNN user workspace 中的旧 IB 同步区仅作 ABI 保留，不再作为自然指数 H/O 同步状态。Host 同步区容量按
   `activeCoreNum * AIV_PER_MIXED_CORE * eventCount * wordsPerEvent` 分配。
-- 自然指数路径为每个 producer AIV 分配 2 个 ready event，分别表示
-  `HReady` 和 `VReady`。首 chunk 的 H 来自初始化，后续 `HReady(i+1)` 由 Vec2(i)
-  发布，`VReady(i)` 由 Vec1(i) 发布；同一 task 的所有 chunk 串行复用对应 slot。
-  mode-0 flag 12/13 按 H_READY→V_READY 代次由所有活动 AIV 执行 Set→Wait；旧 IB
-  slot 不再参与自然指数路径。
-- 已对 `(T,P,A,NC)=(1,32,2,3)`、`(3,32,6,4)` 和 `(9,32,18,5)` 执行
-  静态任务/event 映射检查。生产者 `p` 和消费者 `T+p` 对每个
-  `(task,chunk)` 得到相同的 producer AIV、固定 task lane 0、event 0 的 HReady 和
-  event 1 的 VReady，并完整覆盖全部任务；另检查 `(T,P)=(17,32)` 和 `(5,3)`
-  被 Host 拒绝。
+- 自然指数路径的首 chunk H 来自初始化，后续 `HReady(i+1)` 由 Vec2(i) 发布，
+  `VReady(i)` 由 Vec1(i) 发布；同一 task 的所有 chunk 串行复用对应 slot。
+  mode-0 H_READY/V_READY 分别由所有活动 AIC/AIV 在同一 chunk 轮次使用固定 flag
+  `12/13` rendezvous；旧 IB slot 不参与自然指数路径。
+- 曾按 task pair/AIV 编号分组并因此引入 21 对限制；现改为相同轮次全体逻辑核使用
+  同一 flag ID，并删除该限制。静态正确性依赖所有活动核每轮都以相同顺序参与；
+  当前环境无 `ccec`、`msopgen` 或 NPU，尚未进行目标设备编译和死锁复测。
+- Host 核数边界检查仍按 `T <= floor(P/2)` 执行；`T=17,P=32` 和 `T=5,P=3`
+  应被拒绝。此前按配对编号执行的静态映射检查不再适用于全体 rendezvous，当前
+  需要在设备上验证所有活动 AIC/AIV 的每轮参与次数及顺序。
 - OpDef 已注册 Ascend 950，并选择 `__CCE_AICORE__ == 310` 实现。该路径由
   arch35 H producer 和 O consumer 并行推进；自然指数使用逐 chunk mode-0 H_READY/V_READY 交接，
   exp2 专用 O 暂时保留全核交接屏障。设备侧按 dtype 和 V 维度显式选择 H 模板，
@@ -165,17 +165,14 @@
 - 目标环境需用默认三 chunk case 比较 CPU 与 composed 输出，并通过指令 trace
   确认每个有效 Vec2、每个 AIV 只有一次 state UB-to-GM MTE3 搬运。
 
-## H/O ready 同步精简与静态配对检查（待设备验证）
+## H/O ready 全体 rendezvous 与静态轮次检查（待设备验证）
 
-- H_READY 保持每七个 MIX task pair 一组并映射到 mode-0 flag `0/2/4`；
-  V_READY 改为每六个本侧相对 AIV block index 一组并映射到 flag `0..6`。
-  两类 ready 都从 flag ID 0 开始映射。
+- 所有 H/O AIC 在每轮 H_READY 使用固定 mode-0 flag `12`；所有 H/O AIV
+  在每轮 V_READY 使用固定 mode-0 flag `13`，不按 task pair 或 AIV index 分组。
 - A5 两条 H kernel 删除未调用的发布包装函数，并复用同一个 ready signal
   构造函数生成下一 chunk 的 HReady；同步封装删除未调用的 `Participate()` 别名。
-- 当前 `TASK_LANES_PER_CORE=1`。A5 V128 preload 的 H AIV 直接使用原始
-  `blockIdx`，O AIV 使用 `blockIdx - producerCoreNum * subBlockNum`。静态枚举
-  `1..21` 个 task pair，确认两侧 V_READY flag 完全一致，单个 V flag 最多
-  12 次 Set；H_READY 单 flag 最多 14 次 Set。静态检查同时确认 H 初始状态或前一 chunk Vec2
+- 当前 `TASK_LANES_PER_CORE=1`。静态检查确认每个活动 H/O AIC 和 AIV
+  对相同 chunk 轮次恰好参与一次对应 rendezvous，并按同一顺序执行。静态检查同时确认 H 初始状态或前一 chunk Vec2
   发布 HReady，O 当前 chunk Vec1 等待；H 当前 chunk Vec1 发布 VReady，O 当前
   chunk Vec2 后等待。末 chunk 不生成下一轮 HReady，单 chunk 的 VReady 由收尾路径
   发布。H/O 数据按相同 task 和 chunk 编址，mode-0 flag 本身是全局集合握手。
@@ -203,9 +200,8 @@
 
 - H_READY 继续由 H/O 两侧 AIC 执行双向 `Set/Wait`；A5 V128 preload 的
   V_READY 由 H/O 两侧对应 AIV 执行双向 `Set/Wait`。
-- H_READY 每七对任务一组，每轮最多 14 次 Set；V_READY 每六个相对 AIV
-  编号一组，每轮最多 12 次 Set。当前 flag 范围覆盖 Host 的 21 个 task pair
-  上限。
+- 所有活动 AIC 每轮共用 H_READY flag `12`，所有活动 AIV 每轮共用
+  V_READY flag `13`；Host 不再受跨核 flag 分组推导出的 task-pair 上限约束。
 - A5 chunk pipeline 的 O scheduler 与 H scheduler 使用同一单 task 串行模型：每个
   producer/consumer pair 固定使用唯一 active stream/slot，当前 chunk 完成并发布
   `vec2Done` 后才推进到下一 chunk；不为同一 task 伪造第二个并行 stream。

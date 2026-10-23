@@ -53,8 +53,7 @@ Python 适配层返回 `(o, final_state)`；未请求最终状态时，`final_st
 ## 当前执行约束
 
 当前仅支持定长 mode1：令 `P = B * HV`、`TOTAL_CORE` 为可用物理 AIC 核数，
-要求 `P <= min(floor(TOTAL_CORE / 2), 21)`，并令 `blockDim = 2 * P`；21
-是当前跨核事件分组 ABI 的任务对上限。超出该核数约束的形状直接失败，不回退
+要求 `P <= floor(TOTAL_CORE / 2)`，并令 `blockDim = 2 * P`。超出该核数约束的形状直接失败，不回退
 到其他调度模式。q/k/w/u 使用 FP16 或 BF16，
 门控使用 FP32 或输入类型，`K=V=128`、`chunk_size=32`，使用自然指数，
 输出布局为 BNSD 或 NTD。当前不支持 exp2、V=256 或 chunk 64/128。

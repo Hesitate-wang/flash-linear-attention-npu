@@ -303,7 +303,7 @@ public:
                         blockMmadWH(
                             tensorBlockW, tensorBlockH, tensorV, cube1Shape,
                             cubeBlockScheduler.vec2Done[i],
-                            GDN::CHUNK_FWD_HO_H_READY_FLAG_BASE);
+                            static_cast<int32_t>(GDN::CHUNK_FWD_HO_H_READY_FLAG));
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
                     }
                 } else {
@@ -444,7 +444,8 @@ public:
                             gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset],
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset],
                             vec1Offsets.blockTokens, kHeadDim, vHeadDim,
-                            vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done, (i == 0)
+                            vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
+                            (i == 0)
                         );
                     }
                 } else {

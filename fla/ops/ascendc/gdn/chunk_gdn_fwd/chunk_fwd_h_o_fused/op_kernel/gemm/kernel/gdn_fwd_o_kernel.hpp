@@ -267,8 +267,7 @@ public:
                     blockMmadQK(tensorBlockQ, tensorBlockK, tensorBlockAttn, cube1Shape);
                     blockMmadQK.finalWaitFlags();
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done[streamId]);
-                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait(
-                        coreIdx - producerCoreNum);
+                    GDN::ActiveChunkFwdHOSync::AicHReadySetWait();
 
                 }
                 // AscendC::PipeBarrier<PIPE_ALL>();
@@ -309,8 +308,7 @@ public:
                     // Unlike H/V, attnMask is produced by Vec1. Keep its
                     // original dependency immediately before Cube3 consumes it.
                     AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE3>(cubeBlockScheduler.vec1Done[streamId]);
-                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait(
-                        coreIdx - producerCoreNum);
+                    GDN::ActiveChunkFwdHOSync::AicVReadySetWait();
                     GDNFwdOOffsets& cube3Offsets = cubeBlockScheduler.GetCube23Offsets();
                     int64_t cube3OffsetAttnMask = cube3Offsets.attnWorkOffset;
                     int64_t cube3OffsetV = cube3Offsets.ovOffset;
