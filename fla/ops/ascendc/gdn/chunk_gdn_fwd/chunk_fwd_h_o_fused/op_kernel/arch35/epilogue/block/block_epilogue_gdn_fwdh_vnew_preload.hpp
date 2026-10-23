@@ -77,6 +77,7 @@ public:
         gInputUbTensor_ping = resource.ubBuf.template GetBufferByByte<GElementInput>(PING_G_SUB_BUF_OFFSET);
         vNewOutputUbTensor_ping = resource.ubBuf.template GetBufferByByte<VElementOutput>(PING_BUF_2_OFFSET);
         vNewDecayUbTensor_ping = resource.ubBuf.template GetBufferByByte<VElementOutput>(PING_BUF_2_OFFSET);
+        gBrcbUbTensor_ping = resource.ubBuf.template GetBufferByByte<float>(PING_BUF_2_OFFSET);
 
         uUbTensor_pong = resource.ubBuf.template GetBufferByByte<UElementInput>(PONG_BUF_2_OFFSET);
         wsUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(PONG_BUF_0_OFFSET);
@@ -85,6 +86,7 @@ public:
         gInputUbTensor_pong = resource.ubBuf.template GetBufferByByte<GElementInput>(PONG_G_SUB_BUF_OFFSET);
         vNewOutputUbTensor_pong = resource.ubBuf.template GetBufferByByte<VElementOutput>(PONG_BUF_2_OFFSET);
         vNewDecayUbTensor_pong = resource.ubBuf.template GetBufferByByte<VElementOutput>(PONG_BUF_2_OFFSET);
+        gBrcbUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(PONG_BUF_2_OFFSET);
 
         shareBuffer_ = resource.ubBuf.template GetBufferByByte<uint8_t>(SHARE_BUF_OFFSET);
 
@@ -301,8 +303,7 @@ public:
         }
         AscendC::PipeBarrier<PIPE_V>();
 
-        AscendC::LocalTensor<float> gBrcb = resource.ubBuf.template GetBufferByByte<float>(
-            isPing ? PING_BUF_2_OFFSET : PONG_BUF_2_OFFSET);
+        AscendC::LocalTensor<float> gBrcb = isPing ? gBrcbUbTensor_ping : gBrcbUbTensor_pong;
         uint32_t dstShape[2] = {mActualThisSubBlock, nvActual};
         uint32_t srcShape[2] = {mActualThisSubBlock, 1};
         AscendC::Broadcast<float, 2, 1>(gBrcb, gUbTensor, dstShape, srcShape, shareBuffer_);
@@ -359,6 +360,7 @@ private:
     AscendC::LocalTensor<GElementInput> gInputUbTensor_ping;
     AscendC::LocalTensor<VElementOutput> vNewOutputUbTensor_ping;
     AscendC::LocalTensor<VElementOutput> vNewDecayUbTensor_ping;
+    AscendC::LocalTensor<float> gBrcbUbTensor_ping;
 
     AscendC::LocalTensor<UElementInput> uUbTensor_pong;
     AscendC::LocalTensor<float> wsUbTensor_pong;
@@ -367,6 +369,7 @@ private:
     AscendC::LocalTensor<GElementInput> gInputUbTensor_pong;
     AscendC::LocalTensor<VElementOutput> vNewOutputUbTensor_pong;
     AscendC::LocalTensor<VElementOutput> vNewDecayUbTensor_pong;
+    AscendC::LocalTensor<float> gBrcbUbTensor_pong;
 
     AscendC::LocalTensor<uint8_t> shareBuffer_;
 
