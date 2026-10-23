@@ -466,8 +466,8 @@ at::Tensor npu_chunk_fwd_o(
     const bool use_exp2_ = use_exp2.value_or(false);
     const bool state_v_first_ = state_v_first.value_or(false);
     const std::string output_layout_(output_layout.data(), output_layout.size());
-    TORCH_CHECK(chunk_size_ == 64 || chunk_size_ == 128,
-                "npu_chunk_fwd_h_o_fused: chunk_size must be 64 or 128.");
+    TORCH_CHECK(chunk_size_ == 32,
+                "npu_chunk_fwd_h_o_fused: mode1 supports chunk_size=32 only.");
     TORCH_CHECK((cu_seqlens.has_value() && chunk_indices.has_value()) ||
                     (!cu_seqlens.has_value() && !chunk_indices.has_value()),
                 "npu_chunk_fwd_h_o_fused: cu_seqlens and chunk_indices must be both present or both absent.");

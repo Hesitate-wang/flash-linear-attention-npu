@@ -1376,8 +1376,8 @@ def npu_chunk_fwd_h_o_fused(
     state_v_first = _optional_bool(state_v_first, False)
     output_layout = str(output_layout)
 
-    if chunk_size not in (64, 128):
-        raise RuntimeError(f"{op_name}: chunk_size must be 64 or 128.")
+    if chunk_size != 32:
+        raise RuntimeError(f"{op_name}: mode1 supports chunk_size=32 only.")
     if len(_shape(k)) != 4 or len(_shape(w)) != 4 or len(_shape(u)) != 4:
         raise RuntimeError(f"{op_name}: k, w and u must be rank-4 BNSD tensors.")
     if len(_shape(q)) != 4 or len(_shape(g)) != 3:
