@@ -1,5 +1,17 @@
 # 开发阶段验证记录
 
+## 2026-10-22 Mode1 支持范围收敛
+
+- 当前分支仅保留 H producer/O consumer mode1：`P=B*HV`，要求
+  `P <= min(floor(TOTAL_CORE/2), 21)`；`blockDim=2P`，超限直接由 tiling 拒绝。
+- Host tiling 与 ACLNN 前置校验现仅接受 `chunkSize=32`、`K=V=128`；tiling
+  固定产生 V128 key。A2/A5 exp2、V256、chunk64/128 均不属于当前支持范围。
+- A5 natural-exp H dispatch 的 DirectUb 条件覆盖 chunk32（`16<=chunk<=64`，
+  定长整 chunk 且 K=V=128）；O 的 QK-mask tail 分支按每个 AIV 不超过 32 行处理。
+- PTA CLI 默认切至 chunk32，并移除 V256/chunk64/128 的正常用例说明。
+- 本次仅完成静态检查和 Python 语法检查；目标环境没有 CANN/NPU，需上板验证
+  chunk32 多 chunk、尾块、有无初始/最终 state、mode1 核数边界及 FP16/BF16 精度。
+
 ## 设计追踪
 
 | 设计项 | 实现位置 |
@@ -169,6 +181,23 @@
   发布。H/O 数据按相同 task 和 chunk 编址，mode-0 flag 本身是全局集合握手。
 - 本环境没有 CANN/NPU，尚未构建和运行。目标设备需覆盖单 chunk、三 chunk、
   DirectUb/StandardGm、V128/V256，并采集 Set/Wait 代次及精度结果。
+
+## A5 mode1 chunk32 H V-split 与 FP32 state（待目标设备验证）
+
+- H preload 的两个 Cube Fixpipe 输出改用 `SPLIT_N`；两个 AIV 各处理 64 列，并以
+  完整 128 列行距访问 GM handoff/state，避免两片写入重叠。
+- A5 H workspace 在 Cube ping-pong 区后追加 `producerCoreNum * 128 * 128 * 4`
+  字节 FP32 state，分配仍经过 512-byte 对齐的 `AllocateRegion`；TilingData 字段
+  和 ABI 未变。
+- 初始状态按列半区转 FP32 初始化当前 state，同时生成输入 dtype 的首 chunk H
+  handoff。Vec2 每 chunk 读取/写回 FP32 state；只为后续 chunk 生成输入 dtype
+  handoff，按 final_state 请求情况写最终输出。
+- PTA runner 新增 `--initial-state-dtype float32|input`，覆盖 initial/final state
+  的合法 dtype 配对；CPU 参考结果在对比前按 API dtype 规则转换 final_state。
+- 静态检查和 `git diff --check` 可在本地执行；本环境未发现 `ccec`、`msopgen` 或
+  `npu-smi`，因此 kernel 编译、NPU 精度/死锁压力测试及性能对比尚未完成。目标机需
+  覆盖 FP16/BF16、有无 initial state、FP32/input state dtype、1/2/3+ chunks，并检查
+  `[0,64)` 与 `[64,128)` 对 state、handoff、VUpdate 和 final_state 的覆盖无交叠。
 
 ## AIC/AIV ready 分工（待设备验证）
 

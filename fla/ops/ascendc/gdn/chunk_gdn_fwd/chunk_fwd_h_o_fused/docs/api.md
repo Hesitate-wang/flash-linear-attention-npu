@@ -30,14 +30,14 @@
 ## 属性
 
 - `output_final_state: bool`
-- `chunk_size: int64`，当前支持 64 或 128
+- `chunk_size: int64`，当前 mode1 仅支持 32
 - `scale: double`
-- `use_exp2: bool`；Atlas A2 要求为 `false`，Ascend 950 支持 `false/true`
+- `use_exp2: bool`；当前 mode1 仅支持 `false`
 - `state_v_first: bool`
 - `output_layout: string`，可取 `BNSD`、`BSND`、`TND` 或 `NTD`
 
-Atlas A2 和 Ascend 950 的自然指数路径支持 `BNSD/NTD`，其中 `NTD` 要求物理
-批次 `B=1`。Ascend 950 的 exp2 路径支持 `BSND/TND`。
+当前 mode1 的自然指数路径支持 `BNSD/NTD`，其中 `NTD` 要求物理批次 `B=1`。
+`BSND/TND` 与 exp2 路径不在当前支持范围内。
 
 ## 输出
 
@@ -52,16 +52,9 @@ Python 适配层返回 `(o, final_state)`；未请求最终状态时，`final_st
 
 ## 当前执行约束
 
-功能 kernel 已为 Atlas A2（`ascend910b` 和 `ascend910_93`）及 Ascend 950
-注册。在 A2 上，令 `P = B * HV`，tiling 要求 `2 * P` 小于或等于可用 AIC
-核数。不满足该条件的形状会直接失败，不会回退到串行融合调度。
-
-Ascend 950 的定长自然指数路径与 A2 的功能范围一致：q/k/w/u 使用 FP16 或
-BF16，门控使用 FP32 或输入类型，`K=128`、`V in {128,256}`、
-`chunk_size in {64,128}`，输出布局为 BNSD 或 NTD。该路径采用与 A2 相同的
-H producer/O consumer 逐 chunk 交接拓扑，但使用 arch35 独立的 FwdO 实现。
-
-Ascend 950 的定长 exp2 专用路径仍保持原约束：q/k/w/u 使用 BF16，门控张量
-使用 BF16 或 FP32，`chunk_size=64`，`K=V=128`，且 `HV/HK` 位于 `[1,4]`；
-输出布局为 BSND 或 TND。H 阶段保持独立 FwdH 的自然指数语义；`use_exp2`
-只选择 FwdO 的指数计算和布局路径。
+当前仅支持定长 mode1：令 `P = B * HV`、`TOTAL_CORE` 为可用物理 AIC 核数，
+要求 `P <= min(floor(TOTAL_CORE / 2), 21)`，并令 `blockDim = 2 * P`；21
+是当前跨核事件分组 ABI 的任务对上限。超出该核数约束的形状直接失败，不回退
+到其他调度模式。q/k/w/u 使用 FP16 或 BF16，
+门控使用 FP32 或输入类型，`K=V=128`、`chunk_size=32`，使用自然指数，
+输出布局为 BNSD 或 NTD。当前不支持 exp2、V=256 或 chunk 64/128。

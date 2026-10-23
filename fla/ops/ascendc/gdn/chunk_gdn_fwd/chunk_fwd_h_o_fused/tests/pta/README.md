@@ -63,30 +63,18 @@ python test_fwd_h_o_fused.py \
   --output-final-state
 ```
 
-On Ascend 950, enable the exp2/BSND path and optionally compare it with the
-standalone arch35 H then O composition:
-
-```bash
-python test_fwd_h_o_fused.py --use-exp2 --compare-composed
-```
-
-The Ascend 950 natural-exp path now covers the same functional matrix as A2.
-These commands exercise the added FP16, V=256, chunk=128, and NTD branches:
+The current mode1 path is restricted to `K=V=128`, chunk size 32, natural exp,
+and `B * HV <= min(floor(TOTAL_CORE / 2), 21)`. A5 exp2, V=256, and chunk
+sizes 64/128 are not supported by this branch. These commands exercise FP16 and NTD:
 
 ```bash
 python test_fwd_h_o_fused.py --dtype float16 --compare-composed
-python test_fwd_h_o_fused.py --value-dim 256 --compare-composed
-python test_fwd_h_o_fused.py --tokens 384 --chunk-size 128 --compare-composed
+python test_fwd_h_o_fused.py --tokens 96 --chunk-size 32 --compare-composed
 python test_fwd_h_o_fused.py --output-layout NTD --compare-composed
 ```
 
-Useful shape and dtype switches include `--tokens`, `--chunk-size`,
-`--value-dim`, `--dtype`, `--gate-dtype`, `--batch`, `--k-heads`, and
-`--v-heads`. Atlas A2 accepts exp mode with `K=128`, `V=128/256`, chunk size
-`64/128`. The kernel uses one H producer and one O consumer per head task, with
-blockDim equal to `2 * batch * v_heads`. The current path requires all pairs to fit on
-the physical AIC cores; the saturated-core path is not implemented yet.
-Ascend 950 natural-exp mode accepts the same matrix. Ascend 950 `--use-exp2`
-still requires BF16 data, BF16/FP32 gates, `K=V=128`, chunk size 64, and
-`v_heads/k_heads` in `[1,4]`. Use `--output-layout` to select the layout allowed
-by each exponent mode.
+Useful switches include `--tokens`, `--dtype`, `--gate-dtype`, `--batch`,
+`--k-heads`, and `--v-heads`. The kernel uses one H producer and one O consumer
+per head task, with `blockDim = 2 * batch * v_heads`. All pairs must fit within
+half the physical AIC cores; other scheduling modes are not implemented on
+this branch. Use `--output-layout` to select BNSD or NTD.

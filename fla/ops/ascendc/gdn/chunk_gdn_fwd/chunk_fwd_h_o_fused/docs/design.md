@@ -4,14 +4,14 @@
 
 ## 1. 架构
 
-定义任务数 `T = shapeBatch * vNumHead`、物理 MIX core 数 `P`。当前路径要求 `T <= floor(P / 2)`，活动 MIX core 数恒为 `A = 2T`。A2 (`DAV_2201`) 与 A5 (`DAV_3510`) 使用相同的 core 分区：前 `T` 个 core 是 H producer，从 `consumerCoreBase=T` 开始的 `T` 个 core 是一一对应的 O consumer。每个逻辑 MIX core 只处理一个 `(batch, value-head)` 任务；同一任务的不同 chunk 在两个 ping-pong slot 间流水。不满足核数前提时当前直接返回失败。
+定义任务数 `T = shapeBatch * vNumHead`、物理 AIC core 数 `P`。当前 mode1 要求 `T <= min(floor(P / 2), 21)`，活动 MIX core 数恒为 `A = 2T`；21 是当前跨核事件 ABI 的任务对上限。A2 (`DAV_2201`) 与 A5 (`DAV_3510`) 使用相同的 core 分区：前 `T` 个 core 是 H producer，从 `consumerCoreBase=T` 开始的 `T` 个 core 是一一对应的 O consumer。每个逻辑 MIX core 只处理一个 `(batch, value-head)` 任务；同一任务的不同 chunk 在两个 ping-pong slot 间流水。不满足核数前提时当前直接返回失败。
 
 | SoC | Tiling key | blockDim | H/O 调度 | 同步 |
 | --- | --- | --- | --- | --- |
-| Atlas A2 | V128/V256 | `2 * T` | 一任务一 producer H + 一 consumer O | mode `0x0` `H_READY/V_READY` Set→Wait |
-| Ascend 950 A5 | V128/V256 | `2 * T` | 一任务一 producer H + 一 consumer O | mode `0x0` `H_READY/V_READY` Set→Wait |
+| Atlas A2 | V128 | `2 * T` | 一任务一 producer H + 一 consumer O | mode `0x0` `H_READY/V_READY` Set→Wait |
+| Ascend 950 A5 | V128 | `2 * T` | 一任务一 producer H + 一 consumer O | mode `0x0` `H_READY/V_READY` Set→Wait |
 
-入口先由 `chunk_fwd_h_o_fused_arch.h` 根据编译目标定义且仅定义一个架构宏：A2 使用 `CHUNK_FWD_HO_ARCH_A2`，A5 使用 `CHUNK_FWD_HO_ARCH35`。统一源文件随后只包含对应的架构入口；架构入口和 H/O kernel 头对错误宏组合执行预处理报错。进入所选实现后，再通过 key 1/2 选择 V128/V256 的已注册 kernel object；key 不表示 exp/exp2。`useExp2` 只在已选定的架构实现内部选择指数模式，A5 在 `useExp2=false` 时仍使用 `arch35` FwdO；dtype、layout 和 head 维度同样在 object 内继续选择模板路径。
+入口先由 `chunk_fwd_h_o_fused_arch.h` 根据编译目标定义且仅定义一个架构宏：A2 使用 `CHUNK_FWD_HO_ARCH_A2`，A5 使用 `CHUNK_FWD_HO_ARCH35`。统一源文件随后只包含对应的架构入口；架构入口和 H/O kernel 头对错误宏组合执行预处理报错。当前 mode1 仅允许 key 1 对应的 V128 kernel object，Host 限定 `K=V=128`、`chunkSize=32` 和自然指数；旧 V256 key 分支保留在 dispatcher 中，但不会由当前 tiling 产生。
 
 A5 专用 kernel、scheduler、epilogue、exp2 O tiling 投影、tile 常量和 UB 布局统一位于 `op_kernel/arch35/`。根目录仅保留公共 ABI/投影、统一 dispatcher 和 A2 实现，避免公共头通过内部 `__CCE_AICORE__` 分支混合两套架构定义。
 
@@ -292,3 +292,20 @@ AIV 一次处理其负责的连续 64 行 state：一次 MTE2 搬入 `64 x 128` 
 `calcUbTensor`、Cube2 update UB 和低精度输出 UB 分别占 32 KiB、32 KiB 和 16 KiB，
 均在既有区域内；两个 AIV 的本地 UB 相互独立。带 GK 或非 DirectUb 的场景继续使用
 16 行通用 tile；final-state 分支沿用 fused 已有的 FP32 驻留和写回语义。
+
+## 8. A5 mode1 chunk32 H 的 V 维二分与 FP32 state
+
+当前受支持的 A5 mode1 配置为自然指数、`chunkSize=32`、`K=V=128`。每个 H MIX
+core 的两个 AIV 分别负责 `[0,64)` 和 `[64,128)` 列，覆盖完整的 chunk 行或
+state 行。Cube1/Cube2 的 L0C→UB 使用 `SPLIT_N`；GM handoff 与持久 state 仍为
+row-major `[K,V]`，每个 AIV 从其列起点按完整 `V` 行距搬运，列区间互不重叠。
+
+A5 H workspace 在两个 Cube ping-pong 矩阵之后增加每 producer core 一份 `[K,V]`
+FP32 state。chunk-0 初始化从可选 initial_state 转 FP32 写入该区；无初始状态时
+清零。Vec2 每 chunk 直接从 FP32 state 读入，计算 `state * exp(g_last) + H_update`
+后原精度写回；非 final chunk 再转成输入 dtype 写入 H handoff，供下一轮 Cube1
+和 O 读取。`final_state` 仅在请求时从 FP32 结果写出，输出 dtype 为 FP32 时不做
+降精度转换。TilingData ABI、A2、O 阶段和公开接口保持不变。
+
+该分片和 FP32 state 路径尚需在 Ascend 950 上编译、精度和性能验收；不得仅凭分片
+变化推断性能收益。

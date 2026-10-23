@@ -41,8 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokens", type=int, default=192)
     parser.add_argument("--k-heads", type=int, default=1)
     parser.add_argument("--v-heads", type=int, default=1)
-    parser.add_argument("--value-dim", type=int, choices=(128, 256), default=128)
-    parser.add_argument("--chunk-size", type=int, choices=(64, 128), default=64)
+    parser.add_argument("--value-dim", type=int, choices=(128,), default=128)
+    parser.add_argument("--chunk-size", type=int, choices=(32,), default=32)
     parser.add_argument("--dtype", choices=("float16", "bfloat16"), default="bfloat16")
     parser.add_argument("--gate-dtype", choices=("input", "float32"), default="float32")
     parser.add_argument("--scale", type=float, default=None)
@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--use-exp2",
         action="store_true",
-        help="Use the A5 exp2 path instead of the natural-exp path.",
+        help="Request A5 exp2 (unsupported by the mode1-only implementation).",
     )
     parser.add_argument(
         "--output-layout",
@@ -99,27 +99,22 @@ def validate_args(args: argparse.Namespace) -> None:
         raise FileNotFoundError(args.data_path)
     if args.v_heads < args.k_heads or args.v_heads % args.k_heads != 0:
         raise ValueError("v-heads must be divisible by k-heads")
+    if args.use_exp2:
+        raise ValueError("the mode1-only implementation supports natural exp only")
     output_layout = resolve_output_layout(args)
-    valid_layouts = ("BSND", "TND") if args.use_exp2 else ("BNSD", "NTD")
+    valid_layouts = ("BNSD", "NTD")
     if output_layout not in valid_layouts:
         raise ValueError(
             f"use_exp2={args.use_exp2} requires output layout in {valid_layouts}"
         )
     if output_layout in ("NTD", "TND") and args.batch != 1:
         raise ValueError("NTD/TND output requires --batch 1")
-    if args.use_exp2:
-        if args.dtype != "bfloat16":
-            raise ValueError("the A5 exp2 path requires --dtype bfloat16")
-        if args.value_dim != 128 or args.chunk_size != 64:
-            raise ValueError("the A5 exp2 path requires --value-dim 128 --chunk-size 64")
-        if args.v_heads // args.k_heads > 4:
-            raise ValueError("the A5 exp2 path requires v-heads/k-heads <= 4")
 
 
 def resolve_output_layout(args: argparse.Namespace) -> str:
     if args.output_layout != "auto":
         return args.output_layout
-    return "BSND" if args.use_exp2 else "BNSD"
+    return "BNSD"
 
 
 def make_case(args: argparse.Namespace) -> Case:

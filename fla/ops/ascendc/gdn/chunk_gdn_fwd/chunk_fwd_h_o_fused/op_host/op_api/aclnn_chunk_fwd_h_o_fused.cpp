@@ -106,8 +106,8 @@ aclnnStatus CheckRequired(const ChunkFwdHOFusedParams &params)
     // CHECK_COND((IsAscend950() && params.useExp2) || (!IsAscend950() && !params.useExp2),
     //            ACLNN_ERR_PARAM_INVALID,
     //            "Ascend950 requires useExp2=true; Atlas A2 requires useExp2=false.");
-    CHECK_COND(params.chunkSize == 64 || params.chunkSize == 128,
-               ACLNN_ERR_PARAM_INVALID, "chunkSize must be 64 or 128.");
+    CHECK_COND(params.chunkSize == 32,
+               ACLNN_ERR_PARAM_INVALID, "mode1 supports chunkSize=32 only.");
     return ACLNN_SUCCESS;
 }
 
@@ -128,6 +128,8 @@ aclnnStatus CheckShapes(const ChunkFwdHOFusedParams &params)
                    w.GetDim(1) == u.GetDim(1) && w.GetDim(2) == k.GetDim(2) &&
                    u.GetDim(2) == k.GetDim(2) && w.GetDim(3) == k.GetDim(3),
                ACLNN_ERR_PARAM_INVALID, "w/u must match k in B/T and their H/K/V roles.");
+    CHECK_COND(k.GetDim(3) == 128 && u.GetDim(3) == 128,
+               ACLNN_ERR_PARAM_INVALID, "mode1 requires K=V=128.");
     CHECK_COND(u.GetDim(1) >= k.GetDim(1) && u.GetDim(1) % k.GetDim(1) == 0,
                ACLNN_ERR_PARAM_INVALID, "HV must be divisible by HK.");
     CHECK_COND(g.GetDim(0) == u.GetDim(0) && g.GetDim(1) == u.GetDim(1) &&

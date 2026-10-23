@@ -82,6 +82,29 @@ public:
     CATLASS_DEVICE
     ~BlockEpilogue() {}
 
+    template <typename Element>
+    CATLASS_DEVICE void CopyGmToUbColumns(
+        AscendC::LocalTensor<Element> dst, AscendC::GlobalTensor<Element> src,
+        uint32_t rows, uint32_t cols, uint32_t rowStride)
+    {
+        AscendC::DataCopyExtParams params{
+            static_cast<uint16_t>(rows), static_cast<uint32_t>(cols * sizeof(Element)),
+            static_cast<uint32_t>((rowStride - cols) * sizeof(Element)), 0, 0};
+        AscendC::DataCopyPadExtParams<Element> pad{false, 0, 0, 0};
+        AscendC::DataCopyPad(dst, src, params, pad);
+    }
+
+    template <typename Element>
+    CATLASS_DEVICE void CopyUbToGmColumns(
+        AscendC::GlobalTensor<Element> dst, AscendC::LocalTensor<Element> src,
+        uint32_t rows, uint32_t cols, uint32_t rowStride)
+    {
+        AscendC::DataCopyExtParams params{
+            static_cast<uint16_t>(rows), static_cast<uint32_t>(cols * sizeof(Element)),
+            0, static_cast<uint32_t>((rowStride - cols) * sizeof(Element)), 0};
+        AscendC::DataCopyPad(dst, src, params);
+    }
+
     __simd_vf__ inline void Vec2PreVF(
         __ubuf__  float* dstAddr, __ubuf__ HElementOutput* srcAddr, float muls,
         uint32_t count, uint32_t oneRepeatSize, uint16_t repeatOuterTimes, uint16_t repeatInnerTimes
@@ -168,38 +191,29 @@ public:
         AscendC::GlobalTensor<HElementOutput> hOutput,
         AscendC::GlobalTensor<FinalStateElement> finalState,
         AscendC::GlobalTensor<GElementInput> gInput,
-        AscendC::GlobalTensor<HElementInput> hInput,
-        AscendC::GlobalTensor<float> hUpdateInput,
+        AscendC::GlobalTensor<float> hState,
         uint32_t chunkSize,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube2Done,
         bool isFinalState,
+        bool storeFinalState,
         bool isPing
     )
     {
-        uint32_t mActual = kHeadDim;
-        uint32_t nActual = vHeadDim;
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
-        uint32_t mActualPerSubBlock = CeilDiv(mActual, subBlockNum);
-        uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
-        uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
-        uint32_t nOffset = 0;
-        int64_t offsetH = mOffset * nActual + nOffset;
-
-
-        constexpr uint32_t oneRepeatSize = AscendC::GetVecLen() * 2 / sizeof(float);
-        uint16_t repeatOuterTimes = mActualThisSubBlock;
-        uint16_t repeatInnerTimes = vHeadDim / oneRepeatSize;
+        const uint32_t rows = kHeadDim;
+        const uint32_t cols = vHeadDim / subBlockNum;
+        const uint32_t nOffset = subBlockIdx * cols;
+        const uint32_t count = rows * cols;
 
         AscendC::ResetMask();
 
-        AscendC::GlobalTensor<HElementOutput> hOutputThisSubBlock = hOutput[offsetH];
+        AscendC::GlobalTensor<HElementOutput> hOutputThisSubBlock = hOutput[nOffset];
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
-        AscendC::GlobalTensor<HElementInput> hInputThisSubBlock = hInput[offsetH];
-        AscendC::GlobalTensor<float> hUpdateInputThisSubBlock = hUpdateInput[offsetH];
-        AscendC::GlobalTensor<FinalStateElement> finalStateThisSubBlock = finalState[offsetH];
+        AscendC::GlobalTensor<float> hStateThisSubBlock = hState[nOffset];
+        AscendC::GlobalTensor<FinalStateElement> finalStateThisSubBlock = finalState[nOffset];
 
         uint32_t pingpongFlag = isPing ? 0 : pongBaseEvent;
         AscendC::LocalTensor<float> hUpdateUbTensor = isPing ? hUpdateUbTensor_ping : hUpdateUbTensor_pong;
@@ -207,7 +221,7 @@ public:
         AscendC::LocalTensor<float> glastUbTensor = isPing ? glastUbTensor_ping : glastUbTensor_pong;
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
-        AscendC::DataCopy(hUbTensor, hInputThisSubBlock, mActualThisSubBlock * nActual);
+        CopyGmToUbColumns(calcUbTensor, hStateThisSubBlock, rows, cols, vHeadDim);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
 
         GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
@@ -230,45 +244,37 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
-
-        AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Muls(calcUbTensor, calcUbTensor, muls, mActualThisSubBlock * nActual);
-        AscendC::PipeBarrier<PIPE_V>();
-
         Arch::CrossCoreWaitFlag(cube2Done);
+        AscendC::Muls<float>(calcUbTensor, calcUbTensor, muls, count);
+        AscendC::PipeBarrier<PIPE_V>();
+        // Cube2 Fixpipe output retains the logical 128-column UB row pitch.
+        for (uint32_t row = 0; row < rows; ++row) {
+            AscendC::Add<float>(calcUbTensor[row * cols], calcUbTensor[row * cols],
+                                hUpdateUbTensor[row * vHeadDim], cols);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
+        CopyUbToGmColumns(hStateThisSubBlock, calcUbTensor, rows, cols, vHeadDim);
 
         if (isFinalState) {
-            if constexpr(std::is_same<FinalStateElement, float>::value) {
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
-                AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, mActualThisSubBlock * nActual);
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                AscendC::DataCopy(finalStateThisSubBlock, hUpdateUbTensor, mActualThisSubBlock * nActual);
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
-            } else {
-                Vec2CalcVF(
-                    (__ubuf__ HElementOutput*)hUbTensor.GetPhyAddr(),
-                    (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(), 
-                    mActualThisSubBlock * nActual, oneRepeatSize, repeatOuterTimes, repeatInnerTimes
-                );
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
-                AscendC::DataCopy(finalStateThisSubBlock, hUbTensor, mActualThisSubBlock * nActual);
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
+            if (storeFinalState) {
+                if constexpr (std::is_same<FinalStateElement, float>::value) {
+                    CopyUbToGmColumns(finalStateThisSubBlock, calcUbTensor,
+                                      rows, cols, vHeadDim);
+                } else {
+                    AscendC::Cast(hUbTensor, calcUbTensor, AscendC::RoundMode::CAST_RINT, count);
+                    AscendC::PipeBarrier<PIPE_V>();
+                    CopyUbToGmColumns(finalStateThisSubBlock, hUbTensor,
+                                      rows, cols, vHeadDim);
+                }
             }
         } else {
-            Vec2CalcVF(
-                (__ubuf__ HElementOutput*)hUbTensor.GetPhyAddr(),
-                (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(), 
-                mActualThisSubBlock * nActual, oneRepeatSize, repeatOuterTimes, repeatInnerTimes
-            );
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
-            AscendC::DataCopy(hOutputThisSubBlock, hUbTensor, mActualThisSubBlock * nActual);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
+            AscendC::Cast(hUbTensor, calcUbTensor, AscendC::RoundMode::CAST_RINT, count);
+            AscendC::PipeBarrier<PIPE_V>();
+            CopyUbToGmColumns(hOutputThisSubBlock, hUbTensor, rows, cols, vHeadDim);
         }
-
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
 
     }
 

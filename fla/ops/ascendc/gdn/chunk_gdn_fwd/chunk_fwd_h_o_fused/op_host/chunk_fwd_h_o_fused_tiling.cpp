@@ -49,9 +49,7 @@ constexpr int64_t DIM_T = 2;
 constexpr int64_t DIM_D = 3;
 constexpr int64_t SUPPORTED_K = 128;
 constexpr int64_t SUPPORTED_V128 = 128;
-constexpr int64_t SUPPORTED_V256 = 256;
-constexpr int64_t CHUNK_64 = 64;
-constexpr int64_t CHUNK_128 = 128;
+constexpr int64_t SUPPORTED_CHUNK = 32;
 constexpr size_t WORKSPACE_ALIGNMENT = 512;
 constexpr size_t PING_PONG_STAGES = 2;
 constexpr size_t INPUT_ELEMENT_BYTES = sizeof(uint16_t);
@@ -309,8 +307,11 @@ ge::graphStatus FillWorkspaceA5(ChunkFwdHOFusedTilingData &tiling, size_t system
         tiling.set_kDecayWorkspaceOffset(regionOffset);
     }
 
+    // Keep two ping-pong Cube outputs, followed by one persistent FP32 state
+    // matrix per producer core for cross-chunk H recursion.
     OP_CHECK_IF(!CheckedMul({producerCoreNum, static_cast<size_t>(tiling.get_kHeadDim()),
-                             static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float), PING_PONG_STAGES}, bytes) ||
+                             static_cast<size_t>(tiling.get_vHeadDim()), sizeof(float),
+                             PING_PONG_STAGES + 1}, bytes) ||
                     !AllocateRegion(bytes, offset, regionOffset),
                 , return ge::GRAPH_FAILED);
     tiling.set_hWorkspaceOffset(regionOffset);
@@ -412,10 +413,9 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     const int64_t chunkSize = *chunkSizePtr;
     OP_CHECK_IF(batch <= 0 || seqlen <= 0 || kHeads <= 0 || vHeads <= 0 ||
                     vHeads % kHeads != 0 || kDim != SUPPORTED_K ||
-                    (vDim != SUPPORTED_V128 && vDim != SUPPORTED_V256) ||
-                    (chunkSize != CHUNK_64 && chunkSize != CHUNK_128),
+                    vDim != SUPPORTED_V128 || chunkSize != SUPPORTED_CHUNK,
                 OP_LOGE(context->GetNodeName(),
-                        "Require positive B/H/T, HV divisible by HK, K=128, V=128/256, chunk=64/128."),
+                        "Mode1 requires positive B/H/T, HV divisible by HK, K=V=128 and chunk=32."),
                 return ge::GRAPH_FAILED);
 
     const auto *cuShape = context->GetOptionalInputShape(INPUT_CU_SEQLENS);
@@ -533,22 +533,10 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
                 OP_LOGE(context->GetNodeName(), "ChunkFwdHOFused supports Atlas A2 and A5 only."),
                 return ge::GRAPH_FAILED);
     const bool isA5 = npuArch == NpuArch::DAV_3510;
-    if (isA5 && useExp2) {
-        OP_CHECK_IF(inputType != ge::DT_BF16 ||
-                        (gateType != ge::DT_FLOAT && gateType != ge::DT_BF16) ||
-                        chunkSize != GDN::CHUNK_FWD_O_A5_BT ||
-                        kDim != GDN::CHUNK_FWD_O_A5_K || vDim != GDN::CHUNK_FWD_O_A5_V ||
-                        vHeads / kHeads < 1 || vHeads / kHeads > 4,
-                    OP_LOGE(context->GetNodeName(),
-                            "A5 exp2 path requires BF16 data, BF16/FP32 gates, "
-                            "chunk=64, K=V=128 and HV/HK in [1,4]."),
-                    return ge::GRAPH_FAILED);
-    } else if (!isA5) {
-        OP_CHECK_IF(useExp2,
-                    OP_LOGE(context->GetNodeName(),
-                            "The A2 H/O core-pipeline implementation supports exp mode only."),
-                    return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(useExp2,
+                OP_LOGE(context->GetNodeName(),
+                        "The selected mode1 path supports natural exp only."),
+                return ge::GRAPH_FAILED);
 
     size_t taskNum = 0;
     OP_CHECK_IF(!CheckedMul({static_cast<size_t>(batch), static_cast<size_t>(vHeads)}, taskNum) ||
@@ -642,9 +630,7 @@ ge::graphStatus Tiling4ChunkFwdHOFused(gert::TilingContext *context)
     tiling.SaveToBuffer(rawTilingData, rawTiling->GetCapacity());
     rawTiling->SetDataSize(tiling.GetDataSize());
 
-    uint64_t tilingKey = static_cast<uint64_t>(vDim == SUPPORTED_V256
-                                                   ? GDN::ChunkFwdHOFusedTilingKey::V256_EXP
-                                                   : GDN::ChunkFwdHOFusedTilingKey::V128_EXP);
+    uint64_t tilingKey = static_cast<uint64_t>(GDN::ChunkFwdHOFusedTilingKey::V128_EXP);
     context->SetTilingKey(tilingKey);
     context->SetBlockDim(static_cast<uint32_t>(activeCoreNum));
     OP_CHECK_IF(context->SetScheduleMode(1) != ge::GRAPH_SUCCESS,
