@@ -57,7 +57,7 @@ A5 依次调度 `ChunkGatedDeltaRuleFwdPrepare`、`ChunkFwdH` 和 `ChunkFwdO`，
 | `betaEffOutOptional` | A5 新路径可选 | 与 beta 同 shape；FP32 | 非空时启用并输出 beta sigmoid |
 | `hOutOptional` | A5 新路径可选 | `stateVFirst=false` 时末两维为 `[K,V]`，否则为 `[V,K]`；与 q 同 dtype | 分块状态 |
 
-Python ctypes 入口固定返回
+Python 稳定入口固定返回
 `(o, final_state, g_cumsum, A, beta_eff, h, q_hat, k_hat, q_rstd, k_rstd)` 十元组。
 启用 `use_qk_l2norm_in_kernel` 时，q_hat/k_hat 为归一化结果，shape/layout/dtype 与输入一致，
 q_rstd/k_rstd 为 FP32 `[B,Hk,T]`，不随 layout 改变；关闭时 q_hat/k_hat 分别为原始 q/k
@@ -66,7 +66,8 @@ q_rstd/k_rstd 为 FP32 `[B,Hk,T]`，不随 layout 改变；关闭时 q_hat/k_hat
 `disable_recompute=True` 时导出 g_cumsum/A，否则这两项为 None。
 `output_final_state`、`use_beta_sigmoid_in_kernel` 和 `return_intermediate_states`
 分别控制 final_state、beta_eff 和 h 是否为 None。
-h 的 shape 为 `[B,Hv,NT,K,V]`，`state_v_first=True` 时末两维为 `[V,K]`。
+h 的 shape 为 dense `[B,NT,Hv,K,V]`，带 cu_seqlens 的 packed 为 `[1,total_NT,Hv,K,V]`；
+`state_v_first=True` 时末两维为 `[V,K]`。A5 prepare 路径导出遵循此契约，旧融合路径仍不导出 h。
 
 `g/beta` 固定以 BSN 输入，在 ACLNN 内转为 BNS；任一输入为 FP32 时，
 另一个先提升为 FP32。两个输入均为主 dtype 时保留该 dtype，后续分支支持范围不变。

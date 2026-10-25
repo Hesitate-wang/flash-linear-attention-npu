@@ -98,7 +98,7 @@ shape、storage、stride 和 offset，kernel 按 tiling
 另外传入独立的 `finalState` 输出，仅为该输出保留一次必要的 `ViewCopy`。`cuSeqlensOptional` 为空时，BSND
 按 batch 行划分序列，TND 视为一条序列；提供时仅在 host 检查 rank/dtype，具体 offset 值由 device kernel 读取，
 因而可在 ACLGraph capture/replay 中变化。首项必须为 0，offset 必须单调不减，末项不得超过输入 token capacity，
-且每个相邻 offset 的差值不超过 8。
+A2/A3 按固定时间窗口处理每段序列，不再限制每段长度为 8；A5 每段仍不超过 8。
 输入、输出、workspace 和 executor 必须保持有效，直到 stream 完成。
 
 ### 3.2 调用示例
@@ -135,7 +135,7 @@ recurrent_kda(q, k, v, g, beta, initial_state=None, *,
               safe_gate=False, lower_bound=None, state_v_first=False)
 ```
 
-稳定入口通过 ctypes 直调 aclnn，不依赖 `torch.ops.npu` 注册。`initial_state=None` 仅在
+稳定入口经 Stable-ABI 适配层调用 aclnn（纯 Python `ctypes` 直调保留为参考实现与回退），不依赖 legacy `torch.ops.npu` 注册。`initial_state=None` 仅在
 `inplace_final_state=False` 时有效，此时 wrapper 创建与 `state_v_first` 对应布局的全零 FP32 状态；原位模式必须
 显式传入 state。显式传入的非连续 state view 由 kernel 按真实 stride 直接访问；满足第 7 节约束的 Q/K/V view
 同样保留 storage offset 并直接读取，不满足时自动连续化。原位模式返回与输入相同 storage/stride
@@ -180,8 +180,8 @@ recurrent_kda<<<blockDim, nullptr, stream>>>(
 
 ## 6. legacy `torch.ops.npu` 通路
 
-`torch.ops.npu.npu_recurrent_kda` 不属于当前支持范围，也不提供兼容性保证。请使用稳定的 Python ctypes
-入口或 aclnn API。
+`torch.ops.npu.npu_recurrent_kda` 不属于当前支持范围，也不提供兼容性保证。请使用
+`fla_npu.ops.ascendc` 的稳定入口或 aclnn API。
 
 ## 7. 已知限制
 
@@ -200,7 +200,7 @@ recurrent_kda<<<blockDim, nullptr, stream>>>(
 - 末项小于 capacity 时，kernel 仅处理有效前缀并逐行跳过零长度序列；padding tail 输出不作保证。
 - state 支持 V-first 与 K-first，支持 FP32/BF16，以及原位/非原位 final state。
 - 非连续 state 仅允许 slot/head 外层维存在间隔，最后两维必须为行主序稠密矩阵，且外层地址区间不得重叠。
-- 接口面向 decode / MTP 短序列；dense 单序列长度与 varlen 每段有效序列长度均必须 `<=8`。
+- A2/A3 支持超过 8 token 的 dense/varlen 序列，内部以最多 8 token 的窗口顺序递推；A5 的每段序列长度仍必须 <=8。Token 容量和元数据宽度须能由现有 uint32 tiling 字段表示，地址计算使用 64 位并保留容量校验。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
 - `use_gate_in_kernel=false` 时 `A_log/dt_bias/safe_gate` 必须为空或 false。
 

@@ -78,6 +78,9 @@ public:
 
     __aicore__ inline void Process()
     {
+#if !(defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
+        ProcessA2A3();
+#else
         if (core_ >= args_.tiling.usedCoreNum || args_.tiling.usedCoreNum == 0) {
             return;
         }
@@ -86,15 +89,40 @@ public:
         const uint32_t total = TotalWorkItems(args_);
         const uint32_t begin = WorkBegin(total, core_, args_.tiling.usedCoreNum);
         const uint32_t end = WorkEnd(total, core_, args_.tiling.usedCoreNum);
+        // 主体只分 chunk；余下不足一轮核数的 chunk 才按 4-head 组均摊。
+        const uint32_t cores = args_.tiling.usedCoreNum;
+        const bool balanceTail = kFinalizeA5 && !args_.tiling.isVarLen &&
+            partitions == 1 && total >= cores && total % cores != 0;
+        const uint32_t fullChunksPerCore = total / cores;
+        const uint32_t headGroups = CeilDiv(args_.tiling.valueHeadNum, Shape::kHeadsPerGroup);
+        const uint32_t tailGroups = (total % cores) * headGroups;
+        const uint32_t tailBegin = WorkBegin(tailGroups, core_, cores);
+        const uint32_t tailEnd = WorkEnd(tailGroups, core_, cores);
+        const uint32_t workCount = balanceTail
+            ? fullChunksPerCore + tailEnd - tailBegin : end - begin;
         uint32_t outputSlot = 0;
         bool outputSlotUsed[2] = {false, false};
-        for (uint32_t work = begin; work < end; ++work) {
+        for (uint32_t index = 0; index < workCount; ++index) {
+            const uint32_t work = begin + index;
+            uint32_t chunkId = work / partitions;
+            uint32_t headBegin = (work % partitions) * args_.tiling.headsPerPartition;
+            uint32_t headEnd = headBegin + args_.tiling.headsPerPartition;
+            if (balanceTail) {
+                if (index < fullChunksPerCore) {
+                    chunkId = core_ * fullChunksPerCore + index;
+                    headBegin = 0;
+                    headEnd = args_.tiling.valueHeadNum;
+                } else {
+                    const uint32_t tail = tailBegin + index - fullChunksPerCore;
+                    chunkId = fullChunksPerCore * cores + tail / headGroups;
+                    headBegin = (tail % headGroups) * Shape::kHeadsPerGroup;
+                    headEnd = headBegin + Shape::kHeadsPerGroup;
+                }
+            }
             FinalizeChunk chunk{};
-            if (!ResolveChunk(args_, work / partitions, chunk)) {
+            if (!ResolveChunk(args_, chunkId, chunk)) {
                 continue;
             }
-            const uint32_t headBegin = (work % partitions) * args_.tiling.headsPerPartition;
-            uint32_t headEnd = headBegin + args_.tiling.headsPerPartition;
             if (headEnd > args_.tiling.valueHeadNum) {
                 headEnd = args_.tiling.valueHeadNum;
             }
@@ -131,9 +159,118 @@ public:
                 }
             }
         }
+#endif
     }
 
 private:
+#if !(defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
+    __aicore__ inline bool NextHead(uint64_t &work, uint64_t total,
+                                    FinalizeChunk &chunk, uint32_t &head)
+    {
+        // Host fixes CG=1. Advance only the work cursor when an invalid chunk is skipped.
+        while (work < total) {
+            const uint64_t current = work;
+            work += args_.tiling.usedCoreNum;
+            if (ResolveChunk(args_, static_cast<uint32_t>(current / args_.tiling.valueHeadNum), chunk)) {
+                head = static_cast<uint32_t>(current % args_.tiling.valueHeadNum);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    __aicore__ inline void PrefetchHead(const FinalizeChunk &chunk,
+                                       uint32_t head, uint32_t inputSlot)
+    {
+        if (l1InputInFlight_[inputSlot]) {
+            WaitFlag<HardEvent::MTE1_MTE2>(inputSlot);
+            l1InputInFlight_[inputSlot] = false;
+        }
+        const uint32_t lane = inputSlot * kL1HeadBytes;
+        const uint64_t qOffset = InputOffset(args_, chunk, head, Shape::kHeadDim);
+        LoadOperands<TileCopyQH, HLayout>(
+            q_, h_, qOffset, StateOffset(args_, chunk, head), lane + kQOffset, lane + kHOffset,
+            chunk.validRows, Shape::kHeadDim, Shape::kHeadDim,
+            Shape::kHeadDim, Shape::kHeadDim);
+        LoadOperands<TileCopyAV, LayoutRM>(
+            a_, v_, InputOffset(args_, chunk, head, Shape::kChunkRows), qOffset,
+            lane + kAOffset, lane + kVOffset, chunk.validRows, chunk.validRows,
+            Shape::kChunkRows, Shape::kChunkRows, Shape::kHeadDim);
+        SetFlag<HardEvent::MTE2_MTE1>(inputSlot);
+    }
+
+    __aicore__ inline void ConsumeHead(const FinalizeChunk &chunk, uint32_t head,
+                                      uint32_t inputSlot, uint32_t outputSlot)
+    {
+        WaitFlag<HardEvent::MTE2_MTE1>(inputSlot);
+        if (l0OutputInFlight_[outputSlot]) {
+            WaitFlag<HardEvent::FIX_M>(outputSlot);
+            l0OutputInFlight_[outputSlot] = false;
+        }
+        const uint32_t lane = inputSlot * kL1HeadBytes;
+        ComputeProduct<TileCopyQH, true, false>(lane + kQOffset, lane + kHOffset,
+            chunk.validRows, Shape::kHeadDim, Shape::kHeadDim,
+            Shape::kHeadDim, Shape::kHeadDim, 0, outputSlot);
+        ComputeProduct<TileCopyAV, false, false>(lane + kAOffset, lane + kVOffset,
+            chunk.validRows, chunk.validRows, Shape::kChunkRows,
+            Shape::kChunkRows, Shape::kHeadDim, 1, outputSlot);
+        // Both MTE1 copies precede this event. L1 can be reused while Cube/Fixpipe continue.
+        SetFlag<HardEvent::MTE1_MTE2>(inputSlot);
+        l1InputInFlight_[inputSlot] = true;
+        SetFlag<HardEvent::M_FIX>(outputSlot);
+        StoreOutput(chunk, head, outputSlot);
+    }
+
+    __aicore__ inline void ProcessA2A3()
+    {
+        const uint32_t cores = args_.tiling.usedCoreNum;
+        if (cores == 0 || core_ >= cores) {
+            return;
+        }
+        static_assert(2 * kL1HeadBytes <= 512 * 1024, "L1 input slots exceed A2/A3 capacity");
+        const uint64_t chunks = args_.tiling.isVarLen
+            ? args_.tiling.totalChunks
+            : static_cast<uint64_t>(args_.tiling.batch) * args_.tiling.totalChunks;
+        const uint64_t total = chunks * args_.tiling.valueHeadNum;
+        uint64_t work = core_;
+        FinalizeChunk current{};
+        uint32_t currentHead = 0;
+        uint32_t inputSlot = 0;
+        uint32_t outputSlot = 0;
+        if (NextHead(work, total, current, currentHead)) {
+            PrefetchHead(current, currentHead, inputSlot);
+            while (true) {
+                FinalizeChunk next{};
+                uint32_t nextHead = 0;
+                const bool hasNext = NextHead(work, total, next, nextHead);
+                // Queue the other slot before consuming this one, without waiting for Cube/Fixpipe.
+                if (hasNext) {
+                    PrefetchHead(next, nextHead, inputSlot ^ 1);
+                }
+                ConsumeHead(current, currentHead, inputSlot, outputSlot);
+                if (!hasNext) {
+                    break;
+                }
+                current = next;
+                currentHead = nextHead;
+                inputSlot ^= 1;
+                outputSlot ^= 1;
+            }
+        }
+        for (uint32_t slot = 0; slot < 2; ++slot) {
+            if (l1InputInFlight_[slot]) {
+                WaitFlag<HardEvent::MTE1_MTE2>(slot);
+            }
+            if (l0OperandInFlight_[slot]) {
+                WaitFlag<HardEvent::M_MTE1>(slot);
+            }
+            if (l0OutputInFlight_[slot]) {
+                WaitFlag<HardEvent::FIX_M>(slot);
+            }
+        }
+    }
+#endif
+
     template <typename TileCopy, typename LayoutB>
     __aicore__ inline void LoadOperands(GlobalTensor<Element> &sourceA,
                                         GlobalTensor<Element> &sourceB,
@@ -170,7 +307,11 @@ private:
         CopyGmB{}(l1BTensor, gmBBlock);
     }
 
-    template <typename TileCopy, bool InitC>
+    template <typename TileCopy, bool InitC
+#if !(defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
+              , bool ReleaseL1 = true
+#endif
+              >
     __aicore__ inline void ComputeProduct(uint32_t l1AOffset, uint32_t l1BOffset,
                                           uint32_t m, uint32_t k, uint32_t aStride,
                                           uint32_t bRows, uint32_t n,
@@ -222,8 +363,10 @@ private:
 #else
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        SetFlag<HardEvent::MTE1_MTE2>(0);
-        WaitFlag<HardEvent::MTE1_MTE2>(0);
+        if constexpr (ReleaseL1) {
+            SetFlag<HardEvent::MTE1_MTE2>(0);
+            WaitFlag<HardEvent::MTE1_MTE2>(0);
+        }
 #endif
         auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, n));
         // A2/A3 的 MMAD 至少处理一个 16 行分形，尾块仍只写回有效行。
@@ -336,6 +479,9 @@ private:
         StoreOutput(chunk, head, outputSlot);
     }
 
+#if !(defined(__CCE_AICORE__) && __CCE_AICORE__ == 310)
+    bool l1InputInFlight_[2] = {false, false};
+#endif
     FinalizeArgs args_{};
     uint32_t core_ = 0;
     bool l0OperandInFlight_[2] = {false, false};
