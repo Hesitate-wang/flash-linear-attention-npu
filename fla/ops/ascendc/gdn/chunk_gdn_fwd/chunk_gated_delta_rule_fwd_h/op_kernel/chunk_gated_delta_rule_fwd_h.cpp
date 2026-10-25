@@ -15,6 +15,7 @@
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "arch35/gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
+#include "arch35/gdn_fwd_h_cp_kernel.hpp"
 #else
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
@@ -62,6 +63,14 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdHLaunchTyped(
                                                          bool useGk, bool useG)
 {
     using WorkspaceT = float;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    auto *tilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *>(tiling);
+    if (tilingData->useCpPath) {
+        ChunkGatedDeltaRuleFwdHCPImpl<DataT, GateT, StateT>(
+            k, w, u, g, gk, inital_state, h, v_new, final_state, tiling, user);
+        return;
+    }
+#endif
     if (useGk) {
         if (useG) {
             ChunkGatedDeltaRuleFwdHKernelImpl<DataT, GateT, StateT, WorkspaceT, TileShapes, true, true, useExp2>(
@@ -143,6 +152,10 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
     } else if (TILING_KEY_IS(2)) {
         KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::ChunkGatedDeltaRuleFwdHDispatch<Catlass::Gemm::Kernel::GDNFwdHTileShapes256, 256>(
+            k, w, u, g, gk, inital_state, cu_seqlens, chunk_indices, h, v_new, final_state, tiling, user);
+    } else if (TILING_KEY_IS(3)) {
+        KERNEL_TASK_TYPE(3, KERNEL_TYPE_MIX_AIC_1_2);
+        GDN::ChunkGatedDeltaRuleFwdHDispatch<Catlass::Gemm::Kernel::GDNFwdHTileShapes128, 128>(
             k, w, u, g, gk, inital_state, cu_seqlens, chunk_indices, h, v_new, final_state, tiling, user);
     }
 }

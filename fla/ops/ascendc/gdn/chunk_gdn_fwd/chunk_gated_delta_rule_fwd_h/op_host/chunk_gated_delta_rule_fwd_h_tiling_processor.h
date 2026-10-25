@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 
 #include "../op_kernel/chunk_gated_delta_rule_fwd_h_struct.h"
 
@@ -56,6 +57,7 @@ struct ChunkGatedDeltaRuleFwdHTilingContext {
     int64_t stateDataType; // initial/final state dtype
     bool useG;
     bool useGk;
+    bool isAscend950;
     // attrs
     bool storeFinalState;
     int64_t chunkSize;
@@ -97,6 +99,38 @@ public:
         size_t workspaceOffset = ctx_.libApiWorkSpaceSize;
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
 
+        const bool useCpPath = chunkSize == 32 && !ctx_.hasCuSeqlens && ctx_.isAscend950 &&
+                               kHeadDim == 128 && vHeadDim == 128 &&
+                               ctx_.shapeBatchDim * ctx_.vNumHead <= ctx_.aicCoreNum;
+        tiling.useCpPath = useCpPath;
+        tiling.cpRankCount = 0;
+        tiling.cpSummaryWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
+        tiling.cpScratchWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
+
+        if (chunkSize == 32) {
+            const int64_t batchHeads = ctx_.shapeBatchDim * ctx_.vNumHead;
+            const int64_t numChunks = (ctx_.seqlen + chunkSize - 1) / chunkSize;
+            const int64_t ranks = std::min<int64_t>(numChunks, ctx_.aicCoreNum / batchHeads);
+            tiling.cpRankCount = ranks;
+            if (useCpPath) {
+                const size_t activeRanks = static_cast<size_t>(batchHeads * ranks);
+                constexpr size_t kSummaryBytes = (128U * 128U + 128U * 128U) * sizeof(float);
+                constexpr size_t kScratchBytes = (128U * 128U * 3U) * sizeof(float);
+                tiling.cpSummaryWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
+                workspaceOffset += AlignUpCp(activeRanks * kSummaryBytes);
+                tiling.cpScratchWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
+                workspaceOffset += AlignUpCp(activeRanks * kScratchBytes);
+                blockDim = ctx_.aicCoreNum;
+                workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
+                workspaceSize = workspaceOffset;
+            }
+        }
+
+        if (useCpPath) {
+            FillCommonTiling(tiling, batch, isVariedLen, shapeBatch, tokenBatch, chunkSize);
+            return;
+        }
+
         tiling.vWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * chunkSize * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
 
@@ -120,6 +154,13 @@ public:
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
         workspaceSize = workspaceOffset;
 
+        FillCommonTiling(tiling, batch, isVariedLen, shapeBatch, tokenBatch, chunkSize);
+    }
+
+private:
+    void FillCommonTiling(::ChunkGatedDeltaRuleFwdHTilingData &tiling, int64_t batch, int64_t isVariedLen,
+                          int64_t shapeBatch, int64_t tokenBatch, int64_t chunkSize) const
+    {
         tiling.batch = batch;
         tiling.seqlen = ctx_.seqlen;
         tiling.kNumHead = ctx_.kNumHead;
@@ -139,11 +180,15 @@ public:
         tiling.useGk = ctx_.useGk;
     }
 
-private:
     // Mirrors the original "(x + GM_ALIGN) / GM_ALIGN * GM_ALIGN" alignment.
     static size_t AlignUp(size_t x)
     {
         return (x + GDN_FWD_H_GM_ALIGN) / GDN_FWD_H_GM_ALIGN * GDN_FWD_H_GM_ALIGN;
+    }
+
+    static size_t AlignUpCp(size_t x)
+    {
+        return (x + GDN_FWD_H_GM_ALIGN - 1) / GDN_FWD_H_GM_ALIGN * GDN_FWD_H_GM_ALIGN;
     }
 
     const ChunkGatedDeltaRuleFwdHTilingContext &ctx_;

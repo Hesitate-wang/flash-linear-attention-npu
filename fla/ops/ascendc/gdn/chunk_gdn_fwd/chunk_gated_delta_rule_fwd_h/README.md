@@ -19,11 +19,12 @@ gk:  [B,H_v,T,K]     optional
 
 ```text
 v_new = u - w @ h_prev
+update_value = v_new * exp(g_last - g_t)  # when g is present; otherwise v_new
 
 scalar_decay = exp(g_last)       if g is provided
 key_decay    = exp2(gk_last)     if gk is provided
 
-h_next = h_prev * scalar_decay * key_decay + kg^T @ v_new
+h_next = h_prev * scalar_decay * key_decay + kg^T @ update_value
 ```
 
 逐 K gate `gk` 固定处于 log2 空间，因此固定使用 `exp2`。标量 gate `g` 固定处于自然对数空间，
@@ -86,6 +87,8 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
 
 - A2/A3/A5。
 - FP16/BF16 数据路径，gate 支持 FP16/BF16/FP32，状态支持 FP16/BF16/FP32。
-- V=128/256，chunk_size=64/128。
+- V=128/256，chunk_size=64/128；另有 Ascend 950 CP 路径支持 dense 定长 `K=V=128, chunk_size=32`，要求 `B*HV <= total AIC cores`。
 - dense 与 `cu_seqlens/chunk_indices` 变长模式。
 - `state_v_first` true/false。
+
+`chunk_size=32` 不支持变长，不满足 SoC、维度或并行度约束时由 host 拒绝；不会回退到旧 kernel。

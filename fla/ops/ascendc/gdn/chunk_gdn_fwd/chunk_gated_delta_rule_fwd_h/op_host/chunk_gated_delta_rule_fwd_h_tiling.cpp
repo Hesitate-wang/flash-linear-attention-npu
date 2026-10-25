@@ -51,6 +51,7 @@ static constexpr size_t ATTR_LOGICAL_V_DIM_IDX = 7;
 
 static constexpr uint32_t TILING_KEY_V128 = 1;
 static constexpr uint32_t TILING_KEY_V256 = 2;
+static constexpr uint32_t TILING_KEY_CP32 = 3;
 static constexpr int64_t V_DIM_128 = 128;
 static constexpr int64_t V_DIM_256 = 256;
 
@@ -126,6 +127,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tilingCtx.useGk = useGk;
     tilingCtx.aicCoreNum = ascendcPlatform.GetCoreNumAic();
     tilingCtx.libApiWorkSpaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
+    tilingCtx.isAscend950 = ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
 
     if (logicalBatch <= 0 || logicalSeqlen <= 0 || logicalKHeads <= 0 ||
         logicalVHeads <= 0 || logicalKDim <= 0 || logicalVDim <= 0 ||
@@ -143,13 +145,36 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
 
+    if (chunkSize == 32) {
+        if (!tilingCtx.isAscend950) {
+            OP_LOGE(context->GetNodeName(), "chunkSize=32 is supported on Ascend950 only.");
+            return ge::GRAPH_FAILED;
+        }
+        if (tilingCtx.hasCuSeqlens || context->GetOptionalInputTensor(INPUT_CHUNK_INDICES_IDX) != nullptr) {
+            OP_LOGE(context->GetNodeName(), "chunkSize=32 supports dense fixed-length inputs only.");
+            return ge::GRAPH_FAILED;
+        }
+        if (tilingCtx.kHeadDim != 128 || tilingCtx.vHeadDim != 128) {
+            OP_LOGE(context->GetNodeName(), "chunkSize=32 requires K=V=128.");
+            return ge::GRAPH_FAILED;
+        }
+        if (tilingCtx.shapeBatchDim * tilingCtx.vNumHead > tilingCtx.aicCoreNum) {
+            OP_LOGE(context->GetNodeName(), "chunkSize=32 requires B*HV <= total AIC core count.");
+            return ge::GRAPH_FAILED;
+        }
+    } else if (chunkSize != 64 && chunkSize != 128) {
+        OP_LOGE(context->GetNodeName(), "chunkSize must be 32, 64 or 128.");
+        return ge::GRAPH_FAILED;
+    }
+
     ::ChunkGatedDeltaRuleFwdHTilingData plainTiling{};
     uint32_t blockDim = 0;
     size_t workspaceSize = 0;
     ChunkGatedDeltaRuleFwdHTilingProcessor processor(tilingCtx);
     processor.Process(plainTiling, blockDim, workspaceSize);
 
-    uint32_t tilingKey = plainTiling.vHeadDim > V_DIM_128 ? TILING_KEY_V256 : TILING_KEY_V128;
+    uint32_t tilingKey = plainTiling.useCpPath ? TILING_KEY_CP32
+                                               : (plainTiling.vHeadDim > V_DIM_128 ? TILING_KEY_V256 : TILING_KEY_V128);
     context->SetTilingKey(tilingKey);
     OP_LOGD(context->GetNodeName(), "tilingKey: %u (vHeadDim=%ld)", tilingKey, plainTiling.vHeadDim);
 
@@ -180,6 +205,10 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tiling.set_hWorkspaceOffset(plainTiling.hWorkspaceOffset);
     tiling.set_numSeqWorkspaceOffset(plainTiling.numSeqWorkspaceOffset);
     tiling.set_numChunksWorkspaceOffset(plainTiling.numChunksWorkspaceOffset);
+    tiling.set_useCpPath(plainTiling.useCpPath);
+    tiling.set_cpRankCount(plainTiling.cpRankCount);
+    tiling.set_cpSummaryWorkspaceOffset(plainTiling.cpSummaryWorkspaceOffset);
+    tiling.set_cpScratchWorkspaceOffset(plainTiling.cpScratchWorkspaceOffset);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

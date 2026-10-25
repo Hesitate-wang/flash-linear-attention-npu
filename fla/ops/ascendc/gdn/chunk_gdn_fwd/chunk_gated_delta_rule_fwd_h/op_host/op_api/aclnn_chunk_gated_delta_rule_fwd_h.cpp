@@ -9,7 +9,9 @@
  */
 #include "aclnn_chunk_gated_delta_rule_fwd_h.h"
 #include "chunk_gated_delta_rule_fwd_h.h"
+#include "acl/acl.h"
 #include <algorithm>
+#include <cstring>
 #include <dlfcn.h>
 #include <new>
 #include <vector>
@@ -122,6 +124,12 @@ static int64_t CountChunks(const aclIntArray *cuSeqlens, int64_t seqlen, int64_t
     return totalChunks;
 }
 
+static bool IsAscend950()
+{
+    const char *socName = aclrtGetSocName();
+    return socName != nullptr && std::strstr(socName, "Ascend950") != nullptr;
+}
+
 static aclnnStatus CheckShape(ChunkGatedDeltaRuleFwdHParams params)
 {
     auto kShape = params.k->GetViewShape();
@@ -146,6 +154,10 @@ static aclnnStatus CheckShape(ChunkGatedDeltaRuleFwdHParams params)
     const int64_t hv = uShape.GetDim(1);
     const int64_t kDim = kShape.GetDim(3);
     const int64_t vDim = uShape.GetDim(3);
+    if (params.chunkSize == 32) {
+        CHECK_COND(kDim == 128 && vDim == 128, ACLNN_ERR_PARAM_INVALID,
+                   "chunkSize=32 requires K=V=128.");
+    }
     const int64_t seqNum = params.cuSeqlensOptional == nullptr
                                ? batch
                                : static_cast<int64_t>(params.cuSeqlensOptional->Size()) - 1;
@@ -324,8 +336,13 @@ static aclnnStatus CheckVariableLength(const ChunkGatedDeltaRuleFwdHParams &para
 static aclnnStatus CheckParams(ChunkGatedDeltaRuleFwdHParams params)
 {
     CHECK_RET(CheckNotNull(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
-    CHECK_COND(params.chunkSize == 64 || params.chunkSize == 128, ACLNN_ERR_PARAM_INVALID,
-               "chunkSize must be 64 or 128.");
+    CHECK_COND(params.chunkSize == 32 || params.chunkSize == 64 || params.chunkSize == 128,
+               ACLNN_ERR_PARAM_INVALID, "chunkSize must be 32, 64 or 128.");
+    CHECK_COND(params.chunkSize != 32 || IsAscend950(), ACLNN_ERR_PARAM_INVALID,
+               "chunkSize=32 is supported on Ascend950 only.");
+    CHECK_COND(params.chunkSize != 32 ||
+                   (params.cuSeqlensOptional == nullptr && params.chunkIndicesOptional == nullptr),
+               ACLNN_ERR_PARAM_INVALID, "chunkSize=32 supports dense fixed-length inputs only.");
     CHECK_RET(CheckGateOptionalNonNull(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckGkParams(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckFormat(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
