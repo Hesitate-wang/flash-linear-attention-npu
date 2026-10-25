@@ -647,6 +647,9 @@ private:
     __aicore__ inline void CpMmad(AscendC::GlobalTensor<float> lhs, AscendC::GlobalTensor<float> rhs,
                                   AscendC::GlobalTensor<float> dst)
     {
+        const bool debugFirstMmad = !cpMmadDebugged_;
+        cpMmadDebugged_ = true;
+        const uint32_t debugBlock = static_cast<uint32_t>(AscendC::GetBlockIdx());
         auto layout = tla::MakeLayout<float, Catlass::layout::RowMajor>(128, 128);
         auto lhsTensor = tla::MakeTensor(lhs, layout, Catlass::Arch::PositionGM{});
         auto rhsTensor = tla::MakeTensor(rhs, layout, Catlass::Arch::PositionGM{});
@@ -655,9 +658,23 @@ private:
         auto rhsTile = tla::GetTile(rhsTensor, tla::MakeCoord(0, 0), tla::MakeShape(128, 128));
         auto dstTile = tla::GetTile(dstTensor, tla::MakeCoord(0, 0), tla::MakeShape(128, 128));
         CpBlockMmad blockMmad(resource_);
+        if (debugFirstMmad) {
+            AscendC::PRINTF("CPDBG AIC mmad_before_preset block=%u\n", debugBlock);
+        }
         blockMmad.preSetFlags();
+        if (debugFirstMmad) {
+            AscendC::PRINTF("CPDBG AIC mmad_after_preset block=%u\n", debugBlock);
+            AscendC::PRINTF("CPDBG AIC mmad_before_body block=%u\n", debugBlock);
+        }
         blockMmad(lhsTile, rhsTile, dstTile, Catlass::GemmCoord{128, 128, 128});
+        if (debugFirstMmad) {
+            AscendC::PRINTF("CPDBG AIC mmad_after_body block=%u\n", debugBlock);
+            AscendC::PRINTF("CPDBG AIC mmad_before_final_wait block=%u\n", debugBlock);
+        }
         blockMmad.finalWaitFlags();
+        if (debugFirstMmad) {
+            AscendC::PRINTF("CPDBG AIC mmad_after_final_wait block=%u\n", debugBlock);
+        }
     }
 
     __aicore__ inline void RunLocalChunks(int64_t valueBegin, int64_t valueCount)
@@ -800,6 +817,7 @@ private:
     AscendC::GlobalTensor<StateT> initial_, final_;
     AscendC::GlobalTensor<float> summary_, scratch_;
     AscendC::GlobalTensor<float> operand_;
+    bool cpMmadDebugged_ = false;
     Catlass::Arch::Resource<CpArchTag> resource_;
     AscendC::TPipe pipe_;
     AscendC::TBuf<AscendC::TPosition::VECCALC> vecBuf_;
