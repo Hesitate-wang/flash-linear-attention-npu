@@ -193,6 +193,10 @@ public:
                                         static_cast<int32_t>(rank_), debugSubBlock);
                     }
                     ApplySummaryMmadM();
+                    if (localChunk == 0) {
+                        AscendC::PRINTF("CPDBG AIV m_apply_done block=%u rank=%d sub=%u\n", debugBlock,
+                                        static_cast<int32_t>(rank_), debugSubBlock);
+                    }
                     SetFlagToAic(kCpAivMmadMAppliedFlag);
                     WaitFlagFromAic(kCpAicMmadEReadyFlag);
                     if (localChunk == 0) {
@@ -200,6 +204,10 @@ public:
                                         static_cast<int32_t>(rank_), debugSubBlock);
                     }
                     ApplySummaryMmadE();
+                    if (localChunk == 0) {
+                        AscendC::PRINTF("CPDBG AIV e_apply_done block=%u rank=%d sub=%u\n", debugBlock,
+                                        static_cast<int32_t>(rank_), debugSubBlock);
+                    }
                     SetFlagToAic(kCpAivMmadEAppliedFlag);
                 }
                 AscendC::PRINTF("CPDBG AIV affine_exit block=%u rank=%d sub=%u wait_state_init\n", debugBlock,
@@ -377,10 +385,26 @@ private:
                                 static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
             }
             WaitForAivs(kCpAivOperandReadyFlag);
+            if (localChunk == 0) {
+                AscendC::PRINTF("CPDBG AIC operand_joined block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            }
             CpMmad(scratch_[tempA_], summary_[summaryM_], scratch_[tempM_]);
+            if (localChunk == 0) {
+                AscendC::PRINTF("CPDBG AIC m_mmad_done block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            }
             SetFlagForAivs(kCpAicMmadMReadyFlag);
             WaitForAivs(kCpAivMmadMAppliedFlag);
+            if (localChunk == 0) {
+                AscendC::PRINTF("CPDBG AIC m_ack_joined block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            }
             CpMmad(scratch_[tempA_], summary_[summaryE_], scratch_[tempM_]);
+            if (localChunk == 0) {
+                AscendC::PRINTF("CPDBG AIC e_mmad_done block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            }
             SetFlagForAivs(kCpAicMmadEReadyFlag);
             WaitForAivs(kCpAivMmadEAppliedFlag);
             if (localChunk == 0) {

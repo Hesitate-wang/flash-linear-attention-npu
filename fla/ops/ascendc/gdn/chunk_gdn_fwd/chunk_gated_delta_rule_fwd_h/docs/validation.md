@@ -35,6 +35,10 @@ For a timeout, provide the last complete log lines, preserving device/core order
   participate in the same collective rendezvous. For AIC-to-AIV stages, expect one
   AIC set and one wait per AIV; for AIV-to-AIC stages, expect one set per AIV and
   one AIC wait. All participants use the same `flagId`.
+- `AIC operand_joined/m_mmad_done/m_ack_joined/e_mmad_done` and
+  `AIV m_apply_done/e_apply_done` split the first summary iteration into compute
+  and handshake boundaries. The last marker identifies whether progress stopped
+  in vector update, collective acknowledgement, Cube MMAD, or the next release.
 - `AIC state_init_publish`, `AIC prefix_mmad/prefix_finalize`, and corresponding
   `AIV prefix_wait`: localize incoming-state prefix handoffs.
 - `AIC state_ready_published` and `AIV state_wait/state_wait_done`: verify the
