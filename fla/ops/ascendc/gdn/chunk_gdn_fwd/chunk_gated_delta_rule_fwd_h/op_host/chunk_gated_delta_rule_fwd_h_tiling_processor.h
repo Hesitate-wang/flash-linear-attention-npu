@@ -14,7 +14,7 @@
  *
  * The caller is responsible for resolving framework-specific information (shapes, dtypes,
  * platform core number, lib-api workspace size) into the plain context struct below. The
- * processor then fills the plain ChunkGatedDeltaRuleFwdHTilingData together with the block
+ * processor then fills the plain ChunkGatedDeltaRuleFwdHTilingDataRaw together with the block
  * dim and the total workspace size, mirroring exactly the original Tiling4ChunkGatedDeltaRuleFwdH.
  */
 
@@ -71,7 +71,7 @@ public:
     explicit ChunkGatedDeltaRuleFwdHTilingProcessor(const ChunkGatedDeltaRuleFwdHTilingContext &ctx) : ctx_(ctx) {}
 
     // Fills the plain tiling struct, the block dim and the total workspace size.
-    void Process(::ChunkGatedDeltaRuleFwdHTilingData &tiling, uint32_t &blockDim, size_t &workspaceSize) const
+    void Process(::ChunkGatedDeltaRuleFwdHTilingDataRaw &tiling, uint32_t &blockDim, size_t &workspaceSize) const
     {
         int64_t isVariedLen;
         int64_t shapeBatch;
@@ -158,7 +158,7 @@ public:
     }
 
 private:
-    void FillCommonTiling(::ChunkGatedDeltaRuleFwdHTilingData &tiling, int64_t batch, int64_t isVariedLen,
+    void FillCommonTiling(::ChunkGatedDeltaRuleFwdHTilingDataRaw &tiling, int64_t batch, int64_t isVariedLen,
                           int64_t shapeBatch, int64_t tokenBatch, int64_t chunkSize) const
     {
         tiling.batch = batch;

@@ -25,7 +25,7 @@
 
 #include <cstdint>
 
-struct ChunkGatedDeltaRuleFwdHTilingData {
+struct ChunkGatedDeltaRuleFwdHTilingDataRaw {
     int64_t batch;
     int64_t seqlen;
     int64_t kNumHead;

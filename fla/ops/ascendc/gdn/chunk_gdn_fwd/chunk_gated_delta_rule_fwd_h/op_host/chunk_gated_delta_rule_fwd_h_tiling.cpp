@@ -167,7 +167,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
 
-    ::ChunkGatedDeltaRuleFwdHTilingData plainTiling{};
+    ::ChunkGatedDeltaRuleFwdHTilingDataRaw plainTiling{};
     uint32_t blockDim = 0;
     size_t workspaceSize = 0;
     ChunkGatedDeltaRuleFwdHTilingProcessor processor(tilingCtx);

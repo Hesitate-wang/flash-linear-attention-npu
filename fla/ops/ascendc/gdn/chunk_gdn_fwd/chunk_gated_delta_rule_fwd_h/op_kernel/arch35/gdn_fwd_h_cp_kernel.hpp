@@ -45,21 +45,22 @@ __aicore__ inline float CpToFloat(T value)
 
 template <typename DataT, typename GateT, typename StateT>
 class GDNFwdHCPKernel {
-    using CpTileShape = tla::Shape<tla::Int<128>, tla::Int<128>, tla::Int<128>>;
+    using CpL1TileShape = tla::Shape<tla::Int<128>, tla::Int<128>, tla::Int<128>>;
+    using CpL0TileShape = tla::Shape<tla::Int<128>, tla::Int<128>, tla::Int<32>>;
     using CpArchTag = Catlass::Arch::Ascend950;
-    using CpDispatch = Catlass::Gemm::MmadPingpongTlaMulti<CpArchTag, false, false, 2>;
+    using CpDispatch = Catlass::Gemm::MmadPingpongTlaMulti<CpArchTag, false, false, 2, false, 2, 2, 1, 1>;
     using CpTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<
         CpArchTag, float, Catlass::layout::RowMajor, float, Catlass::layout::RowMajor,
         float, Catlass::layout::RowMajor>;
     using CpBlockMmad = Catlass::Gemm::Block::BlockMmadTla<
-        CpDispatch, CpTileShape, CpTileShape,
+        CpDispatch, CpL1TileShape, CpL0TileShape,
         float, float, float, void, CpTileCopy>;
 
 public:
     __aicore__ inline void Init(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR gk, GM_ADDR initialState,
                                 GM_ADDR h, GM_ADDR vNew, GM_ADDR finalState, GM_ADDR tiling, GM_ADDR workspace)
     {
-        auto *t = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *>(tiling);
+        auto *t = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingDataRaw *>(tiling);
         batch_ = t->shapeBatch;
         seqlen_ = t->seqlen;
         hk_ = t->kNumHead;
