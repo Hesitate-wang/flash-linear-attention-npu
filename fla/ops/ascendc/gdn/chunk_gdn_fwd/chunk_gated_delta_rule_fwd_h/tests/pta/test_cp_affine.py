@@ -30,6 +30,29 @@ def make_chunk(rng, k, v, length, gate_mode):
     return {"a": a, "e": e, "w": w, "key": key, "u": u, "factor": factor, "decay": decay}
 
 
+def build_chunk_affine_by_subblock(chunk, k, v):
+    a = [[0.0 for _ in range(k)] for _ in range(k)]
+    e = [[0.0 for _ in range(v)] for _ in range(k)]
+    rows_per_subblock = k // 2
+    cols_per_subblock = v // 2
+    for subblock in range(2):
+        row_begin = subblock * rows_per_subblock
+        col_begin = subblock * cols_per_subblock
+        for i in range(row_begin, row_begin + rows_per_subblock):
+            for j in range(k):
+                a[i][j] = (chunk["decay"][i] if i == j else 0.0) - sum(
+                    chunk["key"][t][i] * chunk["factor"][t] * chunk["w"][t][j]
+                    for t in range(len(chunk["w"]))
+                )
+        for i in range(k):
+            for j in range(col_begin, col_begin + cols_per_subblock):
+                e[i][j] = sum(
+                    chunk["key"][t][i] * chunk["factor"][t] * chunk["u"][t][j]
+                    for t in range(len(chunk["u"]))
+                )
+    return a, e
+
+
 def run_chunk(h, chunk):
     vnew = [[chunk["u"][t][v] - sum(chunk["w"][t][i] * h[i][v] for i in range(len(h)))
              for v in range(len(h[0]))] for t in range(len(chunk["u"]))]
@@ -110,6 +133,18 @@ class CpAffineTest(unittest.TestCase):
                 for erow, arow in zip(ref_h, got_final):
                     for x, y in zip(erow, arow):
                         self.assertAlmostEqual(x, y, places=11)
+
+    def test_subblock_affine_build_matches_full_chunk_formula(self):
+        k, v = 8, 6
+        for gate_mode in ("g", "gk", "both"):
+            for length in (32, 17):
+                rng = random.Random(400 + length + len(gate_mode))
+                chunk = make_chunk(rng, k, v, length, gate_mode)
+                got_a, got_e = build_chunk_affine_by_subblock(chunk, k, v)
+                for expected, actual in ((chunk["a"], got_a), (chunk["e"], got_e)):
+                    for expected_row, actual_row in zip(expected, actual):
+                        for x, y in zip(expected_row, actual_row):
+                            self.assertAlmostEqual(x, y, places=12)
 
 
 if __name__ == "__main__":

@@ -37,10 +37,21 @@ rank writes optional `final_state`.
 
 ## Synchronization and workspace
 
-The CP key uses one mixed AIC/AIV launch shape. AICs build summaries, execute
-`PipeBarrier<PIPE_ALL>()`, and join the mode-0 collective using
-`CrossCoreSetFlag<0x0, PIPE_FIX>` and `CrossCoreWaitFlag`. After applying the prior-rank
-prefix, every AIC publishes its rank state to its paired AIVs with a mode-2 flag.
+The CP key uses one mixed AIC/AIV launch shape. AIVs build each chunk's `A_c` and `E_c`
+with vector multiply/add operations, splitting `A_c` rows and `E_c` columns between
+the two sub-blocks. For each local chunk, AIC performs the two MMADs that compose
+`(M,E)`; AIV vector-copies the `M` result and adds `E_c` into the `E` result. AIC waits
+for both sub-block acknowledgements before reusing scratch. AIC also performs the
+sequential prefix MMADs, while AIV initializes and updates their state buffers.
+AICs execute `PipeBarrier<PIPE_ALL>()` and join the mode-0 collective using
+`CrossCoreSetFlag<0x0, PIPE_FIX>` and `CrossCoreWaitFlag`. A5's 1-AIC:2-AIV handoffs use
+mode `0x4`: each AIV uses the local flag ID, while AIC addresses the paired AIV with
+`flagId + subBlock * 16`. Affine-ready, MMAD-ready/applied, and state-ready each use
+producer/consumer handshakes; AIV drains MTE3 before publishing its affine matrices.
+After applying the prior-rank prefix, AIV initializes the incoming state from
+`initial_state` (or zero), adds each prior rank's affine bias to the prefix MMAD result,
+and copies the final ping-pong buffer into the replay state when needed. AIC publishes
+the completed state to its paired AIVs.
 The two AIV sub-blocks split the 128 value columns and perform local chunk replay,
 writing disjoint columns of `h`, `v_new`, and `final_state`. Inactive AIC/AIV ranks
 also participate in their respective synchronization phases. This remains one kernel
@@ -56,14 +67,13 @@ CP total      = lib workspace + 32 MiB + activeRanks * 320 KiB
 ```
 
 The scratch contains two FP32 128x128 matrix buffers and one 64 KiB operand buffer.
-The operand buffer stores the current chunk's gate-scaled `w` and `u` tiles plus its
-128-element decay vector in FP32. AIV uses the repository's `AscendC::Exp` and
-V-to-scalar event pattern to prepare gate factors. Each AIV sub-block publishes a
-separate ready flag; AIC waits for both sub-blocks, consumes that chunk's operands,
-then acknowledges both before AIV may overwrite the staging area. After the global barrier AIC reuses the
-matrix scratch as the two KxV prefix-state buffers, then AIV reuses it as the local
-state source. The CP offsets and allocation branch are independent from legacy
-allocations.
+The operand area stores the chunk-local `E_c` matrix. AIV uses the repository's
+`AscendC::Exp` and V-to-scalar event pattern to prepare gate factors, then writes `A_c`
+and `E_c` to their scratch regions. The paired mode-0x4 handshakes order affine
+publication, both MMAD results, and vector updates.
+After the global barrier AIC reuses matrix scratch as the two KxV prefix-state buffers,
+then AIV reuses it as the local state source. CP offsets and allocation are independent
+from legacy allocations.
 
 For comparison, the legacy path retains its existing allocation formula: per AIC,
 two `chunkSize*V` FP32 buffers, two `K*V` FP32 buffers, and (when `gk` is present)

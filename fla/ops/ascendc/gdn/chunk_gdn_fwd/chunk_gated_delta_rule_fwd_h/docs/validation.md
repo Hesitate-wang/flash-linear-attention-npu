@@ -13,9 +13,9 @@ are pending.
 | --- | --- | --- |
 | Chunk32 support and rejection | ACLNN validation and Arch35 tiling | Implemented; device/API tests pending |
 | CP TilingKey and block/rank mapping | Host tiling processor; kernel entry key 3 | Implemented; compiled dispatch evidence pending |
-| Affine rank summaries and prefix replay | `arch35/gdn_fwd_h_cp_kernel.hpp`; AIV gate preparation, Cube rank composition/prefix MMAD, AIV UB local replay | Implemented structurally; tiny-matrix serial-vs-CP formula test passes, device comparison pending |
-| One global AIC barrier and AIC/AIV handoffs | two per-sub-block mode-2 operand-ready flags with consumed acknowledgements, mode-0 collective, then mode-2 state-ready handoff | Runtime validation pending |
-| Separate CP workspace | summary, two matrix scratch buffers, and gate-scaled operand staging | Formula: 320 KiB per active rank, plus library space and 32 MiB reservations |
+| Affine rank summaries and prefix replay | `arch35/gdn_fwd_h_cp_kernel.hpp`; AIV vector construction of chunk `A_c/E_c`, Cube MMAD rank composition/prefix, AIV vector summary/prefix updates and local replay | Implemented structurally; tiny-matrix serial-vs-CP formula test passes, device comparison pending |
+| One global AIC barrier and AIC/AIV handoffs | mode-0 all-AIC collective; A5 mode-0x4 paired handoffs order affine publication, M/E MMAD results and vector updates with AIC-side subblock stride 16 | Structural protocol corrected against the repository A5 1:2 pattern; device runtime validation pending |
+| Separate CP workspace | summary, two matrix scratch buffers, and chunk-local `E_c` staging | Formula: 320 KiB per active rank, plus library space and 32 MiB reservations |
 | Legacy regression | old tiling branch retained | Build and chunk64/128/varlen regression pending |
 
 ## Required device validation

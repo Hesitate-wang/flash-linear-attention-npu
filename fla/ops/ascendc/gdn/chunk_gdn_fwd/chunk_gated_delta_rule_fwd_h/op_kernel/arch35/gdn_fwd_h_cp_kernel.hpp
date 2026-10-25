@@ -28,9 +28,19 @@
 namespace GDN {
 
 static constexpr uint16_t kCpAicSummaryAllDoneFlag = 6;
-static constexpr uint16_t kCpAicStateReadyFlag = 7;
-static constexpr uint16_t kCpAivOperandReadyFlag = 8;
-static constexpr uint16_t kCpAicOperandConsumedFlag = 10;
+static constexpr uint16_t kCpAicStateInitReadyFlag = 7;
+static constexpr uint16_t kCpAivStateInitAppliedFlag = 8;
+static constexpr uint16_t kCpAivOperandReadyFlag = 2;
+static constexpr uint16_t kCpAicMmadMReadyFlag = 3;
+static constexpr uint16_t kCpAivMmadMAppliedFlag = 4;
+static constexpr uint16_t kCpAicMmadEReadyFlag = 5;
+static constexpr uint16_t kCpAivMmadEAppliedFlag = 1;
+static constexpr uint16_t kCpAicPrefixMmadReadyFlag = 9;
+static constexpr uint16_t kCpAivPrefixAppliedFlag = 10;
+static constexpr uint16_t kCpAicPrefixFinalizeFlag = 7;
+static constexpr uint16_t kCpAivPrefixFinalizedFlag = 8;
+static constexpr uint16_t kCpAicStateReadyFlag = 0;
+static constexpr uint16_t kCpAivPerCoreFlagStride = 16;
 static constexpr float kCpLn2 = 0.6931471805599453f;
 
 template <typename T>
@@ -141,19 +151,38 @@ public:
                 BuildIncomingState();
             }
             AscendC::PipeBarrier<PIPE_ALL>();
-            AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(kCpAicStateReadyFlag);
+            SetFlagForAivs(kCpAicStateReadyFlag);
         }
 
         if ASCEND_IS_AIV {
             if (active_) {
                 for (int64_t localChunk = 0; localChunk < chunkCount_; ++localChunk) {
-                    PrepareSummaryOperands(chunkBegin_ + localChunk);
-                    const uint16_t subBlock = AscendC::GetSubBlockIdx();
-                    AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(kCpAivOperandReadyFlag + subBlock);
-                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAicOperandConsumedFlag + subBlock);
+                    BuildChunkAffine(chunkBegin_ + localChunk);
+                    AscendC::PipeBarrier<PIPE_MTE3>();
+                    SetFlagToAic(kCpAivOperandReadyFlag);
+                    WaitFlagFromAic(kCpAicMmadMReadyFlag);
+                    ApplySummaryMmadM();
+                    SetFlagToAic(kCpAivMmadMAppliedFlag);
+                    WaitFlagFromAic(kCpAicMmadEReadyFlag);
+                    ApplySummaryMmadE();
+                    SetFlagToAic(kCpAivMmadEAppliedFlag);
                 }
+                WaitFlagFromAic(kCpAicStateInitReadyFlag);
+                InitializeIncomingState();
+                SetFlagToAic(kCpAivStateInitAppliedFlag);
+                for (int64_t prior = 0; prior < rank_; ++prior) {
+                    WaitFlagFromAic(kCpAicPrefixMmadReadyFlag);
+                    const uint64_t stateDst = (prior % 2 == 0) ? tempM_ : tempA_;
+                    ApplyIncomingPrefixE(prior, stateDst);
+                    SetFlagToAic(kCpAivPrefixAppliedFlag);
+                }
+                WaitFlagFromAic(kCpAicPrefixFinalizeFlag);
+                if (rank_ % 2 != 0) {
+                    CopyIncomingState(tempM_, tempA_);
+                }
+                SetFlagToAic(kCpAivPrefixFinalizedFlag);
             }
-            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAicStateReadyFlag);
+            WaitFlagFromAic(kCpAicStateReadyFlag);
             if (active_) {
                 const uint32_t subBlock = AscendC::GetSubBlockIdx();
                 const uint32_t subBlockCount = AscendC::GetSubBlockNum();
@@ -171,6 +200,40 @@ public:
     }
 
 private:
+    __aicore__ inline void WaitForAivs(uint16_t flagId)
+    {
+        const uint32_t subBlockCount = AscendC::GetSubBlockNum();
+        for (uint32_t subBlock = 0; subBlock < subBlockCount; ++subBlock) {
+            AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(
+                static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+        }
+    }
+
+    __aicore__ inline void SetFlagForAivs(uint16_t flagId)
+    {
+        const uint32_t subBlockCount = AscendC::GetSubBlockNum();
+        for (uint32_t subBlock = 0; subBlock < subBlockCount; ++subBlock) {
+            AscendC::PipeBarrier<PIPE_FIX>();
+            AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(
+                static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+        }
+    }
+
+    __aicore__ inline void WaitFlagFromAic(uint16_t flagId)
+    {
+        const uint32_t subBlock = AscendC::GetSubBlockIdx();
+        AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(
+            static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+    }
+
+    __aicore__ inline void SetFlagToAic(uint16_t flagId)
+    {
+        const uint32_t subBlock = AscendC::GetSubBlockIdx();
+        AscendC::PipeBarrier<PIPE_MTE3>();
+        AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
+            static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+    }
+
     __aicore__ inline uint64_t KOffset(int64_t token, int64_t dim) const
     {
         return ((static_cast<uint64_t>(batchIdx_ * hk_ + khIdx_) * seqlen_ + token) * 128 + dim);
@@ -189,12 +252,6 @@ private:
     __aicore__ inline uint64_t StateOffset(int64_t row, int64_t col) const
     {
         return (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * 16384 + row * 128 + col;
-    }
-
-    __aicore__ inline float ScalarDecay(int64_t tokenLast, int64_t key) const
-    {
-        (void)tokenLast;
-        return operand_.GetValue(operandBase_ + 64U * 128U + key);
     }
 
     __aicore__ inline float ExpScalar(float value)
@@ -258,130 +315,229 @@ private:
         constexpr int64_t V = 128;
         for (int64_t i = 0; i < K * K; ++i) {
             summary_.SetValue(summaryM_ + i, (i / K == i % K) ? 1.0f : 0.0f);
-            scratch_.SetValue(tempA_ + i, 0.0f);
-            scratch_.SetValue(tempM_ + i, 0.0f);
         }
         for (int64_t i = 0; i < K * V; ++i) {
             summary_.SetValue(summaryE_ + i, 0.0f);
         }
 
         for (int64_t localChunk = 0; localChunk < chunkCount_; ++localChunk) {
-            const int64_t chunk = chunkBegin_ + localChunk;
-            const int64_t tokenBegin = chunk * 32;
-            const int64_t tokenEnd = (tokenBegin + 32 < seqlen_) ? tokenBegin + 32 : seqlen_;
-            const int64_t tokenLast = tokenEnd - 1;
-            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAivOperandReadyFlag);
-            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAivOperandReadyFlag + 1);
-            for (int64_t i = 0; i < K; ++i) {
-                const float d = ScalarDecay(tokenLast, i);
-                for (int64_t j = 0; j < K; ++j) {
-                    float a = i == j ? d : 0.0f;
-                    for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
-                        const float kval = CpToFloat<DataT>(k_.GetValue(KOffset(token, i)));
-                        const int64_t row = token - tokenBegin;
-                        const uint64_t wOperand = operandBase_ + row * K + j;
-                        const float wval = operand_.GetValue(wOperand);
-                        a -= kval * wval;
-                    }
-                    scratch_.SetValue(tempA_ + i * K + j, a);
-                }
-            }
-
+            WaitForAivs(kCpAivOperandReadyFlag);
             CpMmad(scratch_[tempA_], summary_[summaryM_], scratch_[tempM_]);
-            for (int64_t i = 0; i < K * K; ++i) {
-                summary_.SetValue(summaryM_ + i, scratch_.GetValue(tempM_ + i));
-            }
-
+            SetFlagForAivs(kCpAicMmadMReadyFlag);
+            WaitForAivs(kCpAivMmadMAppliedFlag);
             CpMmad(scratch_[tempA_], summary_[summaryE_], scratch_[tempM_]);
-            for (int64_t v = 0; v < V; ++v) {
-                for (int64_t i = 0; i < K; ++i) {
-                    float value = 0.0f;
-                    for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
-                        const int64_t row = token - tokenBegin;
-                        const uint64_t uOperand = operandBase_ + 32U * K + row * V + v;
-                        value += CpToFloat<DataT>(k_.GetValue(KOffset(token, i))) * operand_.GetValue(uOperand);
-                    }
-                    summary_.SetValue(summaryE_ + i * V + v,
-                                      scratch_.GetValue(tempM_ + i * V + v) + value);
-                }
-            }
-            AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(kCpAicOperandConsumedFlag);
-            AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(kCpAicOperandConsumedFlag + 1);
+            SetFlagForAivs(kCpAicMmadEReadyFlag);
+            WaitForAivs(kCpAivMmadEAppliedFlag);
         }
     }
 
     __aicore__ inline void BuildIncomingState()
     {
-        constexpr int64_t K = 128;
-        constexpr int64_t V = 128;
+        SetFlagForAivs(kCpAicStateInitReadyFlag);
+        WaitForAivs(kCpAivStateInitAppliedFlag);
         uint64_t stateA = tempA_;
         uint64_t stateB = tempM_;
-        for (int64_t i = 0; i < K * V; ++i) {
-            const float init = useInitial_ ? CpToFloat<StateT>(initial_.GetValue(StateOffset(i / V, i % V))) : 0.0f;
-            scratch_.SetValue(stateA + i, init);
-        }
         for (int64_t prior = 0; prior < rank_; ++prior) {
             const uint64_t record = chainSummaryBase_ + static_cast<uint64_t>(prior) * 32768;
             CpMmad(summary_[record], scratch_[stateA], scratch_[stateB]);
-            for (int64_t i = 0; i < K * V; ++i) {
-                scratch_.SetValue(stateB + i,
-                                  scratch_.GetValue(stateB + i) + summary_.GetValue(record + 16384 + i));
-            }
+            SetFlagForAivs(kCpAicPrefixMmadReadyFlag);
+            WaitForAivs(kCpAivPrefixAppliedFlag);
             const uint64_t swap = stateA;
             stateA = stateB;
             stateB = swap;
         }
-        for (int64_t i = 0; i < K * V; ++i) {
-            scratch_.SetValue(tempA_ + i, scratch_.GetValue(stateA + i));
-        }
+        SetFlagForAivs(kCpAicPrefixFinalizeFlag);
+        WaitForAivs(kCpAivPrefixFinalizedFlag);
     }
 
-    __aicore__ inline void PrepareSummaryOperands(int64_t chunk)
+    __aicore__ inline void InitializeIncomingState()
     {
-        constexpr int64_t K = 128;
         constexpr int64_t V = 128;
-        constexpr int64_t columnsPerSubBlock = 64;
-        const int64_t subBlock = AscendC::GetSubBlockIdx();
-        const int64_t colBegin = subBlock * columnsPerSubBlock;
-        const int64_t tokenBegin = chunk * 32;
-        const int64_t tokenEnd = (tokenBegin + 32 < seqlen_) ? tokenBegin + 32 : seqlen_;
-        const int64_t tokenLast = tokenEnd - 1;
-        constexpr uint32_t kStateBytes = 128U * 64U * sizeof(float);
-        auto inputUb = vecBuf_.GetWithOffset<float>(64, kStateBytes + 512);
-        auto inputDataUb = vecBuf_.GetWithOffset<DataT>(64, kStateBytes + 2816);
-        auto decayUb = PrepareDecay(tokenLast);
-        if (subBlock == 0) {
-            AscendC::DataCopy(operand_[operandBase_ + 64U * 128U], decayUb, 128);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
-        }
+        constexpr int64_t valuesPerSubBlock = 64;
+        const int64_t valueBegin = AscendC::GetSubBlockIdx() * valuesPerSubBlock;
+        auto stateUb = vecBuf_.GetWithOffset<float>(valuesPerSubBlock, 0);
+        auto initialUb = vecBuf_.GetWithOffset<StateT>(valuesPerSubBlock, 256);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
-        for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
-            const int64_t row = token - tokenBegin;
-            const float factor = VFactor(token, tokenLast);
-            const uint64_t wOffset = HvOffset(token, colBegin, K);
-            const uint64_t uOffset = HvOffset(token, colBegin, V);
-            AscendC::DataCopy(inputDataUb, w_[wOffset], columnsPerSubBlock);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
-            AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, columnsPerSubBlock);
-            AscendC::Muls(inputUb, inputUb, factor, columnsPerSubBlock);
+        for (int64_t row = 0; row < 128; ++row) {
+            if (useInitial_) {
+                AscendC::DataCopy(initialUb, initial_[StateOffset(row, valueBegin)], valuesPerSubBlock);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::Cast(stateUb, initialUb, AscendC::RoundMode::CAST_NONE, valuesPerSubBlock);
+            } else {
+                AscendC::Duplicate(stateUb, 0.0f, valuesPerSubBlock);
+            }
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
-            AscendC::DataCopy(operand_[operandBase_ + row * K + colBegin], inputUb, columnsPerSubBlock);
+            AscendC::DataCopy(scratch_[tempA_ + row * V + valueBegin], stateUb, valuesPerSubBlock);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+    }
 
-            AscendC::DataCopy(inputDataUb, u_[uOffset], columnsPerSubBlock);
+    __aicore__ inline void ApplyIncomingPrefixE(int64_t prior, uint64_t stateDst)
+    {
+        constexpr int64_t V = 128;
+        constexpr int64_t valuesPerSubBlock = 64;
+        const int64_t valueBegin = AscendC::GetSubBlockIdx() * valuesPerSubBlock;
+        const uint64_t recordE = chainSummaryBase_ + static_cast<uint64_t>(prior) * 32768 + 16384;
+        auto stateUb = vecBuf_.GetWithOffset<float>(valuesPerSubBlock, 0);
+        auto updateUb = vecBuf_.GetWithOffset<float>(valuesPerSubBlock, 256);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        for (int64_t row = 0; row < 128; ++row) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+            AscendC::DataCopy(stateUb, scratch_[stateDst + row * V + valueBegin], valuesPerSubBlock);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
-            AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, columnsPerSubBlock);
-            AscendC::Muls(inputUb, inputUb, factor, columnsPerSubBlock);
+            AscendC::DataCopy(updateUb, summary_[recordE + row * V + valueBegin], valuesPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::Add<float>(stateUb, stateUb, updateUb, valuesPerSubBlock);
             AscendC::PipeBarrier<PIPE_V>();
+            AscendC::DataCopy(scratch_[stateDst + row * V + valueBegin], stateUb, valuesPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void CopyIncomingState(uint64_t src, uint64_t dst)
+    {
+        constexpr int64_t V = 128;
+        constexpr int64_t valuesPerSubBlock = 64;
+        const int64_t valueBegin = AscendC::GetSubBlockIdx() * valuesPerSubBlock;
+        auto stateUb = vecBuf_.GetWithOffset<float>(valuesPerSubBlock, 0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        for (int64_t row = 0; row < 128; ++row) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
-            AscendC::DataCopy(operand_[operandBase_ + 32U * V + row * V + colBegin], inputUb,
-                              columnsPerSubBlock);
+            AscendC::DataCopy(stateUb, scratch_[src + row * V + valueBegin], valuesPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::Adds(stateUb, stateUb, 0.0f, valuesPerSubBlock);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::DataCopy(scratch_[dst + row * V + valueBegin], stateUb, valuesPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void BuildChunkAffine(int64_t chunk)
+    {
+        constexpr int64_t K = 128;
+        constexpr int64_t V = 128;
+        constexpr int64_t rowsPerSubBlock = 64;
+        constexpr int64_t colsPerSubBlock = 64;
+        const int64_t subBlock = AscendC::GetSubBlockIdx();
+        const int64_t rowBegin = subBlock * rowsPerSubBlock;
+        const int64_t colBegin = subBlock * colsPerSubBlock;
+        const int64_t tokenBegin = chunk * 32;
+        const int64_t tokenEnd = (tokenBegin + 32 < seqlen_) ? tokenBegin + 32 : seqlen_;
+        const int64_t tokenLast = tokenEnd - 1;
+        auto accumUb = vecBuf_.GetWithOffset<float>(128, 0);
+        auto tempUb = vecBuf_.GetWithOffset<float>(128, 512);
+        auto inputUb = vecBuf_.GetWithOffset<float>(128, 1024);
+        auto inputDataUb = vecBuf_.GetWithOffset<DataT>(128, 1536);
+        auto factorUb = vecBuf_.GetWithOffset<float>(32, 2560);
+        auto decayUb = PrepareDecay(tokenLast);
+        const int64_t tokenCount = tokenEnd - tokenBegin;
+        for (int64_t row = 0; row < tokenCount; ++row) {
+            factorUb.SetValue(row, VFactor(tokenBegin + row, tokenLast));
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        for (int64_t i = rowBegin; i < rowBegin + rowsPerSubBlock; ++i) {
+            AscendC::Duplicate(accumUb, 0.0f, K);
+            for (int64_t row = 0; row < tokenCount; ++row) {
+                const int64_t token = tokenBegin + row;
+                AscendC::DataCopy(inputDataUb, w_[HvOffset(token, 0, K)], K);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, K);
+                const float scale = CpToFloat<DataT>(k_.GetValue(KOffset(token, i))) * factorUb.GetValue(row);
+                AscendC::Muls(tempUb, inputUb, scale, K);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Sub<float>(accumUb, accumUb, tempUb, K);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            accumUb.SetValue(i, accumUb.GetValue(i) + decayUb.GetValue(i));
+            AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+            AscendC::DataCopy(scratch_[tempA_ + i * K], accumUb, K);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        }
+
+        for (int64_t i = 0; i < K; ++i) {
+            AscendC::Duplicate(accumUb, 0.0f, colsPerSubBlock);
+            for (int64_t row = 0; row < tokenCount; ++row) {
+                const int64_t token = tokenBegin + row;
+                AscendC::DataCopy(inputDataUb, u_[HvOffset(token, colBegin, V)], colsPerSubBlock);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, colsPerSubBlock);
+                const float scale = CpToFloat<DataT>(k_.GetValue(KOffset(token, i))) * factorUb.GetValue(row);
+                AscendC::Muls(tempUb, inputUb, scale, colsPerSubBlock);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Add<float>(accumUb, accumUb, tempUb, colsPerSubBlock);
+                AscendC::PipeBarrier<PIPE_V>();
+            }
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+            AscendC::DataCopy(operand_[operandBase_ + i * V + colBegin], accumUb, colsPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void ApplySummaryMmadM()
+    {
+        constexpr int64_t kElementsPerSubBlock = 64 * 128;
+        constexpr int64_t kVectorLength = 128;
+        const int64_t subBlock = AscendC::GetSubBlockIdx();
+        auto copyUb = vecBuf_.GetWithOffset<float>(kVectorLength, 0);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        for (int64_t offset = 0; offset < kElementsPerSubBlock; offset += kVectorLength) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+            AscendC::DataCopy(copyUb, scratch_[tempM_ + subBlock * kElementsPerSubBlock + offset], kVectorLength);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::Adds(copyUb, copyUb, 0.0f, kVectorLength);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::DataCopy(summary_[summaryM_ + subBlock * kElementsPerSubBlock + offset], copyUb, kVectorLength);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+    }
+
+    __aicore__ inline void ApplySummaryMmadE()
+    {
+        constexpr int64_t V = 128;
+        constexpr int64_t colsPerSubBlock = 64;
+        const int64_t colBegin = AscendC::GetSubBlockIdx() * colsPerSubBlock;
+        auto resultUb = vecBuf_.GetWithOffset<float>(colsPerSubBlock, 0);
+        auto biasUb = vecBuf_.GetWithOffset<float>(colsPerSubBlock, 256);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+        for (int64_t row = 0; row < 128; ++row) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+            AscendC::DataCopy(resultUb, scratch_[tempM_ + row * V + colBegin], colsPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::DataCopy(biasUb, operand_[operandBase_ + row * V + colBegin], colsPerSubBlock);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            AscendC::Add<float>(resultUb, resultUb, biasUb, colsPerSubBlock);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::DataCopy(summary_[summaryE_ + row * V + colBegin], resultUb, colsPerSubBlock);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
