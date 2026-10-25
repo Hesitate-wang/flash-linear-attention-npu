@@ -56,10 +56,11 @@ CP total      = lib workspace + 32 MiB + activeRanks * 320 KiB
 ```
 
 The scratch contains two FP32 128x128 matrix buffers and one 64 KiB operand buffer.
-The operand buffer stores the current chunk's gate-scaled `w` and `u` tiles in FP32.
-AIV performs the per-token scalar `q` broadcast and elementwise vector multiply, then
-signals its paired AIC; AIC consumes those rows in the matrix products that form and
-compose the affine summary. After the global barrier AIC reuses the
+The operand buffer stores the current chunk's gate-scaled `w` and `u` tiles plus its
+128-element decay vector in FP32. AIV uses the repository's `AscendC::Exp` and
+V-to-scalar event pattern to prepare gate factors. Each AIV sub-block publishes a
+separate ready flag; AIC waits for both sub-blocks, consumes that chunk's operands,
+then acknowledges both before AIV may overwrite the staging area. After the global barrier AIC reuses the
 matrix scratch as the two KxV prefix-state buffers, then AIV reuses it as the local
 state source. The CP offsets and allocation branch are independent from legacy
 allocations.

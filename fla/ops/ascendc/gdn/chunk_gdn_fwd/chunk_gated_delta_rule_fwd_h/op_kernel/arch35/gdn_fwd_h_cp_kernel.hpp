@@ -10,7 +10,6 @@
 #define CATLASS_ARCH 3510
 #endif
 
-#include <cmath>
 #include <type_traits>
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/resource.hpp"
@@ -31,6 +30,8 @@ namespace GDN {
 static constexpr uint16_t kCpAicSummaryAllDoneFlag = 6;
 static constexpr uint16_t kCpAicStateReadyFlag = 7;
 static constexpr uint16_t kCpAivOperandReadyFlag = 8;
+static constexpr uint16_t kCpAicOperandConsumedFlag = 10;
+static constexpr float kCpLn2 = 0.6931471805599453f;
 
 template <typename T>
 __aicore__ inline float CpToFloat(T value)
@@ -40,18 +41,6 @@ __aicore__ inline float CpToFloat(T value)
     } else {
         return static_cast<float>(value);
     }
-}
-
-template <typename T>
-__aicore__ inline float CpLoad(AscendC::GlobalTensor<T> &tensor, uint64_t index)
-{
-    return CpToFloat<T>(tensor.GetValue(index));
-}
-
-template <typename T>
-__aicore__ inline void CpStore(AscendC::GlobalTensor<T> &tensor, uint64_t index, float value)
-{
-    tensor.SetValue(index, static_cast<T>(value));
 }
 
 template <typename DataT, typename GateT, typename StateT>
@@ -128,6 +117,7 @@ public:
             mte2ToV_ = pipe_.AllocEventID<AscendC::HardEvent::MTE2_V>();
             vToMte3_ = pipe_.AllocEventID<AscendC::HardEvent::V_MTE3>();
             mte3ToV_ = pipe_.AllocEventID<AscendC::HardEvent::MTE3_V>();
+            vToS_ = pipe_.AllocEventID<AscendC::HardEvent::V_S>();
         }
 
         summaryM_ = summaryBase_;
@@ -145,7 +135,7 @@ public:
             }
             AscendC::PipeBarrier<PIPE_ALL>();
             AscendC::CrossCoreSetFlag<0x0, PIPE_FIX>(kCpAicSummaryAllDoneFlag);
-            AscendC::CrossCoreWaitFlag(kCpAicSummaryAllDoneFlag);
+            AscendC::CrossCoreWaitFlag<0x0, PIPE_FIX>(kCpAicSummaryAllDoneFlag);
             if (active_) {
                 BuildIncomingState();
             }
@@ -157,7 +147,9 @@ public:
             if (active_) {
                 for (int64_t localChunk = 0; localChunk < chunkCount_; ++localChunk) {
                     PrepareSummaryOperands(chunkBegin_ + localChunk);
-                    AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(kCpAivOperandReadyFlag);
+                    const uint16_t subBlock = AscendC::GetSubBlockIdx();
+                    AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(kCpAivOperandReadyFlag + subBlock);
+                    AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAicOperandConsumedFlag + subBlock);
                 }
             }
             AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAicStateReadyFlag);
@@ -172,6 +164,7 @@ public:
                 pipe_.ReleaseEventID<AscendC::HardEvent::MTE2_V>(mte2ToV_);
                 pipe_.ReleaseEventID<AscendC::HardEvent::V_MTE3>(vToMte3_);
                 pipe_.ReleaseEventID<AscendC::HardEvent::MTE3_V>(mte3ToV_);
+                pipe_.ReleaseEventID<AscendC::HardEvent::V_S>(vToS_);
             }
         }
     }
@@ -199,25 +192,63 @@ private:
 
     __aicore__ inline float ScalarDecay(int64_t tokenLast, int64_t key) const
     {
-        float decay = 1.0f;
-        if (useG_) {
-            decay *= expf(CpLoad(g_, (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * seqlen_ + tokenLast));
-        }
-        if (useGk_) {
-            const float gate = CpLoad(gk_, HvOffset(tokenLast, key, 128));
-            decay *= exp2f(gate);
-        }
-        return decay;
+        (void)tokenLast;
+        return operand_.GetValue(operandBase_ + 64U * 128U + key);
     }
 
-    __aicore__ inline float VFactor(int64_t token, int64_t tokenLast) const
+    __aicore__ inline float ExpScalar(float value)
+    {
+        auto scalar = vecBuf_.GetWithOffset<float>(1, 35072);
+        AscendC::Duplicate(scalar, value, 1);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Exp(scalar, scalar, 1);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(vToS_);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(vToS_);
+        return scalar.GetValue(0);
+    }
+
+    __aicore__ inline AscendC::LocalTensor<float> PrepareDecay(int64_t tokenLast)
+    {
+        constexpr uint32_t kStateBytes = 128U * 64U * sizeof(float);
+        auto decayUb = vecBuf_.GetWithOffset<float>(128, kStateBytes);
+        if (useGk_) {
+            if constexpr (std::is_same<GateT, float>::value) {
+                AscendC::DataCopy(decayUb, gk_[HvOffset(tokenLast, 0, 128)], 128);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+            } else {
+                auto gateUb = vecBuf_.GetWithOffset<GateT>(128, kStateBytes + 512);
+                AscendC::DataCopy(gateUb, gk_[HvOffset(tokenLast, 0, 128)], 128);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
+                AscendC::Cast(decayUb, gateUb, AscendC::RoundMode::CAST_NONE, 128);
+            }
+            AscendC::Muls(decayUb, decayUb, kCpLn2, 128);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Exp(decayUb, decayUb, 128);
+        } else {
+            AscendC::Duplicate(decayUb, 1.0f, 128);
+        }
+        if (useG_) {
+            const uint64_t gOffset = (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * seqlen_ + tokenLast;
+            const float gate = CpToFloat<GateT>(g_.GetValue(gOffset));
+            const float scale = ExpScalar(gate);
+            AscendC::Muls(decayUb, decayUb, scale, 128);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        return decayUb;
+    }
+
+    __aicore__ inline float VFactor(int64_t token, int64_t tokenLast)
     {
         if (!useG_) {
             return 1.0f;
         }
-        const float gLast = CpLoad(g_, (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * seqlen_ + tokenLast);
-        const float gNow = CpLoad(g_, (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * seqlen_ + token);
-        return expf(gLast - gNow);
+        const uint64_t base = (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * seqlen_;
+        const float gLast = CpToFloat<GateT>(g_.GetValue(base + tokenLast));
+        const float gNow = CpToFloat<GateT>(g_.GetValue(base + token));
+        return ExpScalar(gLast - gNow);
     }
 
     __aicore__ inline void BuildLocalSummary()
@@ -239,12 +270,13 @@ private:
             const int64_t tokenEnd = (tokenBegin + 32 < seqlen_) ? tokenBegin + 32 : seqlen_;
             const int64_t tokenLast = tokenEnd - 1;
             AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAivOperandReadyFlag);
+            AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE2>(kCpAivOperandReadyFlag + 1);
             for (int64_t i = 0; i < K; ++i) {
                 const float d = ScalarDecay(tokenLast, i);
                 for (int64_t j = 0; j < K; ++j) {
                     float a = i == j ? d : 0.0f;
                     for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
-                        const float kval = CpLoad(k_, KOffset(token, i));
+                        const float kval = CpToFloat<DataT>(k_.GetValue(KOffset(token, i)));
                         const int64_t row = token - tokenBegin;
                         const uint64_t wOperand = operandBase_ + row * K + j;
                         const float wval = operand_.GetValue(wOperand);
@@ -266,12 +298,14 @@ private:
                     for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
                         const int64_t row = token - tokenBegin;
                         const uint64_t uOperand = operandBase_ + 32U * K + row * V + v;
-                        value += CpLoad(k_, KOffset(token, i)) * operand_.GetValue(uOperand);
+                        value += CpToFloat<DataT>(k_.GetValue(KOffset(token, i))) * operand_.GetValue(uOperand);
                     }
                     summary_.SetValue(summaryE_ + i * V + v,
                                       scratch_.GetValue(tempM_ + i * V + v) + value);
                 }
             }
+            AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(kCpAicOperandConsumedFlag);
+            AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(kCpAicOperandConsumedFlag + 1);
         }
     }
 
@@ -282,7 +316,7 @@ private:
         uint64_t stateA = tempA_;
         uint64_t stateB = tempM_;
         for (int64_t i = 0; i < K * V; ++i) {
-            const float init = useInitial_ ? CpLoad(initial_, StateOffset(i / V, i % V)) : 0.0f;
+            const float init = useInitial_ ? CpToFloat<StateT>(initial_.GetValue(StateOffset(i / V, i % V))) : 0.0f;
             scratch_.SetValue(stateA + i, init);
         }
         for (int64_t prior = 0; prior < rank_; ++prior) {
@@ -314,6 +348,12 @@ private:
         constexpr uint32_t kStateBytes = 128U * 64U * sizeof(float);
         auto inputUb = vecBuf_.GetWithOffset<float>(64, kStateBytes + 512);
         auto inputDataUb = vecBuf_.GetWithOffset<DataT>(64, kStateBytes + 2816);
+        auto decayUb = PrepareDecay(tokenLast);
+        if (subBlock == 0) {
+            AscendC::DataCopy(operand_[operandBase_ + 64U * 128U], decayUb, 128);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3_);
+        }
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
         for (int64_t token = tokenBegin; token < tokenEnd; ++token) {
             const int64_t row = token - tokenBegin;
@@ -402,8 +442,9 @@ private:
                 AscendC::DataCopy(h_[OutputHOffset(chunk, row, valueBegin)], outputUb, valueCount);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
             }
+            auto decayUb = PrepareDecay(tokenLast);
             for (int64_t row = 0; row < K; ++row) {
-                const float decay = ScalarDecay(tokenLast, row);
+                const float decay = decayUb.GetValue(row);
                 AscendC::Muls(stateUb[row * valueCount], stateUb[row * valueCount], decay, valueCount);
                 AscendC::PipeBarrier<PIPE_V>();
             }
@@ -501,6 +542,7 @@ private:
     AscendC::TEventID mte2ToV_;
     AscendC::TEventID vToMte3_;
     AscendC::TEventID mte3ToV_;
+    AscendC::TEventID vToS_;
 };
 
 template <typename DataT, typename GateT, typename StateT>
