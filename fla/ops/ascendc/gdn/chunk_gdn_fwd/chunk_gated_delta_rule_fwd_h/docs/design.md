@@ -72,8 +72,13 @@ CP total      = lib workspace + 32 MiB + activeRanks * 320 KiB
 The scratch contains two FP32 128x128 matrix buffers and one 64 KiB operand buffer.
 The operand area stores the chunk-local `E_c` matrix. AIV uses the repository's
 `AscendC::Exp` and V-to-scalar event pattern to prepare gate factors, then writes `A_c`
-and `E_c` to their scratch regions. The paired mode-0x4 handshakes order affine
-publication, both MMAD results, and vector updates.
+and `E_c` to their scratch regions. The paired mode-0x2 handshakes order affine
+publication, both MMAD results, and vector updates. Each phase is a three-party
+rendezvous among one AIC and its two AIV subblocks. For AIC-to-AIV phases, the AIC
+sets once and both AIVs wait once; for AIV-to-AIC phases, both AIVs set once and the
+AIC waits once. All participants use the same flag ID. Both AIVs must complete their
+half of the phase before the AIC advances; this collective protocol also avoids
+per-subblock flag-ID banks.
 After the global barrier AIC reuses matrix scratch as the two KxV prefix-state buffers,
 then AIV reuses it as the local state source. CP offsets and allocation are independent
 from legacy allocations.

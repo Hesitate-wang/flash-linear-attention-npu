@@ -40,7 +40,6 @@ static constexpr uint16_t kCpAivPrefixAppliedFlag = 10;
 static constexpr uint16_t kCpAicPrefixFinalizeFlag = 7;
 static constexpr uint16_t kCpAivPrefixFinalizedFlag = 8;
 static constexpr uint16_t kCpAicStateReadyFlag = 0;
-static constexpr uint16_t kCpAivPerCoreFlagStride = 16;
 static constexpr float kCpLn2 = 0.6931471805599453f;
 
 template <typename T>
@@ -249,38 +248,27 @@ public:
 private:
     __aicore__ inline void WaitForAivs(uint16_t flagId)
     {
-        const uint32_t subBlockCount = AscendC::GetSubBlockNum();
-        for (uint32_t subBlock = 0; subBlock < subBlockCount; ++subBlock) {
-            AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(
-                static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
-        }
+        // Mode 2 is a rendezvous among this AIC and both paired AIV subblocks.
+        AscendC::CrossCoreWaitFlag<0x2, PIPE_FIX>(flagId);
         AscendC::PipeBarrier<PIPE_ALL>();
     }
 
     __aicore__ inline void SetFlagForAivs(uint16_t flagId)
     {
-        const uint32_t subBlockCount = AscendC::GetSubBlockNum();
-        for (uint32_t subBlock = 0; subBlock < subBlockCount; ++subBlock) {
-            AscendC::PipeBarrier<PIPE_FIX>();
-            AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(
-                static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
-        }
+        AscendC::PipeBarrier<PIPE_FIX>();
+        AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(flagId);
     }
 
     __aicore__ inline void WaitFlagFromAic(uint16_t flagId)
     {
-        const uint32_t subBlock = AscendC::GetSubBlockIdx();
-        AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
-            static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+        AscendC::CrossCoreWaitFlag<0x2, PIPE_V>(flagId);
         AscendC::PipeBarrier<PIPE_ALL>();
     }
 
     __aicore__ inline void SetFlagToAic(uint16_t flagId)
     {
-        const uint32_t subBlock = AscendC::GetSubBlockIdx();
         AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
-            static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+        AscendC::CrossCoreSetFlag<0x2, PIPE_V>(flagId);
     }
 
     __aicore__ inline uint64_t KOffset(int64_t token, int64_t dim) const
