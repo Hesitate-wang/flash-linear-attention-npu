@@ -129,6 +129,7 @@ public:
             vToMte3_ = pipe_.AllocEventID<AscendC::HardEvent::V_MTE3>();
             mte3ToV_ = pipe_.AllocEventID<AscendC::HardEvent::MTE3_V>();
             vToS_ = pipe_.AllocEventID<AscendC::HardEvent::V_S>();
+            sToV_ = pipe_.AllocEventID<AscendC::HardEvent::S_V>();
         }
 
         summaryM_ = summaryBase_;
@@ -142,35 +143,76 @@ public:
     {
         if ASCEND_IS_AIC {
             if (active_) {
+                AscendC::PRINTF("CPDBG AIC summary_enter block=%u rank=%d chunks=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_),
+                                static_cast<int32_t>(chunkCount_));
                 BuildLocalSummary();
+                AscendC::PRINTF("CPDBG AIC summary_exit block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            } else {
+                AscendC::PRINTF("CPDBG AIC inactive block=%u barrier_enter\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()));
             }
             AscendC::PipeBarrier<PIPE_ALL>();
+            AscendC::PRINTF("CPDBG AIC barrier0_before block=%u active=%d\n",
+                            static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(active_));
             AscendC::CrossCoreSetFlag<0x0, PIPE_FIX>(kCpAicSummaryAllDoneFlag);
             AscendC::CrossCoreWaitFlag<0x0, PIPE_FIX>(kCpAicSummaryAllDoneFlag);
+            AscendC::PRINTF("CPDBG AIC barrier0_after block=%u active=%d\n",
+                            static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(active_));
             if (active_) {
+                AscendC::PRINTF("CPDBG AIC prefix_enter block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
                 BuildIncomingState();
+                AscendC::PRINTF("CPDBG AIC prefix_exit block=%u rank=%d state_ready_set\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
             }
             AscendC::PipeBarrier<PIPE_ALL>();
             SetFlagForAivs(kCpAicStateReadyFlag);
+            AscendC::PRINTF("CPDBG AIC state_ready_published block=%u active=%d\n",
+                            static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(active_));
         }
 
         if ASCEND_IS_AIV {
+            const uint32_t debugBlock = static_cast<uint32_t>(AscendC::GetBlockIdx());
+            const uint32_t debugSubBlock = AscendC::GetSubBlockIdx();
             if (active_) {
+                AscendC::PRINTF("CPDBG AIV rank_enter block=%u rank=%d sub=%u chunks=%d\n", debugBlock,
+                                static_cast<int32_t>(rank_), debugSubBlock, static_cast<int32_t>(chunkCount_));
                 for (int64_t localChunk = 0; localChunk < chunkCount_; ++localChunk) {
                     BuildChunkAffine(chunkBegin_ + localChunk);
                     AscendC::PipeBarrier<PIPE_MTE3>();
+                    if (localChunk == 0) {
+                        AscendC::PRINTF("CPDBG AIV affine_ready block=%u rank=%d sub=%u chunk=%d wait_aic_m\n",
+                                        debugBlock, static_cast<int32_t>(rank_), debugSubBlock,
+                                        static_cast<int32_t>(chunkBegin_ + localChunk));
+                    }
                     SetFlagToAic(kCpAivOperandReadyFlag);
                     WaitFlagFromAic(kCpAicMmadMReadyFlag);
+                    if (localChunk == 0) {
+                        AscendC::PRINTF("CPDBG AIV got_m_ready block=%u rank=%d sub=%u\n", debugBlock,
+                                        static_cast<int32_t>(rank_), debugSubBlock);
+                    }
                     ApplySummaryMmadM();
                     SetFlagToAic(kCpAivMmadMAppliedFlag);
                     WaitFlagFromAic(kCpAicMmadEReadyFlag);
+                    if (localChunk == 0) {
+                        AscendC::PRINTF("CPDBG AIV got_e_ready block=%u rank=%d sub=%u\n", debugBlock,
+                                        static_cast<int32_t>(rank_), debugSubBlock);
+                    }
                     ApplySummaryMmadE();
                     SetFlagToAic(kCpAivMmadEAppliedFlag);
                 }
+                AscendC::PRINTF("CPDBG AIV affine_exit block=%u rank=%d sub=%u wait_state_init\n", debugBlock,
+                                static_cast<int32_t>(rank_), debugSubBlock);
                 WaitFlagFromAic(kCpAicStateInitReadyFlag);
                 InitializeIncomingState();
                 SetFlagToAic(kCpAivStateInitAppliedFlag);
                 for (int64_t prior = 0; prior < rank_; ++prior) {
+                    if (debugSubBlock == 0) {
+                        AscendC::PRINTF("CPDBG AIV prefix_wait block=%u rank=%d prior=%d\n", debugBlock,
+                                        static_cast<int32_t>(rank_), static_cast<int32_t>(prior));
+                    }
                     WaitFlagFromAic(kCpAicPrefixMmadReadyFlag);
                     const uint64_t stateDst = (prior % 2 == 0) ? tempM_ : tempA_;
                     ApplyIncomingPrefixE(prior, stateDst);
@@ -182,7 +224,11 @@ public:
                 }
                 SetFlagToAic(kCpAivPrefixFinalizedFlag);
             }
+            AscendC::PRINTF("CPDBG AIV state_wait block=%u active=%d sub=%u\n", debugBlock,
+                            static_cast<int32_t>(active_), debugSubBlock);
             WaitFlagFromAic(kCpAicStateReadyFlag);
+            AscendC::PRINTF("CPDBG AIV state_wait_done block=%u active=%d sub=%u\n", debugBlock,
+                            static_cast<int32_t>(active_), debugSubBlock);
             if (active_) {
                 const uint32_t subBlock = AscendC::GetSubBlockIdx();
                 const uint32_t subBlockCount = AscendC::GetSubBlockNum();
@@ -195,6 +241,7 @@ public:
                 pipe_.ReleaseEventID<AscendC::HardEvent::V_MTE3>(vToMte3_);
                 pipe_.ReleaseEventID<AscendC::HardEvent::MTE3_V>(mte3ToV_);
                 pipe_.ReleaseEventID<AscendC::HardEvent::V_S>(vToS_);
+                pipe_.ReleaseEventID<AscendC::HardEvent::S_V>(sToV_);
             }
         }
     }
@@ -204,9 +251,10 @@ private:
     {
         const uint32_t subBlockCount = AscendC::GetSubBlockNum();
         for (uint32_t subBlock = 0; subBlock < subBlockCount; ++subBlock) {
-            AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(
+            AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(
                 static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
         }
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
 
     __aicore__ inline void SetFlagForAivs(uint16_t flagId)
@@ -222,15 +270,16 @@ private:
     __aicore__ inline void WaitFlagFromAic(uint16_t flagId)
     {
         const uint32_t subBlock = AscendC::GetSubBlockIdx();
-        AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(
+        AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(
             static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
+        AscendC::PipeBarrier<PIPE_ALL>();
     }
 
     __aicore__ inline void SetFlagToAic(uint16_t flagId)
     {
         const uint32_t subBlock = AscendC::GetSubBlockIdx();
-        AscendC::PipeBarrier<PIPE_MTE3>();
-        AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(
+        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::CrossCoreSetFlag<0x4, PIPE_V>(
             static_cast<uint16_t>(flagId + subBlock * kCpAivPerCoreFlagStride));
     }
 
@@ -266,6 +315,18 @@ private:
         return scalar.GetValue(0);
     }
 
+    __aicore__ inline void WaitVectorToScalar()
+    {
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(vToS_);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(vToS_);
+    }
+
+    __aicore__ inline void WaitScalarToVector()
+    {
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(sToV_);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(sToV_);
+    }
+
     __aicore__ inline AscendC::LocalTensor<float> PrepareDecay(int64_t tokenLast)
     {
         constexpr uint32_t kStateBytes = 128U * 64U * sizeof(float);
@@ -292,9 +353,11 @@ private:
             const uint64_t gOffset = (static_cast<uint64_t>(batchIdx_) * hv_ + hvIdx_) * seqlen_ + tokenLast;
             const float gate = CpToFloat<GateT>(g_.GetValue(gOffset));
             const float scale = ExpScalar(gate);
+            WaitScalarToVector();
             AscendC::Muls(decayUb, decayUb, scale, 128);
         }
         AscendC::PipeBarrier<PIPE_V>();
+        WaitVectorToScalar();
         return decayUb;
     }
 
@@ -321,6 +384,10 @@ private:
         }
 
         for (int64_t localChunk = 0; localChunk < chunkCount_; ++localChunk) {
+            if (localChunk == 0) {
+                AscendC::PRINTF("CPDBG AIC summary_wait_operand block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            }
             WaitForAivs(kCpAivOperandReadyFlag);
             CpMmad(scratch_[tempA_], summary_[summaryM_], scratch_[tempM_]);
             SetFlagForAivs(kCpAicMmadMReadyFlag);
@@ -328,16 +395,27 @@ private:
             CpMmad(scratch_[tempA_], summary_[summaryE_], scratch_[tempM_]);
             SetFlagForAivs(kCpAicMmadEReadyFlag);
             WaitForAivs(kCpAivMmadEAppliedFlag);
+            if (localChunk == 0) {
+                AscendC::PRINTF("CPDBG AIC summary_first_chunk_done block=%u rank=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
+            }
         }
     }
 
     __aicore__ inline void BuildIncomingState()
     {
+        AscendC::PRINTF("CPDBG AIC state_init_publish block=%u rank=%d\n",
+                        static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
         SetFlagForAivs(kCpAicStateInitReadyFlag);
         WaitForAivs(kCpAivStateInitAppliedFlag);
         uint64_t stateA = tempA_;
         uint64_t stateB = tempM_;
         for (int64_t prior = 0; prior < rank_; ++prior) {
+            if (prior == 0 || prior == rank_ - 1) {
+                AscendC::PRINTF("CPDBG AIC prefix_mmad block=%u rank=%d prior=%d\n",
+                                static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_),
+                                static_cast<int32_t>(prior));
+            }
             const uint64_t record = chainSummaryBase_ + static_cast<uint64_t>(prior) * 32768;
             CpMmad(summary_[record], scratch_[stateA], scratch_[stateB]);
             SetFlagForAivs(kCpAicPrefixMmadReadyFlag);
@@ -346,6 +424,8 @@ private:
             stateA = stateB;
             stateB = swap;
         }
+        AscendC::PRINTF("CPDBG AIC prefix_finalize block=%u rank=%d\n",
+                        static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<int32_t>(rank_));
         SetFlagForAivs(kCpAicPrefixFinalizeFlag);
         WaitForAivs(kCpAivPrefixFinalizedFlag);
     }
@@ -459,12 +539,16 @@ private:
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
                 AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, K);
+                AscendC::PipeBarrier<PIPE_V>();
+                WaitVectorToScalar();
                 const float scale = CpToFloat<DataT>(k_.GetValue(KOffset(token, i))) * factorUb.GetValue(row);
+                WaitScalarToVector();
                 AscendC::Muls(tempUb, inputUb, scale, K);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Sub<float>(accumUb, accumUb, tempUb, K);
                 AscendC::PipeBarrier<PIPE_V>();
             }
+            WaitVectorToScalar();
             accumUb.SetValue(i, accumUb.GetValue(i) + decayUb.GetValue(i));
             AscendC::PipeBarrier<PIPE_ALL>();
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
@@ -482,7 +566,10 @@ private:
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
                 AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, colsPerSubBlock);
+                AscendC::PipeBarrier<PIPE_V>();
+                WaitVectorToScalar();
                 const float scale = CpToFloat<DataT>(k_.GetValue(KOffset(token, i))) * factorUb.GetValue(row);
+                WaitScalarToVector();
                 AscendC::Muls(tempUb, inputUb, scale, colsPerSubBlock);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Add<float>(accumUb, accumUb, tempUb, colsPerSubBlock);
@@ -602,6 +689,7 @@ private:
             auto decayUb = PrepareDecay(tokenLast);
             for (int64_t row = 0; row < K; ++row) {
                 const float decay = decayUb.GetValue(row);
+                WaitScalarToVector();
                 AscendC::Muls(stateUb[row * valueCount], stateUb[row * valueCount], decay, valueCount);
                 AscendC::PipeBarrier<PIPE_V>();
             }
@@ -614,12 +702,16 @@ private:
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(mte2ToV_);
                 AscendC::Cast(weightUb, weightInputUb, AscendC::RoundMode::CAST_NONE, K);
                 AscendC::Cast(keyUb, keyInputUb, AscendC::RoundMode::CAST_NONE, K);
+                AscendC::PipeBarrier<PIPE_V>();
+                WaitVectorToScalar();
                 AscendC::Cast(inputUb, inputDataUb, AscendC::RoundMode::CAST_NONE, valueCount);
                 AscendC::Duplicate(accumUb, 0.0f, valueCount);
                 AscendC::PipeBarrier<PIPE_V>();
                 for (int64_t row = 0; row < K; ++row) {
+                    WaitVectorToScalar();
                     const float weight = weightUb.GetValue(row);
-                    AscendC::Muls(tempUb, stateUb[row * valueCount], -weight, valueCount);
+                    WaitScalarToVector();
+                    AscendC::Muls(tempUb, stateUb[row * valueCount], weight, valueCount);
                     AscendC::PipeBarrier<PIPE_V>();
                     AscendC::Add<float>(accumUb, accumUb, tempUb, valueCount);
                     AscendC::PipeBarrier<PIPE_V>();
@@ -635,13 +727,16 @@ private:
                 AscendC::DataCopy(vNew_[outputOffset], outputUb, valueCount);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToV_);
 
-                AscendC::Cast(inputUb, outputUb, AscendC::RoundMode::CAST_NONE, valueCount);
+                AscendC::Adds(inputUb, tempUb, 0.0f, valueCount);
                 AscendC::PipeBarrier<PIPE_V>();
                 const float factor = VFactor(token, tokenLast);
+                WaitScalarToVector();
                 AscendC::Muls(inputUb, inputUb, factor, valueCount);
                 AscendC::PipeBarrier<PIPE_V>();
                 for (int64_t row = 0; row < K; ++row) {
+                    WaitVectorToScalar();
                     const float key = keyUb.GetValue(row);
+                    WaitScalarToVector();
                     AscendC::Muls(tempUb, inputUb, key, valueCount);
                     AscendC::PipeBarrier<PIPE_V>();
                     AscendC::Add<float>(stateUb[row * valueCount], stateUb[row * valueCount], tempUb, valueCount);
@@ -700,6 +795,7 @@ private:
     AscendC::TEventID vToMte3_;
     AscendC::TEventID mte3ToV_;
     AscendC::TEventID vToS_;
+    AscendC::TEventID sToV_;
 };
 
 template <typename DataT, typename GateT, typename StateT>

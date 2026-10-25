@@ -23,7 +23,8 @@ h_next = A_c @ h_prev + E_c
 ```
 
 The public token output is `v_new[t] = u[t] - w[t] @ h_prev`. The internal value
-used by the state update is `q[t] * v_new[t]`, so
+used by the state update is the FP32 `q[t] * v_new[t]`; only the public output is
+rounded to the input dtype, so output rounding is not fed back into the recurrence. Thus
 `h_next = diag(D) @ h_prev + k.T @ (q[:, None] * v_new)`. This matches the existing
 FWDH epilogue, which stores unscaled `v_new` while applying scalar-gate row scaling
 to the update operand.
@@ -45,8 +46,10 @@ for both sub-block acknowledgements before reusing scratch. AIC also performs th
 sequential prefix MMADs, while AIV initializes and updates their state buffers.
 AICs execute `PipeBarrier<PIPE_ALL>()` and join the mode-0 collective using
 `CrossCoreSetFlag<0x0, PIPE_FIX>` and `CrossCoreWaitFlag`. A5's 1-AIC:2-AIV handoffs use
-mode `0x4`: each AIV uses the local flag ID, while AIC addresses the paired AIV with
-`flagId + subBlock * 16`. Affine-ready, MMAD-ready/applied, and state-ready each use
+mode `0x4`: AIC publishes/consumes on `PIPE_FIX`, AIV publishes/consumes on `PIPE_V`,
+and each AIV uses `flagId + subBlock * 16`, matching the paired-AIV flag IDs used by
+AIC. A local `PIPE_ALL` barrier follows each wait before GM/vector work consumes the
+published data. Affine-ready, MMAD-ready/applied, and state-ready each use
 producer/consumer handshakes; AIV drains MTE3 before publishing its affine matrices.
 After applying the prior-rank prefix, AIV initializes the incoming state from
 `initial_state` (or zero), adds each prior rank's affine bias to the prefix MMAD result,
@@ -82,8 +85,8 @@ the two 16 MiB reservations.
 
 ## Risks
 
-The CP path uses AIV UB vector operations for gate preparation and local replay, and
-Cube MMAD for rank matrix composition and prefix application. Chunk affine-matrix
-assembly and the affine-bias accumulation still contain scalar AIC loops and require
-follow-up profiling/optimization. Device build, correctness, sanitizer, and
-performance evidence are required before treating this path as production-ready.
+The CP path uses AIV UB vector operations for affine construction, local replay, and
+prefix-bias updates, and Cube MMAD for rank matrix composition and prefix application.
+The recurrence still serializes across the key dimension while each update operates on
+the value dimension as a vector. Device build, correctness, sanitizer, and performance
+evidence are required before treating this path as production-ready.
