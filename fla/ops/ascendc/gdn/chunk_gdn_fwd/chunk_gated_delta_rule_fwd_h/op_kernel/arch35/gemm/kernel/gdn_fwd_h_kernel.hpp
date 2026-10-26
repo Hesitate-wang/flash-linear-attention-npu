@@ -889,10 +889,13 @@ public:
                                     0,
                                     static_cast<uint32_t>((vHeadDim - vBlockDim) * sizeof(ElementInitialState)),
                                     0};
+                                AscendC::DataCopyPadExtParams<ElementInitialState> statePadParams{
+                                    false, 0, 0, 0};
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                                 if (useInitialState) {
                                     AscendC::DataCopyPad(
-                                        stateUbTensor, gmInitialState[stateOffset], stateLoadParams);
+                                        stateUbTensor, gmInitialState[stateOffset], stateLoadParams,
+                                        statePadParams);
                                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
                                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
                                 } else {
@@ -930,13 +933,16 @@ public:
                             0,
                             static_cast<uint32_t>((vHeadDim - vBlockDim) * sizeof(ElementH)),
                             0};
+                        AscendC::DataCopyPadExtParams<ElementInitialState> statePadParams{
+                            false, 0, 0, 0};
                         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(eventId);
                         if (useInitialState) {
                             uint32_t initialStateOffset =
                                 initialStateBaseOffset + rowOffset * vHeadDim;
                             if constexpr (!std::is_same<ElementInitialState, ElementH>::value) {
                                 AscendC::DataCopyPad(
-                                    stateUbTensor, gmInitialState[initialStateOffset], stateLoadParams);
+                                    stateUbTensor, gmInitialState[initialStateOffset], stateLoadParams,
+                                    statePadParams);
                                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventId);
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventId);
                                 AscendC::Cast(
@@ -947,7 +953,8 @@ public:
                                 AscendC::DataCopyPad(gmH[hOffset], hUbTensor, hStoreParams);
                             } else {
                                 AscendC::DataCopyPad(
-                                    stateUbTensor, gmInitialState[initialStateOffset], stateLoadParams);
+                                    stateUbTensor, gmInitialState[initialStateOffset], stateLoadParams,
+                                    statePadParams);
                                 AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
                                 AscendC::DataCopyPad(gmH[hOffset], stateUbTensor, hStoreParams);
