@@ -267,32 +267,42 @@ def get_cu_offsets(h_input, cu_seqlens):
     return cu_seqlens, torch.zeros([num_chunks, 2]).to(cu_seqlens.dtype)
 
 def gen_decay_data(h_input, cu_seqlens, chunk_offsets):
-    base = torch.randint(-15, -5, [h_input.v_num_head])
-    bias = torch.empty([h_input.shape_batch, h_input.v_num_head, h_input.seqlen]).uniform_(-2, 0)
-    g = base[:, None] + bias
+    """沿序列单调递减的累计 gate，与 ATK `_gate` 同分布。
 
+    每 token 的 log 衰减增量取 [0.001, 0.011]，按序列（而不是按 chunk）累加：
+    - 逐 chunk 累加会让 g 在 chunk 边界锯齿跳变，且量级到 -350，fp32 下
+      exp(g_last) 直接下溢为 0；
+    - 增量过大会让 q = exp(g_last - g_t) 只覆盖最后一个 token，递推失去意义。
+    """
+    g = torch.zeros([h_input.shape_batch, h_input.v_num_head, h_input.seqlen],
+                    dtype=torch.float32)
+    if cu_seqlens is None:
+        ranges = [(0, h_input.seqlen)]
+    else:
+        ranges = [(int(cu_seqlens[i]), int(cu_seqlens[i + 1]))
+                  for i in range(len(cu_seqlens) - 1)]
     for shape_batch_idx in range(h_input.shape_batch):
         for v_head_idx in range(h_input.v_num_head):
-            for token_batch_idx in range(h_input.token_batch):
-                batch_token_start = cu_seqlens[token_batch_idx] if cu_seqlens is not None else 0
-                batch_token_end = cu_seqlens[token_batch_idx+1] if cu_seqlens is not None else h_input.seqlen
-                batch_tokens = batch_token_end - batch_token_start
-                batch_chunks = math.ceil(batch_tokens / h_input.chunk_size)
-                for chunk_id in range(batch_chunks):
-                    chunk_start_token = batch_token_start + h_input.chunk_size * chunk_id
-                    chunk_end_token = min(chunk_start_token + h_input.chunk_size, batch_token_end)
-                    g[shape_batch_idx, v_head_idx, chunk_start_token:chunk_end_token] = g[shape_batch_idx, v_head_idx, chunk_start_token:chunk_end_token].cumsum(0)
+            for start, end in ranges:
+                length = end - start
+                if length <= 0:
+                    continue
+                inc = torch.empty([length]).uniform_(0.001, 0.011)
+                g[shape_batch_idx, v_head_idx, start:end] = -torch.cumsum(inc, 0)
     return g
 
 def gen_input_data(h_input, rand_wu = True):
     cu_seqlens = gen_seqlen(h_input.seqlen, h_input.is_varied_len, h_input.token_batch)
     cu_seqlens, chunk_offsets = get_cu_offsets(h_input, cu_seqlens)
+    # 与 ATK `_randn(scale=0.05)` 一致：标准正态会让 h <- D·h + Kᵀq(u - W·h)
+    # 的随机放大因子达到 ~1+128σ²，20 个 chunk 后溢出到 1e17，参考和 DUT 都失去意义。
+    input_scale = 0.05
     if rand_wu:
-        w = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype)
-        u = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen, h_input.v_head_dim], dtype=h_input.dtype)
+        w = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype) * input_scale
+        u = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen, h_input.v_head_dim], dtype=h_input.dtype) * input_scale
     else:
         w, u = gen_wu_data()
-    k = torch.randn([h_input.shape_batch, h_input.k_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype)
+    k = torch.randn([h_input.shape_batch, h_input.k_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype) * input_scale
     # g = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen], dtype=torch.float)
     g = gen_decay_data(h_input, cu_seqlens, chunk_offsets)
     if h_input.use_initial_state:
