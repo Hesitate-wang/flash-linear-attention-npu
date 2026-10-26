@@ -55,11 +55,13 @@ def forward_h_trans_cpu(
     # assert K==V==D
     dtype_ = k.dtype
     state_type_ = initial_state.dtype if initial_state is not None else torch.float32
+    assert chunk_size in (32, 64, 128), f"unsupported chunk_size={chunk_size}"
 
-    k = k.to(torch.float32)
-    w = w.to(torch.float32)
-    u = u.to(torch.float32)
-    g = g.to(torch.float32)
+    # FP64 reference, same precision as the ATK golden (_forward_h_ref).
+    k = k.to(torch.float64)
+    w = w.to(torch.float64)
+    u = u.to(torch.float64)
+    g = g.to(torch.float64)
 
     B, HK, T, K = k.shape[0], k.shape[1], k.shape[2], k.shape[3]
     HV, V = u.shape[1], u.shape[3]
@@ -71,11 +73,25 @@ def forward_h_trans_cpu(
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
     if initial_state is not None:
-        initial_state = initial_state.reshape([N, HV, K, V]).contiguous().to(torch.float32)
+        # Canonical layout is [N, HV, K, V]. Accept the legacy
+        # [shape_batch, HV, token_batch, K, V] and pick the sequence axis explicitly:
+        # dense keeps shape_batch, varlen keeps token_batch. Reshaping the legacy
+        # layout directly swaps HV and N whenever both are > 1.
+        if initial_state.dim() == 5:
+            sb, hv_legacy, tb = initial_state.shape[0], initial_state.shape[1], initial_state.shape[2]
+            if tb == 1:
+                initial_state = initial_state.reshape(sb, hv_legacy, K, V)
+            elif sb == 1:
+                initial_state = initial_state.reshape(hv_legacy, tb, K, V).transpose(0, 1)
+            else:
+                raise ValueError(
+                    f"ambiguous initial_state layout {tuple(initial_state.shape)}: "
+                    "expected [N,HV,K,V] or legacy [B,HV,1,K,V] / [1,HV,N,K,V]")
+        initial_state = initial_state.reshape([N, HV, K, V]).contiguous().to(torch.float64)
 
-    S = torch.zeros((B, HV, NT, K, V), device=k.device, dtype=torch.float32)
-    v_new_output = torch.zeros((B, HV, T, V), device=k.device, dtype=torch.float32)
-    final_state = torch.zeros((N, HV, K, V), device=k.device, dtype=torch.float32)
+    S = torch.zeros((B, HV, NT, K, V), device=k.device, dtype=torch.float64)
+    v_new_output = torch.zeros((B, HV, T, V), device=k.device, dtype=torch.float64)
+    final_state = torch.zeros((N, HV, K, V), device=k.device, dtype=torch.float64)
 
     head_ratio = HV // HK
     for n in range(N):
@@ -91,6 +107,13 @@ def forward_h_trans_cpu(
             T_inner = eos - bos
             NT_inner = (T_inner + BT - 1) // BT
             boh = chunk_offsets[n]
+
+        if NT_inner == 0:
+            # 空序列没有 chunk：内核只对 fp32 final_state 走"initial_state 原样回写"
+            # 的路径（AIV 前导的直接 UB 分支），其它 dtype 保持 0。
+            if initial_state is not None and state_type_ == torch.float32:
+                final_state[n] = initial_state[n]
+            continue
 
         for h in range(HV):
             # B H T D ->
@@ -273,13 +296,30 @@ def gen_input_data(h_input, rand_wu = True):
     # g = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen], dtype=torch.float)
     g = gen_decay_data(h_input, cu_seqlens, chunk_offsets)
     if h_input.use_initial_state:
-        initial_state = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.token_batch, h_input.k_head_dim, h_input.v_head_dim], dtype=torch.float32)
+        # 直接生成 canonical [N, HV, K, V]：dense 时 N=shape_batch，变长时 N=token_batch。
+        n_seq = h_input.token_batch if h_input.is_varied_len else h_input.shape_batch
+        initial_state = torch.randn(
+            [n_seq, h_input.v_num_head, h_input.k_head_dim, h_input.v_head_dim],
+            dtype=h_input.state_dtype)
     else:
         initial_state = None
     return GDNFwdHInputTensor(k, w, u, g, cu_seqlens, chunk_offsets, initial_state)
 
 def gen_ref_data(h_input, input_tensor):
-    h, v, final_state = forward_h_trans_cpu(k=input_tensor.k, w=input_tensor.w, u=input_tensor.u, g=input_tensor.g, initial_state=input_tensor.initial_state, cu_seqlens=input_tensor.cu_seqlens)
+    # chunk_size 必须显式传下去：forward_h_trans_cpu 的默认值 64 会让
+    # chunk=32/128 的参考按 64 计算。
+    h, v, final_state = forward_h_trans_cpu(
+        k=input_tensor.k,
+        w=input_tensor.w,
+        u=input_tensor.u,
+        g=input_tensor.g,
+        initial_state=input_tensor.initial_state,
+        output_final_state=h_input.store_final_state,
+        chunk_size=h_input.chunk_size,
+        cu_seqlens=input_tensor.cu_seqlens,
+    )
+    if not h_input.store_final_state:
+        final_state = None
     return GDNFwdHOutputTensor(h, v, final_state)
 
 def save_data(input_tensor, output_tensor):
@@ -319,8 +359,14 @@ if __name__ == "__main__":
         return list(x)
 
     torch.npu.synchronize()
-    # 与 npu_custom.yaml / FLA chunk_gated_delta_rule_fwd_h 对齐：k,w,u 为位置参数，g/gk 至少提供一个。
-    result = torch.ops.npu.npu_chunk_gated_delta_rule_fwd_h(
+    # `torch.ops.npu.npu_*` 是 legacy 兼容路径（需要 fla_npu.load_legacy_torch_ops() 才注册，
+    # 且调用会告警）。当前公开入口是 fla_npu.ops.ascendc；与 ATK executor 和
+    # torch_custom/fla_npu/test/test_fwd_h.py 保持一致。
+    from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd_h
+
+    # chunk_indices 由 wrapper 依据 cu_seqlens + chunk_size 规范化生成；
+    # get_cu_offsets() 返回的占位零张量不能当真实索引传。
+    result = chunk_gated_delta_rule_fwd_h(
         input_tensor.k.npu(),
         input_tensor.w.npu(),
         input_tensor.u.npu(),
@@ -333,7 +379,6 @@ if __name__ == "__main__":
         output_final_state=gdn_fwd_h_input.store_final_state,
         chunk_size=gdn_fwd_h_input.chunk_size,
         cu_seqlens=_as_int_list(input_tensor.cu_seqlens),
-        chunk_indices=_as_int_list(input_tensor.chunk_offsets),
     )
     torch.npu.synchronize()
     if gdn_fwd_h_input.use_actual_output:
