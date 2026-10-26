@@ -49,10 +49,7 @@ struct ChunkGatedDeltaRuleFwdHTilingDataRaw {
     int64_t hWorkspaceOffset;
     int64_t numSeqWorkspaceOffset;
     int64_t numChunksWorkspaceOffset;
-    bool useCpPath;
-    int64_t cpRankCount;
-    int64_t cpSummaryWorkspaceOffset;
-    int64_t cpScratchWorkspaceOffset;
+    int64_t vSplitCount;
 };
 
 #endif // CHUNK_GATED_DELTA_RULE_FWD_H_STRUCT_H

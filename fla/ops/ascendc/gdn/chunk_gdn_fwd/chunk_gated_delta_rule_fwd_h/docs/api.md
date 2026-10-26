@@ -10,9 +10,10 @@ existing `state_v_first` behavior.
 ## Chunk-size support
 
 - `chunk_size=64/128`: existing A2/A3/A5 dense and variable-length paths.
-- `chunk_size=32`: Ascend 950 only; dense fixed-length only; `K=V=128`; `B*HV` must
-  not exceed the total AIC core count. Inputs outside this domain are rejected by
-  ACLNN/host tiling and are not sent to the legacy kernel.
+- `chunk_size=32`: Ascend 950 only; dense fixed-length only; `K=V=128`. It uses the
+  same Cube/Vector path as the other chunk sizes and splits the value dimension across
+  cores (at least 64 columns per core). Inputs outside this domain are rejected by
+  ACLNN/host tiling.
 - Gate combinations and supported input, gate, and state dtypes are unchanged.
 
 The API adds no arguments or output changes.

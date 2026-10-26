@@ -1,59 +1,77 @@
 # FWDH CP32 Development Validation
 
-## Scope
+## Scope and environment
 
-New dense Ascend 950 CP path: chunk32, K=V=128, B*HV<=AIC core count. Existing
-chunk64/128 paths are unchanged. No Ascend/CANN environment is configured in the
-current development shell (`ASCEND_HOME_PATH` is unset), so device build and execution
-are pending.
+Dense Ascend950 chunk32, K=V=128, B*HV<=AIC core count; chunk64/128 retain their
+existing dispatch. Current development host is macOS without a configured CANN
+installation. No device compilation, execution, sanitizer, or performance result
+is available. This file remains a development record pending formal acceptance.
+
+Development reference: CHUNK_DEPENDENT V1, source commit
+`a14961e9dfe8c8264768d67fb447101873da4ecf`. Reused Cube/Vector separation,
+producer/consumer handoffs, and tail padding. Task mapping follows the user's
+explicit rank-per-core scheme: all cores cooperate on each sequential batch/head task.
 
 ## Design-to-code trace
 
 | Requirement | Implementation | Evidence/status |
 | --- | --- | --- |
-| Chunk32 support and rejection | ACLNN validation and Arch35 tiling | Implemented; device/API tests pending |
-| CP TilingKey and block/rank mapping | Host tiling processor; kernel entry key 3 | Implemented; compiled dispatch evidence pending |
-| Affine rank summaries and prefix replay | `arch35/gdn_fwd_h_cp_kernel.hpp`; AIV vector construction of chunk `A_c/E_c`, Cube MMAD rank composition/prefix, AIV vector summary/prefix updates and local replay | Implemented structurally; tiny-matrix serial-vs-CP formula test passes, device comparison pending |
-| One global AIC barrier and AIC/AIV handoffs | mode-0 all-AIC collective; mode-0x2 AIC+2-AIV rendezvous orders affine publication, M/E MMAD results and vector updates | Static protocol audit; device runtime validation pending |
-| Separate CP workspace | summary, two matrix scratch buffers, and chunk-local `E_c` staging | Formula: 320 KiB per active rank, plus library space and 32 MiB reservations |
-| Legacy regression | old tiling branch retained | Build and chunk64/128/varlen regression pending |
+| CP dispatch | Existing TilingKey 3 and useCpPath branch | Retained; compiled dispatch evidence pending |
+| Rank mapping | cpRankCount=CoreNum; ceil contiguous chunk partition; sequential task loop | Source implemented; device mapping evidence pending |
+| Chunk affine | ColumnMajor K view; Cube KᵀW/KᵀU; Vec diagonal subtraction | Source implemented; build and intermediate comparison pending |
+| Saved prefixes | Per-chunk exclusive B/A; per-rank inclusive B/A | CPU formula comparison passes; device comparison pending |
+| Prior-rank prefix | Sequential Bprior@P and Bprior@Q+Aprior with separate temporaries | CPU formula comparison passes; device comparison pending |
+| Replay | Cube global affine/H0 materialization and W@H; Vec additions/subtraction and output cast | Source implemented; device comparison pending |
+| Final state | Last rank materializes its inclusive summary, including empty rank | Covered by CPU formula test; device comparison pending |
+| Workspace | 2*(R+C) matrix slots for summaries/records; 14*R scratch slots; 64 KiB per slot | Host/kernel formulas aligned in source; device bounds check pending |
+| GM/UB events | Load uses V_MTE2/MTE2_V; Store uses V_MTE3/MTE3_V; scalar gate copied through UB | Event pairing added; target compile and device validation pending |
+| Cross-core sync | mode 2 ready/done; mode 0 AIC inter-block barrier ID 9 after summary and replay | Barrier ID follows CATLASS; mode-2 flag counts and repeated-task lifecycle remain unverified; do not treat as deadlock-safe |
+| Legacy regression | Non-CP tiling and kernels retained | Build and chunk64/128/varlen regression pending |
+
+UB allocation is 4096 bytes per AIV. Operands and results use separate GM slots.
+No asynchronous overlap or measured performance improvement is claimed.
+
+## Local validation
+
+Run:
+
+```
+python fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/tests/pta/test_cp_affine.py
+git diff --check
+```
+
+The CPU tests compare affine prefix replay with the direct serial recurrence for
+none/g/gk/both gate modes, optional initial state, tail lengths, rank counts
+1/2/3/8 and empty ranks. The no-gate case is mathematical coverage; the public
+API continues to require at least one gate. These checks do not validate the
+Catlass layout implementation, CANN API compilation, device memory visibility,
+or hardware flag behavior.
 
 ## Required device validation
 
-### CP32 synchronization diagnostics
+1. Build the Ascend950 single-op package, install it, and verify package/runtime
+   consistency using the repository development procedure. Confirm key 3 and all
+   legacy keys compile.
+2. Compare Stage 1 Bc/Ac, saved chunk prefixes and rank summaries against CPU
+   intermediates, then compare Stage 2 rank prefix and replay states.
+3. Compare h/v_new/final_state with the established independent CPU reference,
+   using the operator ATK README and tests/atk/README.md. Include R=1, R>C,
+   C not divisible by R, tail chunk, optional initial/final state, both
+   state_v_first modes, g-only/gk-only/both and supported dtype combinations.
+4. Exercise multiple batch/head tasks in one invocation. Verify no next-task
+   overwrite occurs before both AIC and paired AIVs pass the final barrier.
+   Record rank, chunk, buffer generation, and ready/done steps in a separate
+   diagnostic workspace if runtime tracing is needed; tracing must add no sync.
+5. Run memory/race/synchronization sanitizers and repeated executions with
+   diagnostics disabled. Terminate a kernel test that remains active for 60s,
+   per repository policy. Previous CPDBG messages were removed with the old
+   algorithm and must not be used as evidence for this implementation.
+6. Verify rejection of unsupported chunk32 inputs, and regress chunk64/128 plus
+   existing variable-length paths. Measure Task Duration under matched conditions
+   before making any performance claim.
 
-The kernel currently emits `CPDBG` device logs around synchronization points.
-For a timeout, provide the last complete log lines, preserving device/core order:
+## Performance tracking
 
-- `AIC barrier0_before/after`: every AIC, including inactive blocks, must reach
-  both records. A missing `before` identifies an earlier summary-path stall; a
-  missing `after` localizes the stall to the mode-0 collective.
-- `AIC summary_wait_operand` and `AIV affine_ready/got_m_ready/got_e_ready`:
-  identify the first mode-0x2 affine-summary handshake that fails. These detailed
-  records cover the first local chunk of each active rank. Both `sub=0` and
-  `sub=1` must reach `got_m_ready` for each rank; AIC handshake helpers explicitly
-  participate in the same collective rendezvous. For AIC-to-AIV stages, expect one
-  AIC set and one wait per AIV; for AIV-to-AIC stages, expect one set per AIV and
-  one AIC wait. All participants use the same `flagId`.
-- `AIC operand_joined/m_mmad_done/m_ack_joined/e_mmad_done` and
-  `AIV m_apply_done/e_apply_done` split the first summary iteration into compute
-  and handshake boundaries. The last marker identifies whether progress stopped
-  in vector update, collective acknowledgement, Cube MMAD, or the next release.
-- `AIC state_init_publish`, `AIC prefix_mmad/prefix_finalize`, and corresponding
-  `AIV prefix_wait`: localize incoming-state prefix handoffs.
-- `AIC state_ready_published` and `AIV state_wait/state_wait_done`: verify the
-  final AIC-to-AIV release, including inactive blocks/subblocks.
-
-`PRINTF` perturbs device timing. Use these logs to locate the last reached phase,
-then validate any synchronization fix with logging disabled and repeated runs.
-
-- Build the Ascend 950 OPP and verify TilingKey 3 plus all legacy keys compile.
-- Compare h, v_new, and final_state against the current CPU reference for R=1, R>1,
-  non-even chunk partition, tail chunk, optional initial/final state, state_v_first,
-  g-only, gk-only, g+gk, and supported dtype combinations.
-- Verify ineligible chunk32 fails for non-950, varlen, non-128 dimensions, and
-  B*HV>totalCore; verify chunk64/128 and existing variable-length cases still pass.
-- Run race/memory/synchronization sanitizers and profile Task Duration. The CP path
-  must not be accepted as a performance improvement without measurement.
-- Verify both AIV sub-blocks cover the V dimension exactly once and that inactive
-  ranks participate in the mode-0x2 AIC/AIV handoff without touching the CP scratch region.
+| Model case | Round / status | Expected critical path | Decision / variable | Precision | Before/after performance | Bottleneck change | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| User rank-prefix scheme | Pending device measurement | Sequential task loop, FP32 128-square compositions, GM intermediates and handshakes | All-core ranks and saved exclusive prefixes | CPU formula only | Unmeasured | Unknown | Device profiling pending |

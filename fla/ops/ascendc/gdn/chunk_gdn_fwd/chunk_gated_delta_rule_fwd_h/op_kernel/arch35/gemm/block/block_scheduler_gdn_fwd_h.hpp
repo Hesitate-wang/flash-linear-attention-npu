@@ -69,6 +69,7 @@ struct GDNFwdHStream {
     uint32_t batchIdx;
     uint32_t chunkIdx{0};
     uint32_t vHeadIdx;
+    uint32_t vBlockIdx{0};
     uint32_t kHeadIdx;
     uint32_t shapeBatchIdx;
     uint32_t tokenBatchIdx;
@@ -96,6 +97,7 @@ struct BlockSchedulerGdnFwdH {
     uint32_t vHeadDim;
     uint32_t chunkSize;
     uint32_t vBlockSize{128};
+    uint32_t vSplits{1};
     uint32_t isVariedLen;
     uint32_t shapeBatch;
     uint32_t tokenBatch;
@@ -141,6 +143,7 @@ struct BlockSchedulerGdnFwdH {
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
+        vSplits = static_cast<uint32_t>(gdnFwdHTilingData->vSplitCount);
         isVariedLen = gdnFwdHTilingData->isVariedLen;
         shapeBatch = gdnFwdHTilingData->shapeBatch;
         tokenBatch = gdnFwdHTilingData->tokenBatch;
@@ -163,6 +166,7 @@ struct BlockSchedulerGdnFwdH {
         kHeadDim = tilingData.kHeadDim;
         vHeadDim = tilingData.vHeadDim;
         chunkSize = tilingData.chunkSize;
+        vSplits = static_cast<uint32_t>(tilingData.vSplitCount);
         isVariedLen = tilingData.isVariedLen;
         shapeBatch = tilingData.shapeBatch;
         tokenBatch = tilingData.tokenBatch;
@@ -208,8 +212,11 @@ struct BlockSchedulerGdnFwdH {
 
         cubeCoreIdx = coreIdx;
         cubeCoreNum = coreNum;
-        vBlockSize = vHeadDim;
-        taskNum = batch * vNumHead;
+        if (vSplits == 0) {
+            vSplits = 1;
+        }
+        vBlockSize = vHeadDim / vSplits;
+        taskNum = batch * vNumHead * vSplits;
         headGroups = vNumHead / kNumHead;
         uint32_t maxTaskCntPerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
         taskStride = cubeCoreNum * maxTaskCntPerLoop;
@@ -270,8 +277,11 @@ struct BlockSchedulerGdnFwdH {
 
     CATLASS_DEVICE
     void InitNewStream(GDNFwdHStream& newStream) {
-        newStream.batchIdx = taskIdx / vNumHead;
-        newStream.vHeadIdx = taskIdx % vNumHead;
+        // taskIdx enumerates (batch, value head, value-block); the value block only splits the
+        // V axis and never changes chunk order or the k-head mapping.
+        newStream.batchIdx = taskIdx / (vNumHead * vSplits);
+        newStream.vHeadIdx = (taskIdx / vSplits) % vNumHead;
+        newStream.vBlockIdx = taskIdx % vSplits;
         newStream.kHeadIdx = newStream.vHeadIdx / headGroups;
         newStream.shapeBatchIdx = isVariedLen ? 0 : newStream.batchIdx;
         newStream.tokenBatchIdx = isVariedLen ? newStream.batchIdx : 0;
@@ -318,7 +328,7 @@ struct BlockSchedulerGdnFwdH {
 
         offset.isInitialState = stream.chunkIdx == 0;
         offset.isFinalState = stream.chunkIdx == (stream.batchChunks - 1);
-        uint32_t vBlockOffset = 0;
+        uint32_t vBlockOffset = stream.vBlockIdx * vBlockSize;
         uint32_t vBlockDim = vBlockSize;
         offset.initialStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;
         offset.finalStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;

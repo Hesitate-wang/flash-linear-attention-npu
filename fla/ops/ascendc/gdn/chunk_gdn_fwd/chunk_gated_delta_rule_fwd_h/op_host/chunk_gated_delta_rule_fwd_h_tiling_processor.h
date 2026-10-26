@@ -90,46 +90,30 @@ public:
             batch = tokenBatch;
         }
 
-        blockDim = ctx_.aicCoreNum;
         const int64_t aicCoreNum = static_cast<int64_t>(ctx_.aicCoreNum);
         const int64_t chunkSize = ctx_.chunkSize;
         const int64_t kHeadDim = ctx_.kHeadDim;
         const int64_t vHeadDim = ctx_.vHeadDim;
 
+        // Value-dim split: independent chunks share nothing along V, so a chain's V axis can be
+        // cut across cores without any extra communication. Only chunk32 needs it (chunk64/128
+        // already fill the machine through the HV axis). Keep at least 64 columns per core.
+        const int64_t batchHeads = (isVariedLen ? tokenBatch : shapeBatch) * ctx_.vNumHead;
+        int64_t vSplits = 1;
+        if (chunkSize == 32 && !isVariedLen && batchHeads < aicCoreNum) {
+            const int64_t byCores = aicCoreNum / std::max<int64_t>(batchHeads, 1);
+            const int64_t byDim = vHeadDim / 64;
+            vSplits = std::max<int64_t>(1, std::min(byCores, byDim));
+        }
+        tiling.vSplitCount = vSplits;
+        // chunk64/128 keep the historical blockDim so their scheduling is untouched.
+        blockDim = ctx_.aicCoreNum;
+        if (chunkSize == 32) {
+            blockDim = static_cast<uint32_t>(std::min<int64_t>(aicCoreNum, batchHeads * vSplits));
+        }
+
         size_t workspaceOffset = ctx_.libApiWorkSpaceSize;
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
-
-        const bool useCpPath = chunkSize == 32 && !ctx_.hasCuSeqlens && ctx_.isAscend950 &&
-                               kHeadDim == 128 && vHeadDim == 128 &&
-                               ctx_.shapeBatchDim * ctx_.vNumHead <= ctx_.aicCoreNum;
-        tiling.useCpPath = useCpPath;
-        tiling.cpRankCount = 0;
-        tiling.cpSummaryWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-        tiling.cpScratchWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-
-        if (chunkSize == 32) {
-            const int64_t batchHeads = ctx_.shapeBatchDim * ctx_.vNumHead;
-            const int64_t numChunks = (ctx_.seqlen + chunkSize - 1) / chunkSize;
-            const int64_t ranks = std::min<int64_t>(numChunks, ctx_.aicCoreNum / batchHeads);
-            tiling.cpRankCount = ranks;
-            if (useCpPath) {
-                const size_t activeRanks = static_cast<size_t>(batchHeads * ranks);
-                constexpr size_t kSummaryBytes = (128U * 128U + 128U * 128U) * sizeof(float);
-                constexpr size_t kScratchBytes = (128U * 128U * 3U) * sizeof(float);
-                tiling.cpSummaryWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-                workspaceOffset += AlignUpCp(activeRanks * kSummaryBytes);
-                tiling.cpScratchWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-                workspaceOffset += AlignUpCp(activeRanks * kScratchBytes);
-                blockDim = ctx_.aicCoreNum;
-                workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
-                workspaceSize = workspaceOffset;
-            }
-        }
-
-        if (useCpPath) {
-            FillCommonTiling(tiling, batch, isVariedLen, shapeBatch, tokenBatch, chunkSize);
-            return;
-        }
 
         tiling.vWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * chunkSize * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
@@ -184,11 +168,6 @@ private:
     static size_t AlignUp(size_t x)
     {
         return (x + GDN_FWD_H_GM_ALIGN) / GDN_FWD_H_GM_ALIGN * GDN_FWD_H_GM_ALIGN;
-    }
-
-    static size_t AlignUpCp(size_t x)
-    {
-        return (x + GDN_FWD_H_GM_ALIGN - 1) / GDN_FWD_H_GM_ALIGN * GDN_FWD_H_GM_ALIGN;
     }
 
     const ChunkGatedDeltaRuleFwdHTilingContext &ctx_;
