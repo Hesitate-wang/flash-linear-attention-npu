@@ -229,7 +229,7 @@ public:
                         auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
                         auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
                         auto tensorBlockV = GetTile(tensorV, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.n()));
-                        blockMmadWH(tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape, cubeBlockScheduler.vec2Done[i]);
+                        blockMmadWH(tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape, &cubeBlockScheduler.vec2Done[i]);
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
                     }
                 } else {
@@ -253,7 +253,7 @@ public:
                             auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
                             auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
                             auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
-                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape, cubeBlockScheduler.vec1Done);
+                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape, &cubeBlockScheduler.vec1Done);
                         } else {
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
                         }

@@ -19,7 +19,7 @@
 #include "catlass/gemm_coord.hpp"
 #include "catlass/gemm/tile/tile_copy.hpp"
 #include "catlass/layout/layout.hpp"
-#include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
+#include "kernel_utils/block/block_mmad_pingpong_tla_preload.hpp"
 #include "kernel_operator.h"
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
@@ -57,7 +57,7 @@ class GDNFwdHCPKernel {
     using CpL1TileShape = tla::Shape<tla::Int<128>, tla::Int<128>, tla::Int<128>>;
     using CpL0TileShape = tla::Shape<tla::Int<128>, tla::Int<128>, tla::Int<32>>;
     using CpArchTag = Catlass::Arch::Ascend950;
-    using CpDispatch = Catlass::Gemm::MmadPingpongTlaMulti<CpArchTag, false, false, 2, false, 2, 2, 1, 1>;
+    using CpDispatch = Catlass::Gemm::MmadPingpongTlaPreload<CpArchTag, false, false, 2, false, 2, 2, 1, 1>;
     using CpTileCopy = Catlass::Gemm::Tile::PackedTileCopyTla<
         CpArchTag, float, Catlass::layout::RowMajor, float, Catlass::layout::RowMajor,
         float, Catlass::layout::RowMajor>;
@@ -666,7 +666,7 @@ private:
             AscendC::PRINTF("CPDBG AIC mmad_after_preset block=%u\n", debugBlock);
             AscendC::PRINTF("CPDBG AIC mmad_before_body block=%u\n", debugBlock);
         }
-        blockMmad(lhsTile, rhsTile, dstTile, Catlass::GemmCoord{128, 128, 128});
+        blockMmad(lhsTile, rhsTile, dstTile, Catlass::GemmCoord{128, 128, 128}, nullptr);
         if (debugFirstMmad) {
             AscendC::PRINTF("CPDBG AIC mmad_after_body block=%u\n", debugBlock);
             AscendC::PRINTF("CPDBG AIC mmad_before_final_wait block=%u\n", debugBlock);

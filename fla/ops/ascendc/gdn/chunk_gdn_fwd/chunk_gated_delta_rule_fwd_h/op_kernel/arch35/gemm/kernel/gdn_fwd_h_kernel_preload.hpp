@@ -258,7 +258,7 @@ public:
                         GemmCoord cube1Shape {cube1Offsets.blockTokens, vHeadDim, kHeadDim};
                         auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
                         auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
-                        blockMmadWH(tensorBlockW, tensorBlockH, tensorV, cube1Shape, cubeBlockScheduler.vec2Done[i]);
+                        blockMmadWH(tensorBlockW, tensorBlockH, tensorV, cube1Shape, &cubeBlockScheduler.vec2Done[i]);
                         Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
                     }
                 } else {
@@ -282,7 +282,7 @@ public:
                             GemmCoord cube2Shape{kHeadDim, vHeadDim, cube2Offsets.blockTokens};
                             auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
                             auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorHwork, cube2Shape, cubeBlockScheduler.vec1Done);
+                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorHwork, cube2Shape, &cubeBlockScheduler.vec1Done);
                         } else {
                             Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
                         }

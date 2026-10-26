@@ -344,8 +344,12 @@ public:
     /// Perform a block-scoped matrix multiply-accumulate
     template <class TensorA, class TensorB, class TensorC, class TensorBias = EmptyClass>
     CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape,
-        TensorBias const &tensorBias = {}, bool clearL1Padding = false)
+        TensorBias const &tensorBias = {}, bool clearL1Padding = false, bool debugTrace = false)
     {
+        const uint32_t debugBlock = static_cast<uint32_t>(AscendC::GetBlockIdx());
+        if (debugTrace) {
+            AscendC::PRINTF("CPDBG MMAD body_enter block=%u\n", debugBlock);
+        }
         // Check L1TileShape
         if constexpr (HAS_BIAS) {
             static constexpr uint32_t BIAS_BUF_SIZE = L0_TILE_N * sizeof(ElementAccumulator);
@@ -424,6 +428,9 @@ public:
             copyGmToL1A(tensorL1A, tensorTileA);
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListId]);
+        if (debugTrace) {
+            AscendC::PRINTF("CPDBG MMAD a_gm_l1_issued block=%u\n", debugBlock);
+        }
 
         // load first matrix B tile from GM to L1
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1BListId]);
@@ -451,6 +458,10 @@ public:
             copyGmToL1B(tensorL1B, tensorTileB);
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1BListId]);
+        if (debugTrace) {
+            AscendC::PRINTF("CPDBG MMAD b_gm_l1_issued block=%u\n", debugBlock);
+            AscendC::PRINTF("CPDBG MMAD before_l0c_fix_wait block=%u\n", debugBlock);
+        }
 
         if constexpr (HAS_BIAS && !std::is_same_v<TensorBias, EmptyClass>) {
             using CopyGmToL1Bias = typename TileCopy::template CopyGmToL1Bias<TensorBias>;
@@ -464,6 +475,9 @@ public:
 
         if constexpr (!ENABLE_UNIT_FLAG) {
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
+        }
+        if (debugTrace) {
+            AscendC::PRINTF("CPDBG MMAD after_l0c_fix_wait block=%u\n", debugBlock);
         }
 
         uint32_t mL0Loop = CeilDiv<L0_TILE_M>(mL1Actual);
@@ -565,13 +579,28 @@ public:
                     // Locate the current tile of matrix A on L1
                     auto tensorTileL1A = GetTileA(tensorL1A, mL0Idx * L0_TILE_M, kL0Idx * L0_TILE_K, mL0Actual, kL0Actual);
 
+                    if (debugTrace && mL0Idx == 0 && kL0Idx == 0) {
+                        AscendC::PRINTF("CPDBG MMAD before_a_l0_wait block=%u\n", debugBlock);
+                    }
                     AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
+                    if (debugTrace && mL0Idx == 0 && kL0Idx == 0) {
+                        AscendC::PRINTF("CPDBG MMAD after_a_l0_wait block=%u\n", debugBlock);
+                    }
                     if ((mL0Idx == 0) && (kL0Idx == 0)) {
+                        if (debugTrace) {
+                            AscendC::PRINTF("CPDBG MMAD before_a_l1_wait block=%u\n", debugBlock);
+                        }
                         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListId]);
+                        if (debugTrace) {
+                            AscendC::PRINTF("CPDBG MMAD after_a_l1_wait block=%u\n", debugBlock);
+                        }
                     }
 
                     // Load current tile from L1 to L0A
                     copyL1ToL0A(tensorL0A, tensorTileL1A);
+                    if (debugTrace && mL0Idx == 0 && kL0Idx == 0) {
+                        AscendC::PRINTF("CPDBG MMAD a_l1_l0_issued block=%u\n", debugBlock);
+                    }
 
                     if ((mL0Idx == mL0Loop - 1) && (kL0Idx == kL0Loop - 1)) {
                         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1AListId]);
@@ -591,14 +620,29 @@ public:
                                                      tla::MakeShape(kL0Actual, nL0Actual));
 
                         // Wait for mmad finished
+                        if (debugTrace && mL0Idx == 0 && kL0Idx == 0 && nL0Idx == 0) {
+                            AscendC::PRINTF("CPDBG MMAD before_b_l0_wait block=%u\n", debugBlock);
+                        }
                         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
+                        if (debugTrace && mL0Idx == 0 && kL0Idx == 0 && nL0Idx == 0) {
+                            AscendC::PRINTF("CPDBG MMAD after_b_l0_wait block=%u\n", debugBlock);
+                        }
                         // If the current tile is the first one on the k&n axis, wait for loading matrix B from GM to L1
                         if ((mL0Idx == 0) && (kL0Idx == 0) && (nL0Idx == 0)) {
+                            if (debugTrace) {
+                                AscendC::PRINTF("CPDBG MMAD before_b_l1_wait block=%u\n", debugBlock);
+                            }
                             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1BListId]);
+                            if (debugTrace) {
+                                AscendC::PRINTF("CPDBG MMAD after_b_l1_wait block=%u\n", debugBlock);
+                            }
                         }
 
                         // Load current tile from L1 to L0B
                         copyL1ToL0B(tensorL0B, tensorTileL1B);
+                        if (debugTrace && mL0Idx == 0 && kL0Idx == 0 && nL0Idx == 0) {
+                            AscendC::PRINTF("CPDBG MMAD b_l1_l0_issued block=%u\n", debugBlock);
+                        }
 
                         // If the current tile is the last one on the k&n axis, notify to load matrix B from GM to L1
                         if ((mL0Idx == mL0Loop - 1) && (kL0Idx == kL0Loop - 1) && (nL0Idx == nL0Loop - 1)) {
@@ -634,7 +678,13 @@ public:
 
                         // Compute the matrix multiplication on L0A and L0B and write the result to the accumulator
                         // Wait for loading L0B
+                        if (debugTrace && mL0Idx == 0 && kL0Idx == 0 && nL0Idx == 0) {
+                            AscendC::PRINTF("CPDBG MMAD before_cube_ready_wait block=%u\n", debugBlock);
+                        }
                         AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0CEventList[l0CListId]);
+                        if (debugTrace && mL0Idx == 0 && kL0Idx == 0 && nL0Idx == 0) {
+                            AscendC::PRINTF("CPDBG MMAD before_cube_inst block=%u\n", debugBlock);
+                        }
 
                         // If the unit flag is enabled, the unit flag is set according to the calculation progress
                         uint8_t unitFlag = 0b00;
@@ -660,6 +710,9 @@ public:
                             tileMmad(tensorTileL0C, tensorL0A, tensorL0B,
                                 mL0Actual, nL0Actual, kL0Actual, initC, unitFlag);
                         }
+                        if (debugTrace && mL0Idx == 0 && kL0Idx == 0 && nL0Idx == 0) {
+                            AscendC::PRINTF("CPDBG MMAD after_cube_inst block=%u\n", debugBlock);
+                        }
 
                         // Notify to move the next L0B tile
                         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
@@ -679,9 +732,15 @@ public:
 
         // copy block out
         if constexpr (!ENABLE_UNIT_FLAG) {
+            if (debugTrace) {
+                AscendC::PRINTF("CPDBG MMAD before_l0c_copyout block=%u\n", debugBlock);
+            }
             AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
             AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
             copyL0CToDst(tensorC, tensorL0C);
+            if (debugTrace) {
+                AscendC::PRINTF("CPDBG MMAD after_l0c_copyout block=%u\n", debugBlock);
+            }
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
             l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
         } else {

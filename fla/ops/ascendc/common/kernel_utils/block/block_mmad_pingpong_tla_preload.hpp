@@ -327,8 +327,8 @@ public:
 
     /// Perform a block-scoped matrix multiply-accumulate
     template <class TensorA, class TensorB, class TensorC, class TensorBias = EmptyClass>
-    CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape, Arch::CrossCoreFlag vecDone,
-        TensorBias const &tensorBias = {})
+    CATLASS_DEVICE void operator()(TensorA &tensorA, TensorB &tensorB, TensorC &tensorC, GemmCoord const &actualShape,
+        Arch::CrossCoreFlag *vecDone, TensorBias const &tensorBias = {})
     {
         // Check L1TileShape
         if constexpr (HAS_BIAS) {
@@ -390,7 +390,9 @@ public:
         } else {
             copyGmToL1A(tensorL1A, tensorTileA);
         }
-        Arch::CrossCoreWaitFlag(vecDone);
+        if (vecDone != nullptr) {
+            Arch::CrossCoreWaitFlag(*vecDone);
+        }
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1AListId]);
 
         // load first matrix B tile from GM to L1
