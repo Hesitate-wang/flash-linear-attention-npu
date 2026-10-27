@@ -106,10 +106,14 @@ struct BlockSchedulerGdnFwdHPreload {
     AscendC::GlobalTensor<int64_t> gmNumSeq;
     AscendC::GlobalTensor<int64_t> gmNumChunks;
 
-    Arch::CrossCoreFlag cube1Done{0};
-    Arch::CrossCoreFlag vec1Done{1};
-    Arch::CrossCoreFlag cube2Done{2};
-    Arch::CrossCoreFlag vec2Done[PING_PONG_STAGES] = {3, 4};
+    // 每个 stream 槽位一套独立的跨核 flag：一核两条链时两条链互不串扰（单 stream 时只用槽位 0 那套）。
+    // 槽位 = (head + i) % PING_PONG_STAGES，与 UB 的 ping/pong 选择共用同一个下标，
+    // 这样一个槽位上的 flag、UB 缓冲和链始终对应同一条 (batch, head, value block) 链，
+    // 即使调度器在中途推进 head 也不会串。
+    Arch::CrossCoreFlag cube1Done[PING_PONG_STAGES] = {0, 1};
+    Arch::CrossCoreFlag vec1Done[PING_PONG_STAGES] = {2, 3};
+    Arch::CrossCoreFlag cube2Done[PING_PONG_STAGES] = {4, 5};
+    Arch::CrossCoreFlag vec2Done[PING_PONG_STAGES] = {6, 7};
 
     CATLASS_DEVICE
     BlockSchedulerGdnFwdHPreload() {}
@@ -302,6 +306,18 @@ struct BlockSchedulerGdnFwdHPreload {
     CATLASS_DEVICE
     const GDNFwdHStreamPreload& GetStream(uint32_t i) const {
         return runningQ.streams[(runningQ.head + i) % PING_PONG_STAGES];
+    }
+
+    // GetStream(i) 对应的物理槽位：flag 数组和 UB ping/pong 都用它做下标。
+    CATLASS_DEVICE
+    uint32_t GetStreamSlot(uint32_t i) const {
+        return (runningQ.head + i) % PING_PONG_STAGES;
+    }
+
+    // 一核是否同时持有两条链（决定 h 能否在 UB 里跨 chunk 复用）。
+    CATLASS_DEVICE
+    bool StreamSlotsAreStable() const {
+        return taskSlotsPerCore <= 1;
     }
 
     CATLASS_DEVICE

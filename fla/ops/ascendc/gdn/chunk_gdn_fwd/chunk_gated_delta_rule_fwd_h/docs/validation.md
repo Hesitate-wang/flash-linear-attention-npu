@@ -72,6 +72,27 @@ or hardware flag behavior.
 
 ## Performance tracking
 
+Model case: `B=1, T=16384, HK=HV=12, K=V=128, bf16, chunk32`, SoC ascend950,
+baseline = same build at `vSplitCount=1`. Metric: `msprof op_summary` 的 `Task Duration(us)`。
+表中旧行（"User rank-prefix scheme"）对应已删除的 CP 实现，仅作历史记录。
+
 | Model case | Round / status | Expected critical path | Decision / variable | Precision | Before/after performance | Bottleneck change | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| User rank-prefix scheme | Pending device measurement | Sequential task loop, FP32 128-square compositions, GM intermediates and handshakes | All-core ranks and saved exclusive prefixes | CPU formula only | Unmeasured | Unknown | Device profiling pending |
+| chunk32 | 基线 | 每 chunk 4 级串行（C1→V1→C2→V2），12 task / 24 核 | 现状 Preload 路径 | Pass | 1247 µs | AIC MTE2 68% busy，cube 6.5% | 交接文档 profiling |
+| chunk32 | 放弃 | 假设吞吐受限，期望 650 | V 轴切两半（vSplits=2，24 task） | Pass | 1247 → 1384 µs | 未变；W/K 每 task 重读，总字节 +10% | 本表，待归档日志 |
+| chunk32 | 采用 | 每 chunk 时长与 tile 宽度无关（2.44/2.77/2.70 µs） | 结论：V 切分默认关闭，保留 `GDN_FWD_H_VSPLITS` 钩子 | Pass | 1384 → 1274 µs | — | 同上 |
+| chunk32 | 采用 | Preload epilogue 手写 SIMD 只支持 128 列宽 | 恢复 SIMD 快路径，窄列宽回落普通向量算子 | Pass | 1274 → 1253 µs | — | 同上 |
+| chunk32 | 采用 | V2 每 chunk 从 GM 回读 h[c]（32KB，占总量 21%） | h[c] 在 UB 跨 chunk 常驻，仅链首载入（`taskSlotsPerCore>1` 时回退） | Pass | 1253 → 1231 µs | V2 的 h 读原本被掩盖，收益仅 1.3% | 同上 |
+| chunk32 | 待实现 | 1 核 1 链时每 chunk 有 ~0.8 µs AIC MTE2 空泡（1.62 忙 / 2.40 实际） | Step1: per-stream 跨核 flag + UB 按物理槽位分配（vSplits=1 应零回归） | — | 目标 = 1231 | — | 本次改动 |
+| chunk32 | 待实现 | 24 核 × 2 stream 提供空泡填充；vSplits=4 时 AIC 26KB/task | Step2: 开 vSplits=4（48 链，2 stream/核），行缩放与 h 拷贝支持 32 列 | — | 预计 ~770 µs | — | 字节模型 |
+| chunk32 | 待实现 | CP 单独 ≈1000 µs（用上 24 核但空泡仍在）；CP + 2 stream ≈600-650 | Step3: 本地仿射 (B_c,A_c) + 跨 rank 前缀 + 分段 replay | — | 目标 600-650 µs | — | 字节/工作量模型 |
+
+### 关键结论（用于后续实现）
+
+- 每 chunk 时长的固定部分（4 级依赖 + 3 次跨核 flag + GM 往返）约 2.4 µs，与 tile 宽度基本无关；
+  单纯增加核数或切 V 不会变快（vSplits=2 实测 1384）。
+- AIC MTE2 每核有效带宽约 34.6 GB/s，1.62 µs/chunk 的工作量配 2.40 µs 的实际时长 → 33% 空泡。
+  空泡只能由**同一核上的第二条独立链**填补。
+- chunk 轴并行（仿射前缀）把 12 条链摊到 24 核，但 phase A 增加约 0.8 µs/chunk 的仿射合成工作量；
+  它必须与"每核 2 条链"叠加才能到 600-650，否则约 1000 µs。
+

@@ -290,6 +290,7 @@ public:
                         if (cubeBlockScheduler.StreamIsDone(stream)) {
                             continue;
                         }
+                        uint32_t slot = cubeBlockScheduler.GetStreamSlot(i);
 
                         const GDNFwdHOffsets& cube1Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
                         auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(cube1Offsets.blockTokens, cube1Offsets.vBlockDim);
@@ -298,13 +299,13 @@ public:
                         int64_t cube1OffsetVwork = cube1Offsets.vWorkOffset;
                         auto tensorW = tla::MakeTensor(gmW[cube1OffsetW], wLayout, Catlass::Arch::PositionGM{});
                         auto tensorH = tla::MakeTensor(gmH[cube1OffsetH], hLayout, Catlass::Arch::PositionGM{});
-                        AscendC::LocalTensor<ElementVWork> ubVWork = (i == 0) ? ubVWorkPing : ubVWorkPong;
+                        AscendC::LocalTensor<ElementVWork> ubVWork = (slot == 0) ? ubVWorkPing : ubVWorkPong;
                         auto tensorV = tla::MakeTensor(ubVWork, vLayout, Catlass::Arch::PositionUB{});
                         GemmCoord cube1Shape {cube1Offsets.blockTokens, cube1Offsets.vBlockDim, kHeadDim};
                         auto tensorBlockW = GetTile(tensorW, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.m(), cube1Shape.k()));
                         auto tensorBlockH = GetTile(tensorH, tla::MakeCoord(0, 0), tla::MakeShape(cube1Shape.k(), cube1Shape.n()));
-                        blockMmadWH(tensorBlockW, tensorBlockH, tensorV, cube1Shape, &cubeBlockScheduler.vec2Done[i]);
-                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
+                        blockMmadWH(tensorBlockW, tensorBlockH, tensorV, cube1Shape, &cubeBlockScheduler.vec2Done[slot]);
+                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done[slot]);
                     }
                 } else {
                     /* C2: h[i+1] = k.T @ v_work */
@@ -313,6 +314,7 @@ public:
                         if (cubeBlockScheduler.StreamIsDone(stream)) {
                             continue;
                         }
+                        uint32_t slot = cubeBlockScheduler.GetStreamSlot(i);
                         const GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCurTaskOffsets(stream);
 
                         if (cubeBlockScheduler.NeedProcessStage2(stream)) {
@@ -322,16 +324,16 @@ public:
                             int64_t cube2OffsetH = cube2Offsets.hWorkOffset;
                             auto tensorK = tla::MakeTensor(gmK[cube2OffsetK], kLayout, Catlass::Arch::PositionGM{});
                             auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[cube2OffsetVwork], vworkLayout, Catlass::Arch::PositionGM{});
-                            AscendC::LocalTensor<ElementHWork> ubHUpdate = (i == 0) ? ubHUpdatePing : ubHUpdatePong;
+                            AscendC::LocalTensor<ElementHWork> ubHUpdate = (slot == 0) ? ubHUpdatePing : ubHUpdatePong;
                             auto tensorHwork = tla::MakeTensor(ubHUpdate, hworkLayout, Catlass::Arch::PositionUB{});
                             GemmCoord cube2Shape{kHeadDim, cube2Offsets.vBlockDim, cube2Offsets.blockTokens};
                             auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
                             auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorHwork, cube2Shape, &cubeBlockScheduler.vec1Done);
+                            blockMmadKV(tensorBlockK, tensorBlockVwork, tensorHwork, cube2Shape, &cubeBlockScheduler.vec1Done[slot]);
                         } else {
-                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
+                            Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done[slot]);
                         }
-                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
+                        Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done[slot]);
                     }
                 }
                 currStage ^= 0x01;
@@ -460,13 +462,14 @@ public:
                         if (vecBlockScheduler.StreamIsDone(stream)) {
                             continue;
                         }
+                        uint32_t slot = vecBlockScheduler.GetStreamSlot(i);
                         const GDNFwdHOffsets& vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
                         epilogueGDNFwdHVnew(
                             gmV[vec1Offsets.uvOffset], gmVUpdateWorkspace[vec1Offsets.vWorkOffset],
                             gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset],
                             vec1Offsets.blockTokens, kHeadDim, vec1Offsets.vBlockDim, vHeadDim,
-                            vecBlockScheduler.cube1Done, vecBlockScheduler.vec1Done,
-                            vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState, (i == 0)
+                            vecBlockScheduler.cube1Done[slot], vecBlockScheduler.vec1Done[slot],
+                            vec1Offsets.isInitialState, vec1Offsets.isFinalState, storeFinalState, (slot == 0)
                         );
                     }
                 } else {
@@ -476,26 +479,27 @@ public:
                         if (vecBlockScheduler.StreamIsDone(stream)) {
                             continue;
                         }
+                        uint32_t slot = vecBlockScheduler.GetStreamSlot(i);
                         const GDNFwdHOffsets& vec2Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
 
                         if (vecBlockScheduler.NeedProcessStage2(stream)) {
                             // step 4:  h[i+1] += h_work if i < num_chunks - 1 else None
-                            // 一核一 task 时 i 与物理 stream 固定对应，h[c] 可以留在 UB 里跨 chunk 复用，
-                            // 只有链首需要从 GM 载入；多 task 时调度器会轮转 head，必须每 chunk 重新载入。
+                            // 一核一 task 时槽位与链固定对应，h[c] 可以留在该槽位的 UB 里跨 chunk 复用，
+                            // 只有链首需要从 GM 载入；一核两 task 时先按每 chunk 载入处理。
                             epilogueGDNFwdHUpdate(
                                 gmH[vec2Offsets.hDstOffset], gmFinalState[vec2Offsets.finalStateOffset],
                                 gmG[vec2Offsets.gOffset],
                                 gmH[vec2Offsets.hSrcOffset],
                                 gmHWorkspace[vec2Offsets.hWorkOffset],
                                 vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim,
-                                vecBlockScheduler.cube2Done,
-                                vec2Offsets.isInitialState || vecBlockScheduler.taskSlotsPerCore > 1,
-                                vec2Offsets.isFinalState, (i == 0)
+                                vecBlockScheduler.cube2Done[slot],
+                                vec2Offsets.isInitialState || !vecBlockScheduler.StreamSlotsAreStable(),
+                                vec2Offsets.isFinalState, (slot == 0)
                             );
                         } else {
-                            Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
+                            Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done[slot]);
                         }
-                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[i]);
+                        Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done[slot]);
                     }
                 }
                 currStage ^= 0x01;
