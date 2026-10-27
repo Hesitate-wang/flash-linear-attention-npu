@@ -244,19 +244,34 @@ public:
     }
 
     // 逐行乘 exp(g_last - g_t)：matrix 是 rows x cols 的紧凑 UB 块，rowScale 从 rowScaleOffset 行开始。
+    // 列宽是 64（一个 FP32 寄存器）的整数倍时走 dual-issue VF；窄列（V 切 4 份时 32 列）逐行 Muls，
+    // 因为 VF 用整寄存器访存，32 列会读写到下一行。
     CATLASS_DEVICE
     void ApplyRowScale(
         AscendC::LocalTensor<float> matrix,
         AscendC::LocalTensor<float> rowScale,
         uint32_t rowScaleOffset,
         uint32_t rows,
-        uint32_t cols)
+        uint32_t cols,
+        uint32_t pingpongFlag)
     {
-        __ubuf__ float *matrixAddr = reinterpret_cast<__ubuf__ float *>(matrix.GetPhyAddr());
-        __ubuf__ float *rowScaleAddr = reinterpret_cast<__ubuf__ float *>(rowScale.GetPhyAddr());
-        AscendC::VF_CALL<detail::ApplyRowScaleDualIssue>(
-            matrixAddr, rowScaleAddr, rowScaleOffset,
-            static_cast<uint16_t>(rows), static_cast<uint16_t>(cols));
+        constexpr uint32_t fp32PerReg = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+        if (cols % fp32PerReg == 0) {
+            __ubuf__ float *matrixAddr = reinterpret_cast<__ubuf__ float *>(matrix.GetPhyAddr());
+            __ubuf__ float *rowScaleAddr = reinterpret_cast<__ubuf__ float *>(rowScale.GetPhyAddr());
+            AscendC::VF_CALL<detail::ApplyRowScaleDualIssue>(
+                matrixAddr, rowScaleAddr, rowScaleOffset,
+                static_cast<uint16_t>(rows), static_cast<uint16_t>(cols));
+            AscendC::PipeBarrier<PIPE_V>();
+            return;
+        }
+        // Exp 之后 g 由 V 写，标量读取前需要一次 V→S 同步。
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID3 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID3 + pingpongFlag);
+        for (uint32_t row = 0; row < rows; ++row) {
+            float scale = rowScale.GetValue(rowScaleOffset + row);
+            AscendC::Muls(matrix[row * cols], matrix[row * cols], scale, cols);
+        }
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -377,7 +392,7 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Copy(calcUbTensor, wsUbTensor, elementCount);
             AscendC::PipeBarrier<PIPE_V>();
-            ApplyRowScale(calcUbTensor, gUbTensor, mOffset, mActualThisSubBlock, nvActual);
+            ApplyRowScale(calcUbTensor, gUbTensor, mOffset, mActualThisSubBlock, nvActual, pingpongFlag);
             AscendC::Cast(vNewDecayUbTensor, calcUbTensor, AscendC::RoundMode::CAST_RINT, elementCount);
             AscendC::PipeBarrier<PIPE_V>();
         }

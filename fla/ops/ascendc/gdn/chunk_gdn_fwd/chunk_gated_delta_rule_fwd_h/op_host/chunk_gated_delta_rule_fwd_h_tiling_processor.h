@@ -106,13 +106,16 @@ public:
         //     与 tile 宽度基本无关（chunk64 2.77us / chunk32 2.44us / chunk32 半 V 2.70us），
         //     所以把 12 个 task 拆成 24 个并不会让每个 chunk 变快。
         //   * 实测：B=1,T=16384,HV=12 时 1247us -> 1384us。
-        // 保留 GDN_FWD_H_VSPLITS 环境变量（1/2/...）用于继续 A/B 和后续多 stream 方案。
+        // 保留 GDN_FWD_H_VSPLITS 环境变量（1/2/4）用于 A/B 与后续多 stream 方案：
+        //   * =2（24 链 / 24 核，一核一链）实测 1384us，空泡没被填掉，净亏；
+        //   * =4（48 链 / 24 核，一核两链）是让第二条链填补 AIC MTE2 空泡的方案，
+        //     blockDim 取 min(aic, batchHeads*vSplits)，任务数 > 核数时调度器自动给每核两个 slot。
         const int64_t batchHeads = (isVariedLen ? tokenBatch : shapeBatch) * ctx_.vNumHead;
         int64_t vSplits = 1;
         if (const char *forcedVSplits = std::getenv("GDN_FWD_H_VSPLITS")) {
             vSplits = std::atoll(forcedVSplits);
         }
-        if (vSplits < 1 || vHeadDim % vSplits != 0 || vSplits > vHeadDim / 64) {
+        if (vSplits < 1 || vHeadDim % vSplits != 0 || vSplits > vHeadDim / 32) {
             vSplits = 1;
         }
         tiling.vSplitCount = vSplits;
