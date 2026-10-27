@@ -195,11 +195,12 @@ struct BlockSchedulerGdnFwdHPreload {
 
     CATLASS_DEVICE
     void InitNewStream(GDNFwdHStreamPreload& newStream) {
-        // taskIdx enumerates (batch, value head, value block); the value block only splits the
-        // V axis and leaves chunk order and the k-head mapping untouched.
+        // taskIdx 按 (batch, value head, value block) 枚举，V 切片是最内层（变化最快的）下标：
+        //   taskIdx = (batchIdx * vNumHead + vHeadIdx) * vSplits + vBlockIdx
+        // V 切片只切 V 轴，不改变 chunk 顺序和 k-head 映射；vSplits == 1 时与旧映射完全相同。
         uint32_t tasksPerBatch = vNumHead * vSplits;
-        newStream.vIdx = taskIdx / (batch * tasksPerBatch);
-        newStream.batchIdx = (taskIdx - newStream.vIdx * batch * tasksPerBatch) / tasksPerBatch;
+        newStream.vIdx = taskIdx % vSplits;
+        newStream.batchIdx = taskIdx / tasksPerBatch;
         newStream.vHeadIdx = (taskIdx / vSplits) % vNumHead;
         newStream.kHeadIdx = newStream.vHeadIdx / headGroups;
         newStream.shapeBatchIdx = isVariedLen ? 0 : newStream.batchIdx;
