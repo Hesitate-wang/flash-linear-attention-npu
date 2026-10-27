@@ -185,6 +185,7 @@ public:
     uint32_t numSeqWorkspaceOffset;
     uint32_t numChunksWorkspaceOffset;
     uint32_t kDecayWorkspaceOffset;
+    uint32_t stateWorkspaceOffset;
     bool useDirectFp32Ub;
 
     AscendC::GlobalTensor<ElementK> gmK;
@@ -199,6 +200,8 @@ public:
     AscendC::GlobalTensor<ElementVWork> gmVWorkspace;
     AscendC::GlobalTensor<ElementV> gmVUpdateWorkspace;
     AscendC::GlobalTensor<ElementHWork> gmHWorkspace;
+    // 连续状态缓冲：Cube 的 W@h 从这里读，避免跨列 tile 访问 h 输出张量。
+    AscendC::GlobalTensor<ElementH> gmState;
     AscendC::GlobalTensor<ElementK> gmKDecayWorkspace;
 
     AscendC::GlobalTensor<int64_t> gmSeqlen;
@@ -244,6 +247,7 @@ public:
         numSeqWorkspaceOffset = gdnFwdHTilingData->numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = gdnFwdHTilingData->numChunksWorkspaceOffset;
         kDecayWorkspaceOffset = gdnFwdHTilingData->kDecayWorkspaceOffset;
+        stateWorkspaceOffset = static_cast<uint32_t>(gdnFwdHTilingData->stateWorkspaceOffset);
         uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
         useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
                           !isVariedLen && chunkSize <= 64 &&
@@ -264,6 +268,7 @@ public:
         gmVUpdateWorkspace.SetGlobalBuffer((__gm__ ElementV *)(user + vUpdateWorkspaceOffset));
         gmHWorkspace.SetGlobalBuffer((__gm__ ElementHWork *)(user + hWorkspaceOffset));
         gmKDecayWorkspace.SetGlobalBuffer((__gm__ ElementK *)(user + kDecayWorkspaceOffset));
+        gmState.SetGlobalBuffer((__gm__ ElementH *)(user + stateWorkspaceOffset));
 
         gmSeqlen.SetGlobalBuffer((__gm__ int64_t *)cu_seqlens);
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
@@ -309,6 +314,7 @@ public:
         numSeqWorkspaceOffset = tilingData.numSeqWorkspaceOffset;
         numChunksWorkspaceOffset = tilingData.numChunksWorkspaceOffset;
         kDecayWorkspaceOffset = tilingData.kDecayWorkspaceOffset;
+        stateWorkspaceOffset = static_cast<uint32_t>(tilingData.stateWorkspaceOffset);
         uint64_t denseTaskCount = static_cast<uint64_t>(shapeBatch) * vNumHead;
         useDirectFp32Ub = std::is_same<ElementVWork, float>::value &&
                           !isVariedLen && chunkSize <= 64 &&
@@ -329,6 +335,7 @@ public:
         gmHWorkspace.SetGlobalBuffer((__gm__ ElementHWork *)(user + hWorkspaceOffset));
         gmGk.SetGlobalBuffer((__gm__ ElementG *)(kGated ? gk : g));
         gmKDecayWorkspace.SetGlobalBuffer((__gm__ ElementK *)(user + kDecayWorkspaceOffset));
+        gmState.SetGlobalBuffer((__gm__ ElementH *)(user + stateWorkspaceOffset));
         gmSeqlen.SetGlobalBuffer((__gm__ int64_t *)cu_seqlens);
         gmNumSeq.SetGlobalBuffer((__gm__ int64_t *)(user + numSeqWorkspaceOffset));
         gmNumChunks.SetGlobalBuffer((__gm__ int64_t *)(user + numChunksWorkspaceOffset));

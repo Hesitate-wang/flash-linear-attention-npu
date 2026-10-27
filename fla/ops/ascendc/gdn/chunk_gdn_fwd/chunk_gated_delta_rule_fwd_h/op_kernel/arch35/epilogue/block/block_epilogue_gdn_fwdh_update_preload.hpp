@@ -81,85 +81,51 @@ public:
     CATLASS_DEVICE
     ~BlockEpilogue() {}
 
-    __simd_vf__ inline void Vec2PreVF(
-        __ubuf__  float* dstAddr, __ubuf__ HElementOutput* srcAddr, float muls,
-        uint32_t count, uint32_t oneRepeatSize, uint16_t repeatOuterTimes, uint16_t repeatInnerTimes
-    ) {
-        static constexpr AscendC::Reg::CastTrait castTraitHalfToFloatZero = {
-            AscendC::Reg::RegLayout::ZERO,
-            AscendC::Reg::SatMode::NO_SAT,
-            AscendC::Reg::MaskMergeMode::ZEROING,
-            AscendC::RoundMode::CAST_NONE
-        };
-        static constexpr AscendC::Reg::CastTrait castTraitHalfToFloatOne = {
-            AscendC::Reg::RegLayout::ONE,
-            AscendC::Reg::SatMode::NO_SAT,
-            AscendC::Reg::MaskMergeMode::ZEROING,
-            AscendC::RoundMode::CAST_NONE
-        };
-
-        AscendC::Reg::RegTensor<HElementOutput> srcReg;
-        AscendC::Reg::RegTensor<float> castReg0;
-        AscendC::Reg::RegTensor<float> castReg1;
-        AscendC::Reg::RegTensor<float> mulsReg0;
-        AscendC::Reg::RegTensor<float> mulsReg1;
-        AscendC::Reg::MaskReg maskFull32 = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
-        AscendC::Reg::MaskReg maskFull16 = AscendC::Reg::CreateMask<half, AscendC::Reg::MaskPattern::ALL>();
-
-        for (uint16_t outIdx = 0; outIdx < repeatOuterTimes; ++outIdx) {
-            for (uint16_t inIdx = 0; inIdx < repeatInnerTimes; ++inIdx) {
-                uint32_t loadOffset = (outIdx * repeatInnerTimes + inIdx) * oneRepeatSize;
-                AscendC::Reg::LoadAlign(srcReg, srcAddr + loadOffset);
-                AscendC::Reg::Cast<float, HElementOutput, castTraitHalfToFloatZero>(castReg0, srcReg, maskFull32);
-                AscendC::Reg::Cast<float, HElementOutput, castTraitHalfToFloatOne>(castReg1, srcReg, maskFull32);
-                AscendC::Reg::Muls(mulsReg0, castReg0, muls, maskFull32);
-                AscendC::Reg::Muls(mulsReg1, castReg1, muls, maskFull32);
-                __ubuf__ float* storeAddr = dstAddr + loadOffset;
-                AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_INTLV_B32>(storeAddr, mulsReg0, mulsReg1, maskFull32);
-            }
+    // 按列切片搬运：rows 行、每行 cols 个元素，源/目的行跨度为 stride。
+    // cols == stride 时退化为一次连续 DataCopy（vSplits == 1 的路径与旧实现一致）。
+    template <typename Element>
+    CATLASS_DEVICE
+    void CopyGmToUb(
+        AscendC::LocalTensor<Element> dst,
+        AscendC::GlobalTensor<Element> src,
+        uint32_t rows,
+        uint32_t cols,
+        uint32_t srcStride)
+    {
+        if (cols == srcStride) {
+            AscendC::DataCopy(dst, src, rows * cols);
+            return;
         }
+        AscendC::DataCopyExtParams copyParams{
+            static_cast<uint16_t>(rows),
+            static_cast<uint32_t>(cols * sizeof(Element)),
+            static_cast<uint32_t>((srcStride - cols) * sizeof(Element)),
+            0,
+            0};
+        AscendC::DataCopyPadExtParams<Element> padParams{false, 0, 0, 0};
+        AscendC::DataCopyPad(dst, src, copyParams, padParams);
     }
 
-    __simd_vf__ inline void Vec2CalcVF(
-        __ubuf__ HElementOutput* ndAddr, __ubuf__  float* src0Addr, __ubuf__ float* src1Addr,
-        uint32_t count, uint32_t oneRepeatSize, uint16_t repeatOuterTimes, uint16_t repeatInnerTimes
-    ) {
-        static constexpr AscendC::Reg::CastTrait castTraitFloatToHalfZero = {
-            AscendC::Reg::RegLayout::ZERO,
-            AscendC::Reg::SatMode::NO_SAT,
-            AscendC::Reg::MaskMergeMode::MERGING,
-            AscendC::RoundMode::CAST_RINT
-        };
-        static constexpr AscendC::Reg::CastTrait castTraitFloatToHalfOne = {
-            AscendC::Reg::RegLayout::ONE,
-            AscendC::Reg::SatMode::NO_SAT,
-            AscendC::Reg::MaskMergeMode::ZEROING,
-            AscendC::RoundMode::CAST_RINT
-        };
-
-        AscendC::Reg::RegTensor<float> srcReg00;
-        AscendC::Reg::RegTensor<float> srcReg01;
-        AscendC::Reg::RegTensor<float> srcReg10;
-        AscendC::Reg::RegTensor<float> srcReg11;
-        AscendC::Reg::RegTensor<float> addReg0;
-        AscendC::Reg::RegTensor<float> addReg1;
-        AscendC::Reg::RegTensor<HElementOutput> castReg;
-        AscendC::Reg::MaskReg maskFull32 = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
-        AscendC::Reg::MaskReg maskFull16 = AscendC::Reg::CreateMask<half, AscendC::Reg::MaskPattern::ALL>();
-
-        for (uint16_t outIdx = 0; outIdx < repeatOuterTimes; ++outIdx) {
-            for (uint16_t inIdx = 0; inIdx < repeatInnerTimes; ++inIdx) {
-                uint32_t loadOffset = (outIdx * repeatInnerTimes + inIdx) * oneRepeatSize;
-                AscendC::Reg::LoadAlign<float, AscendC::Reg::LoadDist::DIST_DINTLV_B32>(srcReg00, srcReg01, src0Addr + loadOffset);
-                AscendC::Reg::LoadAlign<float, AscendC::Reg::LoadDist::DIST_DINTLV_B32>(srcReg10, srcReg11, src1Addr + loadOffset);
-                AscendC::Reg::Add(addReg0, srcReg00, srcReg10, maskFull32);
-                AscendC::Reg::Add(addReg1, srcReg01, srcReg11, maskFull32);
-                AscendC::Reg::Cast<HElementOutput, float, castTraitFloatToHalfOne>(castReg, addReg1, maskFull32);
-                AscendC::Reg::Cast<HElementOutput, float, castTraitFloatToHalfZero>(castReg, addReg0, maskFull32);
-                __ubuf__ HElementOutput* storeAddr = ndAddr + loadOffset;
-                AscendC::Reg::StoreAlign(storeAddr, castReg, maskFull16);
-            }
+    template <typename Element>
+    CATLASS_DEVICE
+    void CopyUbToGm(
+        AscendC::GlobalTensor<Element> dst,
+        AscendC::LocalTensor<Element> src,
+        uint32_t rows,
+        uint32_t cols,
+        uint32_t dstStride)
+    {
+        if (cols == dstStride) {
+            AscendC::DataCopy(dst, src, rows * cols);
+            return;
         }
+        AscendC::DataCopyExtParams copyParams{
+            static_cast<uint16_t>(rows),
+            static_cast<uint32_t>(cols * sizeof(Element)),
+            0,
+            static_cast<uint32_t>((dstStride - cols) * sizeof(Element)),
+            0};
+        AscendC::DataCopyPad(dst, src, copyParams);
     }
 
     CATLASS_DEVICE
@@ -171,6 +137,7 @@ public:
         AscendC::GlobalTensor<float> hUpdateInput,
         uint32_t chunkSize,
         uint32_t kHeadDim,
+        uint32_t vBlockDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube2Done,
         bool isFinalState,
@@ -178,26 +145,22 @@ public:
     )
     {
         uint32_t mActual = kHeadDim;
-        uint32_t nActual = vHeadDim;
+        // 本任务只处理 V 轴的 vBlockDim 列，h / final_state 的行跨度仍是 vHeadDim。
+        uint32_t nActual = vBlockDim;
+        uint32_t stateStride = vHeadDim;
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
         uint32_t mActualPerSubBlock = CeilDiv(mActual, subBlockNum);
         uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
-        uint32_t nOffset = 0;
-        int64_t offsetH = mOffset * nActual + nOffset;
-
-
-        constexpr uint32_t oneRepeatSize = AscendC::GetVecLen() * 2 / sizeof(float);
-        uint16_t repeatOuterTimes = mActualThisSubBlock;
-        uint16_t repeatInnerTimes = vHeadDim / oneRepeatSize;
+        uint32_t elementCount = mActualThisSubBlock * nActual;
+        int64_t offsetH = static_cast<int64_t>(mOffset) * stateStride;
 
         AscendC::ResetMask();
 
         AscendC::GlobalTensor<HElementOutput> hOutputThisSubBlock = hOutput[offsetH];
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
         AscendC::GlobalTensor<HElementInput> hInputThisSubBlock = hInput[offsetH];
-        AscendC::GlobalTensor<float> hUpdateInputThisSubBlock = hUpdateInput[offsetH];
         AscendC::GlobalTensor<FinalStateElement> finalStateThisSubBlock = finalState[offsetH];
 
         uint32_t pingpongFlag = isPing ? 0 : pongBaseEvent;
@@ -206,7 +169,7 @@ public:
         AscendC::LocalTensor<float> glastUbTensor = isPing ? glastUbTensor_ping : glastUbTensor_pong;
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
-        AscendC::DataCopy(hUbTensor, hInputThisSubBlock, mActualThisSubBlock * nActual);
+        CopyGmToUb(hUbTensor, hInputThisSubBlock, mActualThisSubBlock, nActual, stateStride);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
 
         GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
@@ -230,41 +193,41 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
 
-        AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
+        AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE, elementCount);
         AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Muls(calcUbTensor, calcUbTensor, muls, mActualThisSubBlock * nActual);
+        AscendC::Muls(calcUbTensor, calcUbTensor, muls, elementCount);
         AscendC::PipeBarrier<PIPE_V>();
 
         Arch::CrossCoreWaitFlag(cube2Done);
 
+        // h_update 直接来自 Cube C2 写入的 UB（与 hUpdateUbTensor 同址），不再从 GM 读回。
         if (isFinalState) {
             if constexpr(std::is_same<FinalStateElement, float>::value) {
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
-                AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, mActualThisSubBlock * nActual);
+                AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, elementCount);
+                AscendC::PipeBarrier<PIPE_V>();
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0 + pingpongFlag);
-                AscendC::DataCopy(finalStateThisSubBlock, hUpdateUbTensor, mActualThisSubBlock * nActual);
+                CopyUbToGm(finalStateThisSubBlock, hUpdateUbTensor, mActualThisSubBlock, nActual, stateStride);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pingpongFlag);
             } else {
-                Vec2CalcVF(
-                    (__ubuf__ HElementOutput*)hUbTensor.GetPhyAddr(),
-                    (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(), 
-                    mActualThisSubBlock * nActual, oneRepeatSize, repeatOuterTimes, repeatInnerTimes
-                );
+                AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, elementCount);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Cast(hUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, elementCount);
+                AscendC::PipeBarrier<PIPE_V>();
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
-                AscendC::DataCopy(finalStateThisSubBlock, hUbTensor, mActualThisSubBlock * nActual);
+                CopyUbToGm(finalStateThisSubBlock, hUbTensor, mActualThisSubBlock, nActual, stateStride);
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
             }
         } else {
-            Vec2CalcVF(
-                (__ubuf__ HElementOutput*)hUbTensor.GetPhyAddr(),
-                (__ubuf__ float*)calcUbTensor.GetPhyAddr(), (__ubuf__ float*)hUpdateUbTensor.GetPhyAddr(), 
-                mActualThisSubBlock * nActual, oneRepeatSize, repeatOuterTimes, repeatInnerTimes
-            );
+            AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, elementCount);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::Cast(hUbTensor, hUpdateUbTensor, AscendC::RoundMode::CAST_RINT, elementCount);
+            AscendC::PipeBarrier<PIPE_V>();
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2 + pingpongFlag);
-            AscendC::DataCopy(hOutputThisSubBlock, hUbTensor, mActualThisSubBlock * nActual);
+            CopyUbToGm(hOutputThisSubBlock, hUbTensor, mActualThisSubBlock, nActual, stateStride);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
         }
 

@@ -135,6 +135,15 @@ public:
         tiling.numChunksWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>((tokenBatch + 1) * static_cast<int64_t>(sizeof(int64_t))));
 
+        // Contiguous per-core state buffers for the next-chunk state that Cube reads.
+        // Layout: [core][stream][parity][K][vBlockSize], parity ping-pongs so the
+        // Cube read of chunk c and the Vector write of chunk c+1 never overlap.
+        // Sized with sizeof(float) as an upper bound (actual element is 2 bytes).
+        tiling.stateWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
+        workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * GDN_FWD_H_PING_PONG_STAGES *
+                                                       GDN_FWD_H_PING_PONG_STAGES * kHeadDim * vHeadDim *
+                                                       static_cast<int64_t>(sizeof(float))));
+
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
         workspaceSize = workspaceOffset;
 

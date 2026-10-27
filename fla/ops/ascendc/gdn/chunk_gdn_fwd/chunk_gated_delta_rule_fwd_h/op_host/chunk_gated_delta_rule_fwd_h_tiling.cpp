@@ -73,6 +73,7 @@ static void ChunkGatedDeltaRuleFwdHTilingDataPrint(gert::TilingContext *context,
     OP_LOGD(nodeName, "=== isVariedLen: %ld", tiling.get_isVariedLen());
     OP_LOGD(nodeName, "=== shapeBatch: %ld", tiling.get_shapeBatch());
     OP_LOGD(nodeName, "=== tokenBatch: %f", tiling.get_tokenBatch());
+    OP_LOGD(nodeName, "=== vSplitCount: %ld", tiling.get_vSplitCount());
     OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkGatedDeltaRuleFwdH tiling data end <<<<<<<<<<<<<<<<");
 }
 
@@ -173,6 +174,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     OP_LOGD(context->GetNodeName(), "tilingKey: %u (vHeadDim=%ld)", tilingKey, plainTiling.vHeadDim);
 
     context->SetBlockDim(blockDim);
+    OP_LOGD(context->GetNodeName(), "blockDim: %u, vSplitCount: %ld", blockDim, plainTiling.vSplitCount);
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = workspaceSize;
 
@@ -199,6 +201,7 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tiling.set_hWorkspaceOffset(plainTiling.hWorkspaceOffset);
     tiling.set_numSeqWorkspaceOffset(plainTiling.numSeqWorkspaceOffset);
     tiling.set_numChunksWorkspaceOffset(plainTiling.numChunksWorkspaceOffset);
+    tiling.set_stateWorkspaceOffset(plainTiling.stateWorkspaceOffset);
     tiling.set_vSplitCount(plainTiling.vSplitCount);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());

@@ -190,6 +190,8 @@ class GDNFwdHInput:
         torch.npu.set_device(int(sys.argv[15]))
         self.g_dtype = parse_dtype(str(sys.argv[16]))
         self.state_dtype = parse_dtype(str(sys.argv[17]))
+        # 可选第 18 个参数：1 表示用 WY 变换生成 w/u（真实 GDN 输入），0 表示随机 w/u。
+        self.use_wy_input = bool(int(sys.argv[18])) if len(sys.argv) > 18 else False
 
         if self.is_varied_len:
             self.shape_batch = 1
@@ -252,8 +254,52 @@ def gen_seqlen(seqlen, is_varied_len, batch):
     cu_seqlens.append(seqlen)
     return torch.Tensor(cu_seqlens).to(torch.int64)
 
-def gen_wu_data():
-    pass
+def gen_wu_data(h_input, k, g, cu_seqlens=None):
+    """按当前 chunk_size 做 WY 变换，生成算子真正需要的 `w/u`。
+
+    与 `chunk_scaled_dot_kkt` + `solve_tri` + `recompute_w_u_fwd` 的语义一致
+    （g 为 chunk 内局部累计）：
+
+        M[t,s] = beta_t * (k_t·k_s) * exp(g_t - g_s),  s < t
+        A      = inv(I + M)
+        w      = A @ (beta_t * exp(g_t) * k_t)
+        u      = A @ (beta_t * v_t)
+
+    只有 w/u 按同一 chunk 粒度生成，chunk_size=32 与 64 的输出才应当在浮点
+    误差内一致；随机 w/u 是两个不同的函数，不能交叉比较。
+    """
+    shape_batch, hk, T, k_dim = k.shape
+    hv = h_input.v_num_head
+    v_dim = h_input.v_head_dim
+    group = max(hv // hk, 1)
+    chunk = h_input.chunk_size
+    v = torch.randn([shape_batch, hv, T, v_dim], dtype=torch.float32) * 0.05
+    beta = torch.empty([shape_batch, hv, T], dtype=torch.float32).uniform_(0.1, 0.9)
+    w = torch.zeros([shape_batch, hv, T, k_dim], dtype=torch.float32)
+    u = torch.zeros([shape_batch, hv, T, v_dim], dtype=torch.float32)
+    if cu_seqlens is None:
+        ranges = [(0, T)]
+    else:
+        ranges = [(int(cu_seqlens[i]), int(cu_seqlens[i + 1]))
+                  for i in range(len(cu_seqlens) - 1)]
+    eye = torch.eye(chunk, dtype=torch.float32)
+    for b in range(shape_batch):
+        for h in range(hv):
+            src = h // group
+            for start, end in ranges:
+                for s in range(start, end, chunk):
+                    e = min(s + chunk, end)
+                    n = e - s
+                    kc = k[b, src, s:e].float()
+                    vc = v[b, h, s:e]
+                    gc = g[b, h, s:e].float()
+                    bc = beta[b, h, s:e]
+                    m = (kc @ kc.t()) * torch.exp(gc[:, None] - gc[None, :]) * bc[:, None]
+                    m = torch.tril(m, -1)
+                    a = torch.linalg.inv(eye[:n, :n] + m)
+                    w[b, h, s:e] = a @ ((bc * torch.exp(gc))[:, None] * kc)
+                    u[b, h, s:e] = a @ (bc[:, None] * vc)
+    return w.to(h_input.dtype), u.to(h_input.dtype)
 
 def get_cu_offsets(h_input, cu_seqlens):
     if cu_seqlens is None:
@@ -267,12 +313,12 @@ def get_cu_offsets(h_input, cu_seqlens):
     return cu_seqlens, torch.zeros([num_chunks, 2]).to(cu_seqlens.dtype)
 
 def gen_decay_data(h_input, cu_seqlens, chunk_offsets):
-    """沿序列单调递减的累计 gate，与 ATK `_gate` 同分布。
+    """chunk 内局部累计 gate，与 `chunk_local_cumsum` 的语义一致。
 
-    每 token 的 log 衰减增量取 [0.001, 0.011]，按序列（而不是按 chunk）累加：
-    - 逐 chunk 累加会让 g 在 chunk 边界锯齿跳变，且量级到 -350，fp32 下
-      exp(g_last) 直接下溢为 0；
-    - 增量过大会让 q = exp(g_last - g_t) 只覆盖最后一个 token，递推失去意义。
+    每个 chunk 内对原始 log 衰减增量 [0.001, 0.011] 做 cumsum，跨 chunk 不累加：
+    算子与 CPU 参考都用 `exp(g_last)` 表示"本 chunk 内所有 token 的总衰减"，
+    若 g 跨 chunk 继续累加，状态会被重复衰减；旧版 `base(-15..-5) + (-2..0)`
+    还会让 `exp(g_last)≈e^-350` 在 fp32 下直接下溢，且 q 只覆盖最后一个 token。
     """
     g = torch.zeros([h_input.shape_batch, h_input.v_num_head, h_input.seqlen],
                     dtype=torch.float32)
@@ -284,11 +330,10 @@ def gen_decay_data(h_input, cu_seqlens, chunk_offsets):
     for shape_batch_idx in range(h_input.shape_batch):
         for v_head_idx in range(h_input.v_num_head):
             for start, end in ranges:
-                length = end - start
-                if length <= 0:
-                    continue
-                inc = torch.empty([length]).uniform_(0.001, 0.011)
-                g[shape_batch_idx, v_head_idx, start:end] = -torch.cumsum(inc, 0)
+                for chunk_start in range(start, end, h_input.chunk_size):
+                    chunk_end = min(chunk_start + h_input.chunk_size, end)
+                    inc = torch.empty([chunk_end - chunk_start]).uniform_(0.001, 0.011)
+                    g[shape_batch_idx, v_head_idx, chunk_start:chunk_end] = -torch.cumsum(inc, 0)
     return g
 
 def gen_input_data(h_input, rand_wu = True):
@@ -297,14 +342,14 @@ def gen_input_data(h_input, rand_wu = True):
     # 与 ATK `_randn(scale=0.05)` 一致：标准正态会让 h <- D·h + Kᵀq(u - W·h)
     # 的随机放大因子达到 ~1+128σ²，20 个 chunk 后溢出到 1e17，参考和 DUT 都失去意义。
     input_scale = 0.05
+    k = torch.randn([h_input.shape_batch, h_input.k_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype) * input_scale
+    g = gen_decay_data(h_input, cu_seqlens, chunk_offsets)
     if rand_wu:
         w = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype) * input_scale
         u = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen, h_input.v_head_dim], dtype=h_input.dtype) * input_scale
     else:
-        w, u = gen_wu_data()
-    k = torch.randn([h_input.shape_batch, h_input.k_num_head, h_input.seqlen, h_input.k_head_dim], dtype=h_input.dtype) * input_scale
-    # g = torch.randn([h_input.shape_batch, h_input.v_num_head, h_input.seqlen], dtype=torch.float)
-    g = gen_decay_data(h_input, cu_seqlens, chunk_offsets)
+        # 真实 GDN 输入：w/u 由 (k, v, beta, g) 按当前 chunk_size 做 WY 变换得到。
+        w, u = gen_wu_data(h_input, k, g, cu_seqlens)
     if h_input.use_initial_state:
         # 直接生成 canonical [N, HV, K, V]：dense 时 N=shape_batch，变长时 N=token_batch。
         n_seq = h_input.token_batch if h_input.is_varied_len else h_input.shape_batch
@@ -359,7 +404,8 @@ if __name__ == "__main__":
     if gdn_fwd_h_input.use_actual_input:
         input_tensor = parse_actual_input(gdn_fwd_h_input)
     else:
-        input_tensor = gen_input_data(gdn_fwd_h_input)
+        input_tensor = gen_input_data(
+            gdn_fwd_h_input, rand_wu=not gdn_fwd_h_input.use_wy_input)
 
     def _as_int_list(x):
         if x is None:

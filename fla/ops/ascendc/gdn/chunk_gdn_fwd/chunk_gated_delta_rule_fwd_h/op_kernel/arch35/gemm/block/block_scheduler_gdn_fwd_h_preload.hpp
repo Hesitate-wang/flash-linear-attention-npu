@@ -28,6 +28,9 @@ struct GDNFwdHOffsetsPreload {
     uint64_t finalStateOffset{0};
     bool isInitialState{false};
     bool isFinalState{false};
+    // V 轴切片：vBlockOffset 是本次任务在 vHeadDim 内的起始列，vBlockDim 是它的列数。
+    uint32_t vBlockOffset{0};
+    uint32_t vBlockDim{0};
     uint32_t blockTokens{0};
     // for debug
     uint32_t batchIdx{0};
@@ -37,6 +40,7 @@ struct GDNFwdHOffsetsPreload {
 };
 
 struct GDNFwdHStreamPreload {
+    // vIdx 是 V 轴切片的序号（0 <= vIdx < vSplits），不再表示 batch。
     uint32_t vIdx{0};
     uint32_t batchIdx{0};
     uint32_t chunkIdx{0};
@@ -67,6 +71,7 @@ struct BlockSchedulerGdnFwdHPreload {
     uint32_t vHeadDim{0};
     uint32_t chunkSize{0};
     uint32_t vBlockSize{128};
+    uint32_t vSplits{1};
     uint32_t isVariedLen{0};
     uint32_t shapeBatch{0};
     uint32_t tokenBatch{0};
@@ -117,6 +122,13 @@ struct BlockSchedulerGdnFwdHPreload {
         kHeadDim = gdnFwdHTilingData->kHeadDim;
         vHeadDim = gdnFwdHTilingData->vHeadDim;
         chunkSize = gdnFwdHTilingData->chunkSize;
+        // V 轴切片只在 host 需要更多 task 时打开（chunk32 且 batch*HV < AIC 数），
+        // 其余场景 vSplits = 1，vBlockSize 回到 vHeadDim，行为与旧路径一致。
+        vSplits = static_cast<uint32_t>(gdnFwdHTilingData->vSplitCount);
+        if (vSplits == 0 || vHeadDim % vSplits != 0) {
+            vSplits = 1;
+        }
+        vBlockSize = vHeadDim / vSplits;
         isVariedLen = gdnFwdHTilingData->isVariedLen;
         shapeBatch = gdnFwdHTilingData->shapeBatch;
         tokenBatch = gdnFwdHTilingData->tokenBatch;
@@ -183,9 +195,12 @@ struct BlockSchedulerGdnFwdHPreload {
 
     CATLASS_DEVICE
     void InitNewStream(GDNFwdHStreamPreload& newStream) {
-        newStream.vIdx = taskIdx / (batch * vNumHead);
-        newStream.batchIdx = (taskIdx - newStream.vIdx * batch * vNumHead) / vNumHead;
-        newStream.vHeadIdx = taskIdx % vNumHead;
+        // taskIdx enumerates (batch, value head, value block); the value block only splits the
+        // V axis and leaves chunk order and the k-head mapping untouched.
+        uint32_t tasksPerBatch = vNumHead * vSplits;
+        newStream.vIdx = taskIdx / (batch * tasksPerBatch);
+        newStream.batchIdx = (taskIdx - newStream.vIdx * batch * tasksPerBatch) / tasksPerBatch;
+        newStream.vHeadIdx = (taskIdx / vSplits) % vNumHead;
         newStream.kHeadIdx = newStream.vHeadIdx / headGroups;
         newStream.shapeBatchIdx = isVariedLen ? 0 : newStream.batchIdx;
         newStream.tokenBatchIdx = isVariedLen ? newStream.batchIdx : 0;
@@ -203,16 +218,21 @@ struct BlockSchedulerGdnFwdHPreload {
 
         offset.isInitialState = stream.chunkIdx == 0;
         offset.isFinalState = stream.chunkIdx == (stream.batchChunks - 1);
-        offset.initialStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim;
-        offset.finalStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim;
-        offset.hSrcOffset = ((stream.shapeBatchIdx * totalChunks + stream.chunkOffset + stream.chunkIdx) * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim;
+        uint32_t vBlockOffset = stream.vIdx * vBlockSize;
+        uint32_t vBlockDim = vBlockSize;
+        offset.initialStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;
+        offset.finalStateOffset = (stream.batchIdx * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;
+        offset.hSrcOffset = ((stream.shapeBatchIdx * totalChunks + stream.chunkOffset + stream.chunkIdx) * vNumHead + stream.vHeadIdx) * kHeadDim * vHeadDim + vBlockOffset;
         offset.hDstOffset = offset.hSrcOffset + vNumHead * kHeadDim * vHeadDim;
-        offset.uvOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * vHeadDim;
+        offset.uvOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * vHeadDim + vBlockOffset;
         offset.wkOffset = (stream.shapeBatchIdx * kNumHead * totalTokens + stream.kHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * kHeadDim;
         offset.wOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * kHeadDim;
         offset.gOffset = stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize;
-        offset.hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * kHeadDim * vHeadDim;
-        offset.vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * chunkSize * vHeadDim;
+        // C1 的 v_work 与 C2 的 h_work 只保留本切片列，所以 workspace 槽位按 vBlockSize 计。
+        offset.hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * kHeadDim * vBlockSize;
+        offset.vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * chunkSize * vBlockSize;
+        offset.vBlockOffset = vBlockOffset;
+        offset.vBlockDim = vBlockDim;
         offset.blockTokens = offset.isFinalState ? (stream.batchTokens - stream.chunkIdx * chunkSize) : chunkSize;
         offset.batchIdx = stream.batchIdx;
         offset.headIdx = stream.vHeadIdx;

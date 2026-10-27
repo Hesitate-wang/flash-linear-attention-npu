@@ -50,6 +50,8 @@ struct GDNFwdHOffsets {
     uint32_t hWorkOffset;
     uint32_t vWorkOffset;
     uint32_t kDecayWorkOffset;
+    uint32_t stateSrcOffset;
+    uint32_t stateDstOffset;
     uint32_t vBlockOffset;
     uint32_t vBlockDim;
     uint32_t initialStateOffset;
@@ -344,6 +346,15 @@ struct BlockSchedulerGdnFwdH {
         offset.gkOffset = (stream.shapeBatchIdx * vNumHead * totalTokens + stream.vHeadIdx * totalTokens + stream.tokenOffset + stream.chunkIdx * chunkSize) * kHeadDim;
         offset.hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * kHeadDim * vBlockSize;
         offset.vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * chunkSize * vBlockSize;
+        // 连续状态缓冲：[core][stream][parity][K][vBlockSize]，供 Cube 的 W@h 读取。
+        // 当前 chunk 读 parity=c，Vector 把下一个状态写 parity=(c+1)，两者不重叠。
+        {
+            const uint32_t stateStride = kHeadDim * vBlockSize;
+            const uint32_t stateBase =
+                (cubeCoreIdx * PING_PONG_STAGES + streamId) * PING_PONG_STAGES * stateStride;
+            offset.stateSrcOffset = stateBase + (stream.chunkIdx & 1u) * stateStride;
+            offset.stateDstOffset = stateBase + ((stream.chunkIdx + 1u) & 1u) * stateStride;
+        }
         offset.kDecayWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + streamId) * chunkSize * kHeadDim;
         offset.vBlockOffset = vBlockOffset;
         offset.vBlockDim = vBlockDim;
