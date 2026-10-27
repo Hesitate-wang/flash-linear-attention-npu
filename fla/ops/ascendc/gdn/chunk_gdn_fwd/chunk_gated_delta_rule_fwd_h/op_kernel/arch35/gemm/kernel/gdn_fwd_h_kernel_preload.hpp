@@ -440,8 +440,10 @@ public:
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pongBaseEvent);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1); // preset u
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1); // preset u 输出缓冲
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pongBaseEvent);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1); // preset u 输入缓冲
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pongBaseEvent);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2); // preset h
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pongBaseEvent);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3); // preset g
@@ -507,8 +509,10 @@ public:
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0 + pongBaseEvent);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1); // preset u
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1); // preset u 输出缓冲
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pongBaseEvent);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1); // preset u 输入缓冲
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pongBaseEvent);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2); // preset h
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pongBaseEvent);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3); // preset g

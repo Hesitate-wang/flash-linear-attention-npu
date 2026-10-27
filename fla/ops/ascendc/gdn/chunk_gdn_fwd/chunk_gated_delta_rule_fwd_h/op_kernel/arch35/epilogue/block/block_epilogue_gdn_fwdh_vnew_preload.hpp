@@ -70,7 +70,7 @@ public:
 
         calcUbTensor = resource.ubBuf.template GetBufferByByte<float>(CALC_BUF_OFFSET);
 
-        uUbTensor_ping = resource.ubBuf.template GetBufferByByte<UElementInput>(PING_BUF_2_OFFSET);
+        uUbTensor_ping = resource.ubBuf.template GetBufferByByte<UElementInput>(PING_BUF_1_OFFSET);
         wsUbTensor_ping = resource.ubBuf.template GetBufferByByte<float>(PING_BUF_0_OFFSET);
         gUbTensor_ping = resource.ubBuf.template GetBufferByByte<float>(PING_G_BUF_OFFSET);
         gLastUbTensor_ping = resource.ubBuf.template GetBufferByByte<float>(PING_G_SUB_BUF_OFFSET);
@@ -78,7 +78,7 @@ public:
         vNewOutputUbTensor_ping = resource.ubBuf.template GetBufferByByte<VElementOutput>(PING_BUF_2_OFFSET);
         vNewDecayUbTensor_ping = resource.ubBuf.template GetBufferByByte<VElementOutput>(PING_BUF_2_OFFSET);
 
-        uUbTensor_pong = resource.ubBuf.template GetBufferByByte<UElementInput>(PONG_BUF_2_OFFSET);
+        uUbTensor_pong = resource.ubBuf.template GetBufferByByte<UElementInput>(PONG_BUF_1_OFFSET);
         wsUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(PONG_BUF_0_OFFSET);
         gUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(PONG_G_BUF_OFFSET);
         gLastUbTensor_pong = resource.ubBuf.template GetBufferByByte<float>(PONG_G_SUB_BUF_OFFSET);
@@ -243,6 +243,20 @@ public:
         AscendC::DataCopyPad(dst, src, copyParams);
     }
 
+    // 把 src 的第一个元素广播成 count 个元素写到 dst：用寄存器广播代替"V→S 读标量→S→V"的往返。
+    // src 只读一个 32B 块（会读过尾，调用方需保证仍在 UB 内）。
+    __simd_vf__ inline void BroadcastLastElement(
+        __ubuf__ float* dstAddr, __ubuf__ float* srcAddr, uint32_t count)
+    {
+        constexpr uint32_t fp32PerReg = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+        AscendC::Reg::RegTensor<float> brcReg;
+        AscendC::Reg::MaskReg maskFull = AscendC::Reg::CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+        AscendC::Reg::LoadAlign<float, AscendC::Reg::LoadDist::DIST_BRC_B32>(brcReg, srcAddr);
+        for (uint32_t offset = 0; offset < count; offset += fp32PerReg) {
+            AscendC::Reg::StoreAlign<float, AscendC::Reg::StoreDist::DIST_NORM_B32>(dstAddr + offset, brcReg, maskFull);
+        }
+    }
+
     // 逐行乘 exp(g_last - g_t)：matrix 是 rows x cols 的紧凑 UB 块，rowScale 从 rowScaleOffset 行开始。
     // 列宽是 64（一个 FP32 寄存器）的整数倍时走 dual-issue VF；窄列（V 切 4 份时 32 列）逐行 Muls，
     // 因为 VF 用整寄存器访存，32 列会读写到下一行。
@@ -333,12 +347,10 @@ public:
         AscendC::LocalTensor<VElementOutput> vNewDecayUbTensor = isPing ? vNewDecayUbTensor_ping : vNewDecayUbTensor_pong;
 
 
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pingpongFlag); // wait v_c2
+        // u 与 g 的载入互不依赖：先一起下发，再分别等完成，避免两次 DMA 延迟串行。
+        // u 独占 PING/PONG_BUF_1，不再与 v_new 输出缓冲同址，载入不必等上一 chunk 的搬出。
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag); // u 缓冲可复用
         CopyGmToUb(uUbTensor, uInputThisSubBlock, mActualThisSubBlock, nvActual, inputStride); // mte2 u
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag); // set u
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag); // wait u
-        AscendC::Cast(calcUbTensor, uUbTensor, AscendC::RoundMode::CAST_NONE, elementCount); // cast u
-
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag); // wait last g
         if constexpr(std::is_same<GElementInput, float>::value) {
             AscendC::DataCopyParams gUbParams{1, (uint16_t)(mActual * sizeof(float)), 0, 0};
@@ -349,20 +361,20 @@ public:
             AscendC::DataCopyPadParams gUbPadParams{false, 0, 0, 0};
             AscendC::DataCopyPad(gInputUbTensor, gInputThisSubBlock, gUbParams, gUbPadParams);
         }
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag); // set u
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID3 + pingpongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag); // wait u
+        AscendC::Cast(calcUbTensor, uUbTensor, AscendC::RoundMode::CAST_NONE, elementCount); // cast u
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag); // u 读过，下次可覆盖
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID3 + pingpongFlag);
         if constexpr(!std::is_same<GElementInput, float>::value) {
             AscendC::Cast(gUbTensor, gInputUbTensor, AscendC::RoundMode::CAST_NONE, mActual);
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID3 + pingpongFlag);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID3 + pingpongFlag);
-        float inputVal = gUbTensor.GetValue(mActual-1);
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
-
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::Duplicate<float>(gLastUbTensor, inputVal, mActual);
+        // g 的最后一个元素用寄存器广播展开，省掉 V→S→V 的标量往返。
+        BroadcastLastElement(
+            (__ubuf__ float*)gLastUbTensor.GetPhyAddr(),
+            (__ubuf__ float*)gUbTensor[mActual - 1].GetPhyAddr(), mActual);
         AscendC::PipeBarrier<PIPE_V>();
 
         AscendC::Sub<float>(gUbTensor, gLastUbTensor, gUbTensor, mActual);
@@ -408,6 +420,9 @@ public:
 
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1 + pingpongFlag);
+        // v_new 输出缓冲在本次调用末尾才写；这里才等上一 chunk 的搬出完成，
+        // 让开头两次载入不必等它。
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1 + pingpongFlag);
         if (useSimdVf) {
             Vec1PostVF(
                 (__ubuf__ VElementOutput*)vNewOutputUbTensor.GetPhyAddr(),
