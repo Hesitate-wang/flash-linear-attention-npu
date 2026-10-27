@@ -480,6 +480,8 @@ public:
 
                         if (vecBlockScheduler.NeedProcessStage2(stream)) {
                             // step 4:  h[i+1] += h_work if i < num_chunks - 1 else None
+                            // 一核一 task 时 i 与物理 stream 固定对应，h[c] 可以留在 UB 里跨 chunk 复用，
+                            // 只有链首需要从 GM 载入；多 task 时调度器会轮转 head，必须每 chunk 重新载入。
                             epilogueGDNFwdHUpdate(
                                 gmH[vec2Offsets.hDstOffset], gmFinalState[vec2Offsets.finalStateOffset],
                                 gmG[vec2Offsets.gOffset],
@@ -487,6 +489,7 @@ public:
                                 gmHWorkspace[vec2Offsets.hWorkOffset],
                                 vec2Offsets.blockTokens, kHeadDim, vec2Offsets.vBlockDim, vHeadDim,
                                 vecBlockScheduler.cube2Done,
+                                vec2Offsets.isInitialState || vecBlockScheduler.taskSlotsPerCore > 1,
                                 vec2Offsets.isFinalState, (i == 0)
                             );
                         } else {

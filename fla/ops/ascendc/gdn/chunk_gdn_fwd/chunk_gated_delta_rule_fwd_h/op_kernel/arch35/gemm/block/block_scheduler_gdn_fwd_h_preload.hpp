@@ -82,6 +82,9 @@ struct BlockSchedulerGdnFwdHPreload {
 
     uint32_t taskIdx{0};
     uint32_t taskLoops{0};
+    // 每个核同时持有的 task（stream）数：1 时 i 下标与物理 stream 一一对应，UB 里的跨 chunk 状态可复用；
+    // 2 时调度器会轮转 head，i 与物理 stream 的对应关系会变，内核必须回退成每 chunk 重新载入。
+    uint32_t taskSlotsPerCore{1};
     uint32_t cubeCoreIdx{0};
     uint32_t cubeCoreNum{0};
     uint32_t vLoops{0};
@@ -174,6 +177,7 @@ struct BlockSchedulerGdnFwdHPreload {
         hasDummyHead = (taskNum % (PING_PONG_STAGES * cubeCoreNum) <= cubeCoreNum) && (taskNum % (PING_PONG_STAGES * cubeCoreNum) > 0);
         taskLoops = (taskNum + cubeCoreNum * PING_PONG_STAGES - 1) / (cubeCoreNum * PING_PONG_STAGES);
         uint32_t maxTaskCntPerLoop = taskNum > cubeCoreNum ? PING_PONG_STAGES : 1;
+        taskSlotsPerCore = maxTaskCntPerLoop;
         curLoopTaskBegin = cubeCoreIdx * maxTaskCntPerLoop;
         uint32_t lastLoopTaskBegin = curLoopTaskBegin + (taskLoops - 1) * maxTaskCntPerLoop * cubeCoreNum;
         if (lastLoopTaskBegin >= taskNum) {

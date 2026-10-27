@@ -210,6 +210,7 @@ public:
         uint32_t vBlockDim,
         uint32_t vHeadDim,
         Arch::CrossCoreFlag cube2Done,
+        bool needHLoad,
         bool isFinalState,
         bool isPing
     )
@@ -225,6 +226,8 @@ public:
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
         uint32_t elementCount = mActualThisSubBlock * nActual;
         int64_t offsetH = static_cast<int64_t>(mOffset) * stateStride;
+        // needHLoad=false 时 h[c] 直接复用本 UB 缓冲里上一个 chunk 写下的 h（见调用点：
+        // isInitialState 或 stream 槽位不稳定时才置 true）。h 输出/最终状态照旧写 GM。
 
         AscendC::ResetMask();
 
@@ -239,8 +242,10 @@ public:
         AscendC::LocalTensor<float> glastUbTensor = isPing ? glastUbTensor_ping : glastUbTensor_pong;
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2 + pingpongFlag);
-        CopyGmToUb(hUbTensor, hInputThisSubBlock, mActualThisSubBlock, nActual, stateStride);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+        if (needHLoad) {
+            CopyGmToUb(hUbTensor, hInputThisSubBlock, mActualThisSubBlock, nActual, stateStride);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+        }
 
         GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
         float gLastFloat = 0.0f;
@@ -261,8 +266,9 @@ public:
         float muls = glastUbTensor.GetValue(0);
         AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID3 + pingpongFlag);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
-
+        if (needHLoad) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2 + pingpongFlag);
+        }
         AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE, elementCount);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Muls(calcUbTensor, calcUbTensor, muls, elementCount);
