@@ -166,6 +166,19 @@ dense、g-only、无 initial/final）：
 2. **4 个 `BlockMmadTla` 实例共用同一段 L1/L0 起点**（每个阶段只用其一），
    初始化 flag 由各自构造函数置位、析构函数等待，计数平衡；与参考实现的 4 实例做法一致。
 
+### 5.7.1 首次设备编译修复（2026-10-29）
+
+设备侧首轮编译报出的 3 类错误，已修。三条都是“本仓其他 kernel 从未用过，所以没先例可抄”：
+
+| 错误 | 原因 | 修复 |
+| --- | --- | --- |
+| `use of undeclared identifier 'INPUT_TYPE' / 'G_TYPE' / 'STATE_TYPE'` | UB 尺寸的 `static_assert` 写在了 `namespace GDN` 作用域，而这三个是类模板参数 | 移到 `GDNFwdHCPKernel` 类内 |
+| `use of undeclared identifier 'expf'` | 设备编译单元里没有标量 `expf`；本仓所有 gate 计算都走向量 `Exp` | 新增 `ChunkDecay()`：`Duplicate` 一个 32 B 块 → `Exp` → `V_S` 同步后 `GetValue(0)` |
+| `no member named 'CeilDiv' in namespace 'Catlass'` | `catlass/detail/alignment.hpp` **整个文件没有 namespace**，`RoundUp/CeilDiv/Max/Min` 都在全局作用域；且 `regbase.hpp` 在全局 `using namespace AscendC::MicroAPI`，无歧义的非限定查找也不可靠 | 在 kernel 内自定义 `CpMin` / `CpCeilDiv`，不再依赖 Catlass 的这两个名字 |
+
+**给下一个会话的教训**：本仓 `Catlass::Min` / `Catlass::CeilDiv` 从来不存在（旧版 CP 代码里也
+是错的，只是从未编译）；设备核里不要假设标量 `<math.h>` 可用。
+
 ## 6. 风险与回退
 
 | 风险 | 触发 | 回退 |

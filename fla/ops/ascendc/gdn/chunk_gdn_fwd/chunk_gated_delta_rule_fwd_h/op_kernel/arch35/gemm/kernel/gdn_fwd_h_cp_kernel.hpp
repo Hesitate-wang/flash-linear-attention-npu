@@ -41,7 +41,7 @@
  *
  * Row scaling / row subtraction / the phase-2 bias add are register-base loops
  * (`CpDetail`), so a tile costs rows * (V_DIM / FP32_PER_REG) vector issues instead of
- * three tiny calls plus a scalar expf and a GM scalar read per row.
+ * three tiny calls plus a scalar exp and a GM scalar read per row.
  *
  * All summaries, the prefix and the rolling state are FP32; the FP32 GEMM uses
  * `Common::MmadPingpong<Ascend950, ..., USE_HF32_MODE=false>` (native IEEE FP32).
@@ -143,12 +143,22 @@ static constexpr uint32_t UB_G_IN = 240 * 1024;       // 512 B
 static constexpr uint32_t UB_G_F = 240 * 1024 + 512;  // 512 B
 static constexpr uint32_t UB_Q = 241 * 1024;          // 512 B
 static constexpr uint32_t UB_Q_NEG = 241 * 1024 + 512;
-// The size labels above assume the op's registered dtypes: INPUT_TYPE is bf16/fp16 (2 B)
-// and STATE_TYPE is float/bf16 (<= 4 B). A wider INPUT_TYPE would make a few of the
-// per-phase regions overlap, so fail the build rather than corrupt UB silently.
-static_assert(sizeof(INPUT_TYPE) <= 2, "CP UB layout assumes a 2-byte input dtype.");
-static_assert(sizeof(STATE_TYPE) <= 4, "CP UB layout assumes STATE_TYPE is at most FP32.");
-static_assert(sizeof(G_TYPE) <= 4, "CP UB gate scratch assumes G_TYPE is at most FP32.");
+static constexpr uint32_t UB_DECAY = 242 * 1024;      // 512 B
+static constexpr uint32_t kCpVecLen = 8;              // one 32 B vector block
+
+// Integer helpers. `catlass/detail/alignment.hpp` declares Min/CeilDiv in the *global*
+// namespace (the file has no namespace at all), and `kernel_utils/vector/regbase.hpp`
+// pulls in `using namespace AscendC::MicroAPI;`, so neither `Catlass::`-qualified nor
+// unqualified use is safe here. These two are local and unambiguous.
+__aicore__ inline uint32_t CpMin(uint32_t a, uint32_t b)
+{
+    return a < b ? a : b;
+}
+
+__aicore__ inline uint32_t CpCeilDiv(uint32_t a, uint32_t b)
+{
+    return (a + b - 1) / b;
+}
 
 // ---------------------------------------------------------------------------
 // Register-base helpers for row scaling / row subtraction on a strided tile.
@@ -373,6 +383,12 @@ public:
     static constexpr uint32_t ROW_DIM = 2 * V_DIM;
     static_assert(K_DIM == 128 && V_DIM == 128,
                   "CP path layout constants assume K = V = 128; update the route first.");
+    // The UB_* size labels assume the op's registered dtypes: INPUT_TYPE is bf16/fp16 (2 B)
+    // and STATE_TYPE is float/bf16 (<= 4 B). A wider INPUT_TYPE would make a few of the
+    // per-phase regions overlap, so fail the build rather than corrupt UB silently.
+    static_assert(sizeof(INPUT_TYPE) <= 2, "CP UB layout assumes a 2-byte input dtype.");
+    static_assert(sizeof(STATE_TYPE) <= 4, "CP UB layout assumes STATE_TYPE is at most FP32.");
+    static_assert(sizeof(G_TYPE) <= 4, "CP UB gate scratch assumes G_TYPE is at most FP32.");
 
     static constexpr uint32_t SCR_X = 0;                             // [128, 256] M|S
     static constexpr uint32_t SCR_H0 = SCR_X + K_DIM * ROW_DIM;      // [128, 128] H0 / S_in
@@ -446,7 +462,7 @@ public:
         rank = blockIdx;
         const uint32_t base = totalChunks / rankCount;
         const uint32_t rem = totalChunks % rankCount;
-        chunkBegin = rank * base + Catlass::Min(rank, rem);
+        chunkBegin = rank * base + CpMin(rank, rem);
         chunkEnd = chunkBegin + base + (rank < rem ? 1U : 0U);
 
         gmK.SetGlobalBuffer(reinterpret_cast<__gm__ INPUT_TYPE *>(k));
@@ -494,12 +510,28 @@ public:
 
     __aicore__ inline uint32_t ChunkTokens(uint32_t chunk) const
     {
-        return Catlass::Min(chunkSize, seqlen - chunk * chunkSize);
+        return CpMin(chunkSize, seqlen - chunk * chunkSize);
     }
 
     __aicore__ inline float LoadG(uint32_t b, uint32_t hv, uint64_t token) const
     {
         return CpToFloat<G_TYPE>(gmG.GetValue(HvOffset(b, hv, token, 1)));
+    }
+
+    // exp(g_last) as a scalar. The device compiler has no scalar expf (the whole op tree
+    // computes gates on the vector unit), so evaluate it over one 32 B vector block and
+    // read element 0 back after a V->S handshake.
+    __aicore__ inline float ChunkDecay(uint32_t b, uint32_t hv, uint64_t tokenBase,
+                                       uint32_t tokens)
+    {
+        auto ubTmp = resource.ubBuf.template GetBufferByByte<float>(UB_DECAY);
+        AscendC::Duplicate(ubTmp, LoadG(b, hv, tokenBase + tokens - 1), kCpVecLen);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Exp(ubTmp, ubTmp, kCpVecLen);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        return ubTmp.GetValue(0);
     }
 
     // The Catlass::Arch cross-core wrappers only accept a CrossCoreFlag object, so the
@@ -536,7 +568,7 @@ public:
     // Rows each AIV sub-block owns when the Fixpipe splits an M-row tile.
     __aicore__ inline uint32_t RowsPerSubBlock(uint32_t rows) const
     {
-        return Catlass::CeilDiv(rows, kCpVecNum);
+        return CpCeilDiv(rows, kCpVecNum);
     }
 
     // One mmad call that hands the L0C accumulator to the two AIV sub-blocks through the
@@ -814,7 +846,7 @@ public:
             const uint32_t tokens = ChunkTokens(chunk);
             const uint32_t rowsPerSubBlock = RowsPerSubBlock(tokens);
             const uint32_t rowBegin = AscendC::GetSubBlockIdx() * rowsPerSubBlock;
-            const uint32_t rowEnd = Catlass::Min(rowBegin + rowsPerSubBlock, tokens);
+            const uint32_t rowEnd = CpMin(rowBegin + rowsPerSubBlock, tokens);
             PrepareOperands(b, hv, chunk, rowBegin, rowEnd);
             AivSetToAic(kCpFlagOperand);
             AivSetUbFree();   // slot free for GEMM-A
@@ -909,7 +941,7 @@ public:
         const uint64_t scr = ScratchBase();
         const uint32_t tokens = ChunkTokens(chunk);
         const uint64_t tokenBase = static_cast<uint64_t>(chunk) * chunkSize;
-        const float decay = expf(LoadG(b, hv, tokenBase + tokens - 1));
+        const float decay = ChunkDecay(b, hv, tokenBase, tokens);
         const uint32_t begin = AscendC::GetSubBlockIdx() * (K_DIM / 2);
         const uint32_t rows = K_DIM / 2;
         auto ubX = resource.ubBuf.template GetBufferByByte<float>(UB_P1_X);
@@ -1056,7 +1088,7 @@ public:
             const uint64_t tokenBase = static_cast<uint64_t>(chunk) * chunkSize;
             const uint32_t rowsPerSubBlock = RowsPerSubBlock(tokens);
             const uint32_t rowBegin = subBlock * rowsPerSubBlock;
-            const uint32_t rowEnd = Catlass::Min(rowBegin + rowsPerSubBlock, tokens);
+            const uint32_t rowEnd = CpMin(rowBegin + rowsPerSubBlock, tokens);
 
             AivSetUbFree();   // slot free for C1
             AivWaitFromAic(kCpFlagC1Done);
@@ -1109,7 +1141,7 @@ public:
         const uint64_t scr = ScratchBase();
         const uint32_t tokens = ChunkTokens(chunk);
         const uint64_t tokenBase = static_cast<uint64_t>(chunk) * chunkSize;
-        const float decay = expf(LoadG(b, hv, tokenBase + tokens - 1));
+        const float decay = ChunkDecay(b, hv, tokenBase, tokens);
         const uint32_t begin = AscendC::GetSubBlockIdx() * (K_DIM / 2);
         const uint32_t rows = K_DIM / 2;
         auto ubS = resource.ubBuf.template GetBufferByByte<float>(UB_P3_S);
