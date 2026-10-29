@@ -15,6 +15,7 @@
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "arch35/gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
+#include "arch35/gemm/kernel/gdn_fwd_h_cp_kernel.hpp"
 #else
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "gemm/kernel/gdn_fwd_h_kernel_preload.hpp"
@@ -128,6 +129,47 @@ __aicore__ inline void ChunkGatedDeltaRuleFwdHDispatch(GM_ADDR k, GM_ADDR w, GM_
     }
 }
 
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+template <typename DataT, typename StateT>
+__aicore__ inline void ChunkGatedDeltaRuleFwdHCPDispatchGate(
+    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR inital_state,
+    GM_ADDR h, GM_ADDR v_new, GM_ADDR final_state, GM_ADDR tiling, GM_ADDR user,
+    int64_t gateDataType)
+{
+    constexpr int64_t DTYPE_BF16 = 1;
+    constexpr int64_t DTYPE_FP32 = 2;
+    if (gateDataType == DTYPE_FP32) {
+        GDN::ChunkGatedDeltaRuleFwdHCPImpl<DataT, float, StateT>(
+            k, w, u, g, inital_state, h, v_new, final_state, tiling, user);
+    } else if (gateDataType == DTYPE_BF16) {
+        GDN::ChunkGatedDeltaRuleFwdHCPImpl<DataT, bfloat16_t, StateT>(
+            k, w, u, g, inital_state, h, v_new, final_state, tiling, user);
+    } else {
+        GDN::ChunkGatedDeltaRuleFwdHCPImpl<DataT, half, StateT>(
+            k, w, u, g, inital_state, h, v_new, final_state, tiling, user);
+    }
+}
+
+template <typename DataT>
+__aicore__ inline void ChunkGatedDeltaRuleFwdHCPDispatch(
+    GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g, GM_ADDR inital_state,
+    GM_ADDR h, GM_ADDR v_new, GM_ADDR final_state, GM_ADDR tiling, GM_ADDR user)
+{
+    __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict tilingData =
+        reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
+    constexpr int64_t DTYPE_FP32 = 2;
+    if (tilingData->stateDataType == DTYPE_FP32) {
+        ChunkGatedDeltaRuleFwdHCPDispatchGate<DataT, float>(
+            k, w, u, g, inital_state, h, v_new, final_state, tiling, user,
+            tilingData->gDataType);
+    } else {
+        ChunkGatedDeltaRuleFwdHCPDispatchGate<DataT, DataT>(
+            k, w, u, g, inital_state, h, v_new, final_state, tiling, user,
+            tilingData->gDataType);
+    }
+}
+#endif
+
 } // namespace GDN
 
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g,
@@ -145,5 +187,11 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
         KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::ChunkGatedDeltaRuleFwdHDispatch<Catlass::Gemm::Kernel::GDNFwdHTileShapes256, 256>(
             k, w, u, g, gk, inital_state, cu_seqlens, chunk_indices, h, v_new, final_state, tiling, user);
+    } else if (TILING_KEY_IS(3)) {
+        KERNEL_TASK_TYPE(3, KERNEL_TYPE_MIX_AIC_1_2);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+        GDN::ChunkGatedDeltaRuleFwdHCPDispatch<DTYPE_K>(
+            k, w, u, g, inital_state, h, v_new, final_state, tiling, user);
+#endif
     }
 }

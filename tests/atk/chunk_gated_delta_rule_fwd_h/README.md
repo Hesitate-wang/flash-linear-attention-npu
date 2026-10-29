@@ -9,7 +9,7 @@
 - `h` 输出为 `[B,Nc,HV,K,V]`，`state_v_first=true` 时末两维为 `[V,K]`；`initial_state/final_state` 同样受 `state_v_first` 解释。
 - `k/w/u` 的 `B`、`T` 必须一致；`u` 的 `HV` 必须大于等于 `HK` 且 `HV % HK == 0`（`w` 亦为 HV，故 GVA 时 `w` 的 head 数与 `u` 相同）。
 - `k/w/u/h/v_new` 支持 `BFLOAT16/FLOAT16`；gate 支持 `FLOAT/FLOAT16/BFLOAT16`，state 支持 `FLOAT/BFLOAT16/FLOAT16`。
-- `V` 支持 `128/256`，常规路径支持 `chunk_size=64/128`；Ascend 950 的 CP 路径另支持 dense 定长 `K=V=128, chunk_size=32`，且要求 `B*HV <= total AIC core count`。chunk32 不支持变长或回退。
+- `V` 支持 `128/256`，chunk_size 支持 32/64/128。Ascend 950 上，dense、g-only、`K=V=128`、`B*HV <= AIC 核数` 且未开启 `GDN_FWD_H_VSPLITS` 的输入走 chunk 并行路径（TilingKey 3，chunk32/64/128 均支持）；其余走链并行路径（TilingKey 1/2）。chunk32 仅 Ascend 950、dense 定长；CP 路径不支持 gk 与变长，`GDN_FWD_H_CP=0` 可强制回退。
 - `cu_seqlens/chunk_indices` 变长模式仍仅限 chunk64/128。
 - 当前 ATK 用例遵循上述约束，并通过 `case_spec` 固定具体取值；扩展用例时应继续满足这些限制。
 

@@ -51,6 +51,12 @@ struct ChunkGatedDeltaRuleFwdHTilingDataRaw {
     int64_t numChunksWorkspaceOffset;
     int64_t stateWorkspaceOffset;
     int64_t vSplitCount;
+    // Chunk-parallel (CP) path (TilingKey 3). cpRankCount == 0 means the path is off.
+    int64_t cpRankCount;
+    int64_t cpSummaryOffset;
+    int64_t cpScratchOffset;
+    int64_t cpSummaryStride;
+    int64_t cpScratchStride;
 };
 
 #endif // CHUNK_GATED_DELTA_RULE_FWD_H_STRUCT_H

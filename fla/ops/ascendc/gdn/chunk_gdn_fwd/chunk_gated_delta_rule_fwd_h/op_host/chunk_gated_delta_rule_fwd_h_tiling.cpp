@@ -51,6 +51,7 @@ static constexpr size_t ATTR_LOGICAL_V_DIM_IDX = 7;
 
 static constexpr uint32_t TILING_KEY_V128 = 1;
 static constexpr uint32_t TILING_KEY_V256 = 2;
+static constexpr uint32_t TILING_KEY_CP = 3;
 static constexpr int64_t V_DIM_128 = 128;
 static constexpr int64_t V_DIM_256 = 256;
 
@@ -74,6 +75,9 @@ static void ChunkGatedDeltaRuleFwdHTilingDataPrint(gert::TilingContext *context,
     OP_LOGD(nodeName, "=== shapeBatch: %ld", tiling.get_shapeBatch());
     OP_LOGD(nodeName, "=== tokenBatch: %f", tiling.get_tokenBatch());
     OP_LOGD(nodeName, "=== vSplitCount: %ld", tiling.get_vSplitCount());
+    OP_LOGD(nodeName, "=== cpRankCount: %ld", tiling.get_cpRankCount());
+    OP_LOGD(nodeName, "=== cpSummaryOffset: %ld", tiling.get_cpSummaryOffset());
+    OP_LOGD(nodeName, "=== cpScratchOffset: %ld", tiling.get_cpScratchOffset());
     OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkGatedDeltaRuleFwdH tiling data end <<<<<<<<<<<<<<<<");
 }
 
@@ -169,9 +173,12 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     ChunkGatedDeltaRuleFwdHTilingProcessor processor(tilingCtx);
     processor.Process(plainTiling, blockDim, workspaceSize);
 
-    uint32_t tilingKey = plainTiling.vHeadDim > V_DIM_128 ? TILING_KEY_V256 : TILING_KEY_V128;
+    uint32_t tilingKey = plainTiling.cpRankCount > 0
+                             ? TILING_KEY_CP
+                             : (plainTiling.vHeadDim > V_DIM_128 ? TILING_KEY_V256 : TILING_KEY_V128);
     context->SetTilingKey(tilingKey);
-    OP_LOGD(context->GetNodeName(), "tilingKey: %u (vHeadDim=%ld)", tilingKey, plainTiling.vHeadDim);
+    OP_LOGD(context->GetNodeName(), "tilingKey: %u (vHeadDim=%ld, cpRankCount=%ld)", tilingKey,
+            plainTiling.vHeadDim, plainTiling.cpRankCount);
 
     context->SetBlockDim(blockDim);
     OP_LOGD(context->GetNodeName(), "blockDim: %u, vSplitCount: %ld", blockDim, plainTiling.vSplitCount);
@@ -203,6 +210,11 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdH(gert::TilingContext *context)
     tiling.set_numChunksWorkspaceOffset(plainTiling.numChunksWorkspaceOffset);
     tiling.set_stateWorkspaceOffset(plainTiling.stateWorkspaceOffset);
     tiling.set_vSplitCount(plainTiling.vSplitCount);
+    tiling.set_cpRankCount(plainTiling.cpRankCount);
+    tiling.set_cpSummaryOffset(plainTiling.cpSummaryOffset);
+    tiling.set_cpScratchOffset(plainTiling.cpScratchOffset);
+    tiling.set_cpSummaryStride(plainTiling.cpSummaryStride);
+    tiling.set_cpScratchStride(plainTiling.cpScratchStride);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

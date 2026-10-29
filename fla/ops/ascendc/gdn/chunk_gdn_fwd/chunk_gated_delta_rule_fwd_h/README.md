@@ -87,8 +87,11 @@ aclnnStatus aclnnChunkGatedDeltaRuleFwdHGetWorkspaceSize(
 
 - A2/A3/A5。
 - FP16/BF16 数据路径，gate 支持 FP16/BF16/FP32，状态支持 FP16/BF16/FP32。
-- V=128/256，chunk_size=32/64/128；`chunk_size=32` 仅 Ascend 950、dense 定长、`K=V=128`，
-  与其它 chunk 走同一条 Cube/Vector 路径，并按 V 维切分到多核（每核至少 64 列）。
+- V=128/256，chunk_size=32/64/128；`chunk_size=32` 仅 Ascend 950、dense 定长、`K=V=128`。
+- Ascend 950 上，dense、g-only、`K=V=128`、`B*HV <= AIC 核数` 且未开启
+  `GDN_FWD_H_VSPLITS` 的输入走 chunk 并行路径（TilingKey 3，task 内按 chunk 轴分
+  rank、两遍扫描）；其余输入走链并行 / V 维切分路径（TilingKey 1/2）。
+  `GDN_FWD_H_CP=0` 可强制回退链并行。
 - dense 与 `cu_seqlens/chunk_indices` 变长模式。
 - `state_v_first` true/false。
 

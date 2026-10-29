@@ -38,6 +38,9 @@ static constexpr int64_t GDN_FWD_H_DTYPE_FP32 = 2;
 static constexpr size_t GDN_FWD_H_WORKSPACE_RSV_BYTE = 16 * 1024 * 1024;
 static constexpr size_t GDN_FWD_H_GM_ALIGN = 512;
 static constexpr int64_t GDN_FWD_H_PING_PONG_STAGES = 2;
+// Shortest chunk the CP (TilingKey 3) path may push through the Cube; the serial path
+// routes anything shorter than this to the vector side.
+static constexpr int64_t kCpMinChunkTokens = 16;
 
 // Plain, framework-agnostic inputs needed to compute the tiling.
 struct ChunkGatedDeltaRuleFwdHTilingContext {
@@ -126,8 +129,58 @@ public:
             blockDim = static_cast<uint32_t>(std::min<int64_t>(aicCoreNum, batchHeads * vSplits));
         }
 
+        // ---- Chunk-parallel (CP) routing (TilingKey 3) --------------------------------
+        // One task (batch, value head) at a time; all R ranks split the chunk axis.
+        // Target domain: dense g-only inputs whose task count fits in one wave, so the
+        // serial task loop does not turn into the bottleneck. GDN_FWD_H_CP=0 forces the
+        // historical chain-parallel path (emergency rollback / A-B).
+        const int64_t chunks = (ctx_.seqlen + chunkSize - 1) / chunkSize;
+        const char *cpEnv = std::getenv("GDN_FWD_H_CP");
+        bool cpDisabled = false;
+        if (cpEnv != nullptr) {
+            char *cpEnvEnd = nullptr;
+            const long cpEnvValue = std::strtol(cpEnv, &cpEnvEnd, 10);
+            cpDisabled = (cpEnvEnd != cpEnv) && (cpEnvValue == 0);
+        }
+        // The CP kernel feeds the tail chunk straight into the Cube as the GEMM M, while the
+        // serial path hands chunks shorter than 16 tokens to the vector side. Keep such tails
+        // on TilingKey 1/2 instead of guessing what the Cube does with a tiny M.
+        const int64_t tailTokens = ctx_.seqlen - (chunks - 1) * chunkSize;
+        const bool tailFitsCube = tailTokens >= kCpMinChunkTokens;
+        const bool useCp = ctx_.isAscend950 && !ctx_.hasCuSeqlens && ctx_.useG && !ctx_.useGk &&
+                           vSplits == 1 && kHeadDim == 128 && vHeadDim == 128 &&
+                           chunks >= 2 && tailFitsCube && batchHeads <= aicCoreNum && !cpDisabled;
+        const int64_t cpRankCount = useCp ? std::min<int64_t>(aicCoreNum, chunks) : 0;
+
         size_t workspaceOffset = ctx_.libApiWorkSpaceSize;
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
+
+        if (cpRankCount > 0) {
+            // CP path: the serial per-chain workspaces are unused. Summary holds
+            // [B_bar(128x128) | A_bar(128x128)] FP32 per rank; scratch holds
+            // X[M|S](128x256), H0/S_in(128x128), YT(128x256), Wf(128x128),
+            // Kf/v_update(128x128), Pv(128x256) and RpRv(128x256) as FP32 slots.
+            // Keep in sync with the SCR_* constants in gdn_fwd_h_cp_kernel.hpp.
+            const size_t summaryBytes = AlignUp(2U * 128U * 128U * sizeof(float));
+            // X + YT + Pv + RpRv (4 x 128x256) and H0 + Wf + Kf (3 x 128x128) flats.
+            const size_t scratchBytes =
+                AlignUp((4U * 128U * 256U + 3U * 128U * 128U) * sizeof(float));
+            tiling.cpSummaryStride = static_cast<int64_t>(summaryBytes / sizeof(float));
+            tiling.cpScratchStride = static_cast<int64_t>(scratchBytes / sizeof(float));
+            tiling.cpSummaryOffset = static_cast<int64_t>(workspaceOffset);
+            workspaceOffset += summaryBytes * static_cast<size_t>(cpRankCount);
+            tiling.cpScratchOffset = static_cast<int64_t>(workspaceOffset);
+            workspaceOffset += scratchBytes * static_cast<size_t>(cpRankCount);
+
+            tiling.vWorkspaceOffset = 0;
+            tiling.vUpdateWorkspaceOffset = 0;
+            tiling.kDecayWorkspaceOffset = 0;
+            tiling.hWorkspaceOffset = 0;
+            tiling.numSeqWorkspaceOffset = 0;
+            tiling.numChunksWorkspaceOffset = 0;
+            tiling.stateWorkspaceOffset = 0;
+            blockDim = static_cast<uint32_t>(cpRankCount);
+        } else {
 
         tiling.vWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * chunkSize * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
@@ -149,17 +202,16 @@ public:
         tiling.numChunksWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>((tokenBatch + 1) * static_cast<int64_t>(sizeof(int64_t))));
 
-        // Contiguous per-core state buffers for the next-chunk state that Cube reads.
-        // Layout: [core][stream][parity][K][vBlockSize], parity ping-pongs so the
-        // Cube read of chunk c and the Vector write of chunk c+1 never overlap.
-        // Sized with sizeof(float) as an upper bound (actual element is 2 bytes).
-        tiling.stateWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-        workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * GDN_FWD_H_PING_PONG_STAGES *
-                                                       GDN_FWD_H_PING_PONG_STAGES * kHeadDim * vHeadDim *
-                                                       static_cast<int64_t>(sizeof(float))));
+        // gmState is declared and bound in the kernel but never read or written
+        // (the Cube W@h path reads the h output directly). Keep the tiling field
+        // for ABI stability but stop reserving the 6-12 MiB dead region.
+        tiling.stateWorkspaceOffset = 0;
+
+        } // end of the chain-parallel workspace branch
 
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
         workspaceSize = workspaceOffset;
+        tiling.cpRankCount = cpRankCount;
 
         FillCommonTiling(tiling, batch, isVariedLen, shapeBatch, tokenBatch, chunkSize);
     }

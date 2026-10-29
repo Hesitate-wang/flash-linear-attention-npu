@@ -46,6 +46,12 @@ TILING_DATA_FIELD_DEF(int64_t, numSeqWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, numChunksWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, stateWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, vSplitCount);
+// Chunk-parallel (CP) path (TilingKey 3). cpRankCount == 0 means the path is off.
+TILING_DATA_FIELD_DEF(int64_t, cpRankCount);
+TILING_DATA_FIELD_DEF(int64_t, cpSummaryOffset);
+TILING_DATA_FIELD_DEF(int64_t, cpScratchOffset);
+TILING_DATA_FIELD_DEF(int64_t, cpSummaryStride);
+TILING_DATA_FIELD_DEF(int64_t, cpScratchStride);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleFwdH, ChunkGatedDeltaRuleFwdHTilingData)
