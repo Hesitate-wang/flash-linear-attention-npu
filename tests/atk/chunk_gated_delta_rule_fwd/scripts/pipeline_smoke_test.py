@@ -147,6 +147,11 @@ def run_accuracy(
     env["GDN_ATK_CASE_JSON"] = str(case_json)
     env["GDN_ATK_RESULT_DIR"] = str(result_dir)
     env["ATK_BIN"] = atk_bin
+    # 角色合同要求 dut/benchmark/golden 三个执行角色都出现在主进程日志里。
+    # 多进程模式下第二个 NPU 节点在独立 worker 中执行，它的 role 行不会被
+    # 收进 atk_task.log；run_matrix.sh 的每个分片也是强制 single-process 的。
+    env["GDN_ATK_SINGLE_PROCESS"] = "1"
+    env.setdefault("GDN_ATK_MAX_TASK", "1")
     rc, output = _run_streaming(
         ["bash", str(DOUBLE_BENCHMARK), str(device)], OP_DIR, env
     )
