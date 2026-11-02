@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Chunk-64 producer/consumer 流水单 case 冒烟测试。
 
-默认从冻结矩阵抽取 case 187（varlen 3 序列、GVA 4:1、初/末状态、
-9 个 chunk、12 条 chain），写成一 case JSON 后复用仓内 ATK 入口：
+默认从冻结矩阵抽取密集（非 varlen）case 348（B=3、Hk=Hv=2、
+T=511、8 个 chunk、63 token 尾块、6 条 chain、初/末状态），写成一
+case JSON 后复用仓内 ATK 入口。需要 varlen 覆盖时传 `--case-id 187`：
 
     accuracy     scripts/run_double_benchmark.sh
                  DUT / 六 ACLNN benchmark / FP64 CPU golden
@@ -29,7 +30,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 OP_DIR = SCRIPT_DIR.parent
 DEFAULT_CASE_JSON = OP_DIR / "atk_chunk_gated_delta_rule_fwd.json"
-DEFAULT_CASE_ID = 187
+DEFAULT_CASE_ID = 348
 DEFAULT_DEVICE = 0
 DOUBLE_BENCHMARK = SCRIPT_DIR / "run_double_benchmark.sh"
 EXECUTOR = "executor_chunk_gated_delta_rule_fwd.py"
