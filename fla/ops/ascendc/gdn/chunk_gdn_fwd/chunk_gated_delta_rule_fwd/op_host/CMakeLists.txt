@@ -60,6 +60,9 @@ add_ops_compile_options(
     OP_NAME ChunkGatedDeltaRuleFwd
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../../chunk_gated_delta_rule_fwd_prepare/op_kernel
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../../chunk_fwd_h/op_kernel
+            -I${CMAKE_CURRENT_SOURCE_DIR}/../../chunk_fwd_o/op_kernel
             -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/internal/coefficient_generation
             -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/internal/coefficient_generation/gated_delta_rule_solve_tri
             -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/internal/operators/chunk_gated_delta_rule_fwd_h/op_kernel

@@ -4,6 +4,7 @@
  */
 #include "chunk_gated_delta_rule_fwd_arch35_struct.h"
 #include "ho_pipeline_context.h"
+#include "chunk_64_sparse/sparse_pipeline.h"
 #include "chunk_gated_delta_rule_fwd_chunk32/chunk_gated_delta_rule_fwd_32.h"
 #include <type_traits>
 
@@ -476,11 +477,26 @@ __aicore__ inline void RunPhase6(
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR a_storage, GM_ADDR raw_g,
     GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+    GM_ADDR a_log, GM_ADDR dt_bias,
     GM_ADDR o, GM_ADDR final_state, GM_ADDR g_cumsum_bth, GM_ADDR A,
+    GM_ADDR q_hat, GM_ADDR k_hat, GM_ADDR q_rstd, GM_ADDR k_rstd, GM_ADDR beta_eff,
+    GM_ADDR h, GM_ADDR w, GM_ADDR u, GM_ADDR v_new, GM_ADDR g_cumsum_bht,
     GM_ADDR workspace, GM_ADDR tiling)
 {
     REGISTER_TILING_DEFAULT(GDN::Arch35ChunkGatedDeltaRuleFwdTrailer);
-    if (TILING_KEY_IS(32)) {
+    if (TILING_KEY_IS(64)) {
+        KERNEL_TASK_TYPE(64, KERNEL_TYPE_MIX_AIC_1_2);
+        GET_TILING_DATA_WITH_STRUCT(GdnChunk64Sparse::FusedTilingData, fusedTiling, tiling);
+        const GdnChunk64Sparse::PhaseArgs args{
+            q, k, v, raw_g, beta, a_log, dt_bias, cu_seqlens, chunk_indices,
+            g_cumsum_bht, w, u, A, q_hat, k_hat, q_rstd, k_rstd, beta_eff,
+            h, v_new, o, initial_state, final_state, workspace};
+        if (fusedTiling.pipeline.schedule == GdnChunk64Sparse::kSparseSchedulePipeline) {
+            GdnChunk64Sparse::RunSparsePipeline(args, fusedTiling);
+        } else {
+            GdnChunk64Sparse::RunSerialPhases(args, fusedTiling);
+        }
+    } else if (TILING_KEY_IS(32)) {
         KERNEL_TASK_TYPE(32, KERNEL_TYPE_MIX_AIC_1_2);
         GET_TILING_DATA_WITH_STRUCT(
             ChunkGatedDeltaRuleFwd32TilingData, chunk32Tiling, tiling);

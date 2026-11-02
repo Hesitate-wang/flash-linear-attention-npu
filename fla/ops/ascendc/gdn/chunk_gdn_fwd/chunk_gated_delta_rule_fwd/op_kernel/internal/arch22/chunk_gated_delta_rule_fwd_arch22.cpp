@@ -673,7 +673,10 @@ __aicore__ inline void RunPhase6(
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR a_storage, GM_ADDR raw_g,
     GM_ADDR gk, GM_ADDR initial_state, GM_ADDR cu_seqlens, GM_ADDR chunk_indices,
+    GM_ADDR a_log, GM_ADDR dt_bias,
     GM_ADDR o, GM_ADDR final_state, GM_ADDR g_cumsum_bth, GM_ADDR A,
+    GM_ADDR q_hat, GM_ADDR k_hat, GM_ADDR q_rstd, GM_ADDR k_rstd, GM_ADDR beta_eff,
+    GM_ADDR h, GM_ADDR w, GM_ADDR u, GM_ADDR v_new, GM_ADDR g_cumsum_bht,
     GM_ADDR workspace, GM_ADDR tiling)
 {
     (void)a_storage;

@@ -23,7 +23,8 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_prepare(
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     GET_TILING_DATA_WITH_STRUCT(ChunkGatedDeltaRuleFwdStageTilingData, tilingData, tiling);
-    ChunkGatedDeltaRuleFwdPrepare::ChunkGatedDeltaRuleFwdPrepareKernel<DTYPE_G, DTYPE_A_LOG> op;
+    ChunkGatedDeltaRuleFwdPrepare::ChunkGatedDeltaRuleFwdPrepareKernel<
+        DTYPE_G, DTYPE_A_LOG, DTYPE_BETA> op;
     op.Init(q, k, v, g, beta, a_log, dt_bias, cu_seqlens, chunk_indices,
             g_out, w_out, u_out, a_out, q_hat, k_hat, q_rstd, k_rstd, beta_eff,
             workspace, tilingData);

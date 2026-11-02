@@ -57,7 +57,8 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     int64_t oLayout,
     bool stateVFirst,
     bool allowNegEigval,
-    aclOpExecutor *executor)
+    aclOpExecutor *executor,
+    const ChunkGatedDeltaRuleFwdPrepareArgs *prepare)
 {
     L0_DFX(ChunkGatedDeltaRuleFwd, q, k, v, beta, aStorage, rawG, gkOptional, initialStateOptional,
            cuSeqlensOptional, chunkIndicesOptional, outputFinalState, chunkSize, scale, outputGCumsum,
@@ -71,13 +72,32 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
         return {nullptr, nullptr, nullptr, nullptr};
     }
 
+    const bool fusedPrepare = prepare != nullptr;
+    const bool useQkL2norm = fusedPrepare && prepare->useQkL2norm;
+    const bool useExp2 = fusedPrepare && prepare->useExp2;
+    const bool useBetaSigmoid = fusedPrepare && prepare->useBetaSigmoid;
+    const bool outputA = fusedPrepare && prepare->outputA;
+    const aclTensor *aLog = fusedPrepare ? prepare->aLog : nullptr;
+    const aclTensor *dtBias = fusedPrepare ? prepare->dtBias : nullptr;
+    const aclTensor *qHat = fusedPrepare ? prepare->qHat : nullptr;
+    const aclTensor *kHat = fusedPrepare ? prepare->kHat : nullptr;
+    const aclTensor *qRstd = fusedPrepare ? prepare->qRstd : nullptr;
+    const aclTensor *kRstd = fusedPrepare ? prepare->kRstd : nullptr;
+    const aclTensor *betaEff = fusedPrepare ? prepare->betaEff : nullptr;
+    const aclTensor *h = fusedPrepare ? prepare->h : nullptr;
+    const aclTensor *w = fusedPrepare ? prepare->w : nullptr;
+    const aclTensor *u = fusedPrepare ? prepare->u : nullptr;
+    const aclTensor *vNew = fusedPrepare ? prepare->vNew : nullptr;
+    const aclTensor *gCumsumBht = fusedPrepare ? prepare->gCumsumBht : nullptr;
     const aclError ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkGatedDeltaRuleFwd,
         OP_INPUT(q, k, v, beta, aStorage, rawG, gkOptional, initialStateOptional,
-                 cuSeqlens, chunkIndices),
-        OP_OUTPUT(oOut, finalStateOut, gCumsumBthOut, aOut),
+                 cuSeqlens, chunkIndices, aLog, dtBias),
+        OP_OUTPUT(oOut, finalStateOut, gCumsumBthOut, aOut,
+                  qHat, kHat, qRstd, kRstd, betaEff, h, w, u, vNew, gCumsumBht),
         OP_ATTR(outputFinalState, chunkSize, scale, outputGCumsum, rawGLayout, qkvLayout, oLayout,
-                stateVFirst, allowNegEigval));
+                stateVFirst, allowNegEigval, fusedPrepare, useQkL2norm, useExp2,
+                useBetaSigmoid, outputA));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkGatedDeltaRuleFwd failed.");
         return {nullptr, nullptr, nullptr, nullptr};

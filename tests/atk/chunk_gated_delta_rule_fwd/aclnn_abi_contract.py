@@ -187,8 +187,11 @@ def main() -> None:
         prepare_kernel,
     ) is None:
         raise SystemExit("prepare kernel 缺少 useExp2 对应的累计缩放选择")
-    if len(re.findall(r"useExp2\s*!=\s*0\s*\?\s*kGdnLn2\s*:\s*1\.0f", prepare_kernel)) != 2:
-        raise SystemExit("prepare kernel 缺少非 exp2 模式的局部指数换底选择")
+    for helper in ("GateLowerLVF", "ScaleRowsBetaExp2gVF"):
+        if re.search(rf"if\s*\(useExp2\s*!=\s*0\)\s*\{{\s*"
+                     rf"{helper}<[^;]*true>.*?\}}\s*else\s*\{{\s*"
+                     rf"{helper}<[^;]*false>", prepare_kernel, re.DOTALL) is None:
+            raise SystemExit(f"prepare kernel 缺少 {helper} 的 exp/exp2 模板分派")
     if implementation.count("params.useExp2") < 4:
         raise SystemExit("大融合新路径未完整透传 useExp2")
 

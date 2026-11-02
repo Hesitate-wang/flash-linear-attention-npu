@@ -912,30 +912,48 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const aclTensor *qCompute = params.useQkL2norm ? qHat : qHead;
         const aclTensor *kCompute = params.useQkL2norm ? kHat : kHead;
 
-        auto prepareResult = l0op::ChunkGatedDeltaRuleFwdPrepare(
-            qHead, kHead, vHead, gRaw, betaBht, params.aLogOptional, params.dtBiasOptional,
-            params.cuSeqlensOptional, params.chunkIndicesOptional, params.chunkSize,
-            params.allowNegEigval, params.useExp2, params.useQkL2norm,
-            params.aLogOptional != nullptr || params.dtBiasOptional != nullptr, betaEffBht != nullptr,
-            params.aOutOptional != nullptr, gCumsumBht, w, u, a, qHat, kHat, qRstd,
-            kRstd, betaEffBht, executorPtr);
-        GDN_STAGE_CHECK(prepareResult[0] != nullptr && prepareResult[1] != nullptr &&
-                            prepareResult[2] != nullptr &&
-                            (!params.useQkL2norm ||
-                             (prepareResult[4] != nullptr && prepareResult[5] != nullptr)),
-                        169104);
+        const bool fusedPrepare = gRaw->GetDataType() == DataType::DT_FLOAT &&
+            betaBht->GetDataType() == DataType::DT_FLOAT &&
+            (params.aLogOptional == nullptr || params.aLogOptional->GetDataType() == DataType::DT_FLOAT) &&
+            (params.dtBiasOptional == nullptr || params.dtBiasOptional->GetDataType() == DataType::DT_FLOAT);
+        if (fusedPrepare) {
+            const l0op::ChunkGatedDeltaRuleFwdPrepareArgs prepareArgs{
+                params.aLogOptional, params.dtBiasOptional, qHat, kHat, qRstd, kRstd,
+                betaEffBht, h, w, u, vNew, gCumsumBht, params.useQkL2norm,
+                params.useExp2, betaEffBht != nullptr, params.aOutOptional != nullptr};
+            const auto result = l0op::ChunkGatedDeltaRuleFwd(
+                qHead, kHead, vHead, betaBht, a, gRaw, nullptr,
+                params.initialStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional,
+                outputFinalState, params.chunkSize, params.scale, false,
+                params.oOut, finalState, gCumsumBht, a, 0, 0, 1,
+                params.stateVFirst, params.allowNegEigval, executorPtr, &prepareArgs);
+            GDN_STAGE_CHECK(result[0] != nullptr, 169104);
+        } else {
+            auto prepareResult = l0op::ChunkGatedDeltaRuleFwdPrepare(
+                qHead, kHead, vHead, gRaw, betaBht, params.aLogOptional, params.dtBiasOptional,
+                params.cuSeqlensOptional, params.chunkIndicesOptional, params.chunkSize,
+                params.allowNegEigval, params.useExp2, params.useQkL2norm,
+                params.aLogOptional != nullptr || params.dtBiasOptional != nullptr, betaEffBht != nullptr,
+                params.aOutOptional != nullptr, gCumsumBht, w, u, a, qHat, kHat, qRstd,
+                kRstd, betaEffBht, executorPtr);
+            GDN_STAGE_CHECK(prepareResult[0] != nullptr && prepareResult[1] != nullptr &&
+                                prepareResult[2] != nullptr &&
+                                (!params.useQkL2norm ||
+                                 (prepareResult[4] != nullptr && prepareResult[5] != nullptr)),
+                            169104);
 
-        auto hResult = l0op::ChunkFwdH(
-            kCompute, w, u, gCumsumBht, nullptr, params.initialStateOptional,
-            params.cuSeqlensOptional, params.chunkIndicesOptional, outputFinalState,
-            params.chunkSize, true, params.useExp2, params.stateVFirst, h, vNew, finalState, executorPtr);
-        GDN_STAGE_CHECK(hResult[0] != nullptr && hResult[1] != nullptr, 169105);
+            auto hResult = l0op::ChunkFwdH(
+                kCompute, w, u, gCumsumBht, nullptr, params.initialStateOptional,
+                params.cuSeqlensOptional, params.chunkIndicesOptional, outputFinalState,
+                params.chunkSize, true, params.useExp2, params.stateVFirst, h, vNew, finalState, executorPtr);
+            GDN_STAGE_CHECK(hResult[0] != nullptr && hResult[1] != nullptr, 169105);
 
-        auto oResult = l0op::ChunkFwdO(
-            qCompute, kCompute, vNew, h, gCumsumBht, params.cuSeqlensOptional,
-            params.chunkIndicesOptional, params.scale, params.chunkSize, params.useExp2, params.stateVFirst,
-            "BSND", params.oOut, executorPtr);
-        GDN_STAGE_CHECK(oResult[0] != nullptr, 169106);
+            auto oResult = l0op::ChunkFwdO(
+                qCompute, kCompute, vNew, h, gCumsumBht, params.cuSeqlensOptional,
+                params.chunkIndicesOptional, params.scale, params.chunkSize, params.useExp2, params.stateVFirst,
+                "BSND", params.oOut, executorPtr);
+            GDN_STAGE_CHECK(oResult[0] != nullptr, 169106);
+        }
 
         if (params.qHatOutOptional != nullptr) {
             const aclTensor *qHatExport = qHat;

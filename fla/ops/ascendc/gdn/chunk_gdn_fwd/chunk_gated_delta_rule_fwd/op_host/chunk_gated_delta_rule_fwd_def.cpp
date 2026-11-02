@@ -41,6 +41,10 @@ public:
             .Format(formats).UnknownShapeFormat(formats).AutoContiguous();
         this->Input("chunk_indices").ParamType(OPTIONAL).ValueDepend(OPTIONAL).DataType(indexTypes)
             .Format(formats).UnknownShapeFormat(formats).AutoContiguous();
+        this->Input("a_log").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
+            .UnknownShapeFormat(formats).AutoContiguous();
+        this->Input("dt_bias").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
+            .UnknownShapeFormat(formats).AutoContiguous();
 
         this->Output("o").ParamType(REQUIRED).DataType(inputTypes).Format(formats)
             .UnknownShapeFormat(formats);
@@ -49,6 +53,26 @@ public:
         this->Output("g_cumsum_bth").ParamType(REQUIRED).DataType(gateTypes).Format(formats)
             .UnknownShapeFormat(formats);
         this->Output("A").ParamType(REQUIRED).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("q_hat").ParamType(OPTIONAL).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("k_hat").ParamType(OPTIONAL).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("q_rstd").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("k_rstd").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("beta_eff").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("h").ParamType(OPTIONAL).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("w").ParamType(OPTIONAL).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("u").ParamType(OPTIONAL).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("v_new").ParamType(OPTIONAL).DataType(inputTypes).Format(formats)
+            .UnknownShapeFormat(formats);
+        this->Output("g_cumsum_bht").ParamType(OPTIONAL).DataType(gateTypes).Format(formats)
             .UnknownShapeFormat(formats);
 
         this->Attr("output_final_state").AttrType(REQUIRED).Bool(false);
@@ -63,6 +87,11 @@ public:
         this->Attr("o_layout").AttrType(OPTIONAL).Int(0);
         this->Attr("state_v_first").AttrType(OPTIONAL).Bool(false);
         this->Attr("allow_neg_eigval").AttrType(OPTIONAL).Bool(false);
+        this->Attr("fused_prepare").AttrType(OPTIONAL).Bool(false);
+        this->Attr("use_qk_l2norm").AttrType(OPTIONAL).Bool(false);
+        this->Attr("use_exp2").AttrType(OPTIONAL).Bool(false);
+        this->Attr("use_beta_sigmoid").AttrType(OPTIONAL).Bool(false);
+        this->Attr("output_a").AttrType(OPTIONAL).Bool(false);
 
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true)

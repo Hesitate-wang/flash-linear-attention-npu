@@ -24,7 +24,7 @@ namespace ChunkGatedDeltaRuleFwdPrepare {
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
 
-template <typename GateDtype, typename ALogDtype>
+template <typename GateDtype, typename ALogDtype, typename BetaDtype = GateDtype>
 class ChunkGatedDeltaRuleFwdPrepareKernel : public PrepareState {
 public:
     using InDtype = bfloat16_t;
@@ -49,7 +49,7 @@ public:
         gmK.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(k));
         gmV.SetGlobalBuffer(reinterpret_cast<__gm__ InDtype *>(v));
         gmG.SetGlobalBuffer(reinterpret_cast<__gm__ GateDtype *>(g));
-        gmBeta.SetGlobalBuffer(reinterpret_cast<__gm__ GateDtype *>(beta));
+        gmBeta.SetGlobalBuffer(reinterpret_cast<__gm__ BetaDtype *>(beta));
         if (aLog != nullptr) {
             gmALog.SetGlobalBuffer(reinterpret_cast<__gm__ ALogDtype *>(aLog));
         }
@@ -366,11 +366,9 @@ public:
         LocalTensor<float> ubGfp = ubGPrime[db];
         LocalTensor<float> ubBfp = ubBetaEff[db];
         LocalTensor<GateDtype> ubGRaw = ubGfp.template ReinterpretCast<GateDtype>();
-        LocalTensor<GateDtype> ubBRaw = ubBfp.template ReinterpretCast<GateDtype>();
+        LocalTensor<BetaDtype> ubBRaw = ubBfp.template ReinterpretCast<BetaDtype>();
 
-        // g / beta share the resident 256 B slots. GateDtype view of the same
-        // address: fp32 copy is identity; b16/fp16 fills the first 128 B, then
-        // one VL LoadCast stores 64 fp32. n<=64, load-then-store, no ubQHat.
+        // Gate and beta have independent storage dtypes but share float UB slots.
         CopyGmToUbElems(ubGRaw, gmG[offG], static_cast<uint32_t>(nValid));
         CopyGmToUbElems(ubBRaw, gmBeta[offG], static_cast<uint32_t>(nValid));
         SetFlag<HardEvent::MTE2_V>(kHeUb0);
@@ -393,9 +391,9 @@ public:
 
         if (useBetaSigmoid != 0) {
             float bscale = (allowNegEigval != 0) ? 2.0f : 1.0f;
-            BetaSigmoidVF<GateDtype>(ubBRaw, ubBfp, bscale, static_cast<uint32_t>(nValid));
-        } else if constexpr (!IsSameType<GateDtype, float>::value) {
-            CastToFp32VF<GateDtype>(ubBRaw, ubBfp, static_cast<uint32_t>(nValid));
+            BetaSigmoidVF<BetaDtype>(ubBRaw, ubBfp, bscale, static_cast<uint32_t>(nValid));
+        } else if constexpr (!IsSameType<BetaDtype, float>::value) {
+            CastToFp32VF<BetaDtype>(ubBRaw, ubBfp, static_cast<uint32_t>(nValid));
         }
 
         if (hasBetaOut != 0) {
@@ -896,6 +894,25 @@ public:
         }
     }
 
+    // A standalone launch discards these free credits at kernel exit. A fused
+    // caller must consume them before the next stage reuses flags and events.
+    __aicore__ inline void FinishForFusion()
+    {
+        if ASCEND_IS_AIV {
+            for (int64_t t = subBlock; t < TasksPerPack(); t += 2) {
+                WaitAicStage4Done(t);
+            }
+        }
+        if ASCEND_IS_AIC {
+            WaitFlag<HardEvent::M_MTE1>(0);
+            WaitFlag<HardEvent::M_MTE1>(1);
+            WaitFlag<HardEvent::FIX_M>(0);
+            WaitFlag<HardEvent::FIX_M>(1);
+            WaitFlag<HardEvent::FIX_MTE1>(0);
+        }
+        PipeBarrier<PIPE_ALL>();
+    }
+
     __aicore__ inline void Process()
     {
         if ASCEND_IS_AIV {
@@ -913,7 +930,7 @@ private:
     GlobalTensor<InDtype> gmK;
     GlobalTensor<InDtype> gmV;
     GlobalTensor<GateDtype> gmG;
-    GlobalTensor<GateDtype> gmBeta;
+    GlobalTensor<BetaDtype> gmBeta;
     GlobalTensor<ALogDtype> gmALog;
     GlobalTensor<ALogDtype> gmDt;
     // Output

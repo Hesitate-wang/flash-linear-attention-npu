@@ -21,6 +21,7 @@ namespace optiling {
 
 ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdArch35StateOutput(gert::TilingContext *context);
 ge::graphStatus TilingForChunkGatedDeltaRuleFwdChunk32(gert::TilingContext *context);
+ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *context);
 
 namespace {
 
@@ -136,6 +137,10 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleFwdArch35(gert::TilingContext *context
         context->GetAttrs()->GetAttrPointer<int64_t>(ATTR_CHUNK_SIZE);
     if (requestedChunkSize != nullptr && *requestedChunkSize == CHUNK_32) {
         return TilingForChunkGatedDeltaRuleFwdChunk32(context);
+    }
+    const bool *fusedPrepare = context->GetAttrs()->GetAttrPointer<bool>(9);
+    if (fusedPrepare != nullptr && *fusedPrepare) {
+        return TilingForChunkGatedDeltaRuleFwdSparse(context);
     }
     const auto *qShape = context->GetOptionalInputShape(INPUT_Q);
     const auto *kShape = context->GetOptionalInputShape(INPUT_K);

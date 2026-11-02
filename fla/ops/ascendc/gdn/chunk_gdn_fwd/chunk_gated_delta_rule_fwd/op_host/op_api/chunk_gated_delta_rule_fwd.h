@@ -10,6 +10,25 @@
 
 namespace l0op {
 
+struct ChunkGatedDeltaRuleFwdPrepareArgs {
+    const aclTensor *aLog;
+    const aclTensor *dtBias;
+    const aclTensor *qHat;
+    const aclTensor *kHat;
+    const aclTensor *qRstd;
+    const aclTensor *kRstd;
+    const aclTensor *betaEff;
+    const aclTensor *h;
+    const aclTensor *w;
+    const aclTensor *u;
+    const aclTensor *vNew;
+    const aclTensor *gCumsumBht;
+    bool useQkL2norm;
+    bool useExp2;
+    bool useBetaSigmoid;
+    bool outputA;
+};
+
 const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     const aclTensor *q,
     const aclTensor *k,
@@ -34,7 +53,8 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     int64_t oLayout,
     bool stateVFirst,
     bool allowNegEigval,
-    aclOpExecutor *executor);
+    aclOpExecutor *executor,
+    const ChunkGatedDeltaRuleFwdPrepareArgs *prepare = nullptr);
 
 } // namespace l0op
 
