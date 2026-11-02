@@ -392,7 +392,7 @@ private:
         p.quantPre = QuantMode_t::NoQuant;
         p.unitFlag = 0;
         p.isChannelSplit = false;
-        AscendC::Fixpipe<float, float, AscendC::CFG_NZ_L1>(l1Y_, l0CTask_[0], p);
+        AscendC::Fixpipe<float, float, Prep::CFG_NZ_L1>(l1Y_, l0CTask_[0], p);
         AscendC::SetFlag<AscendC::HardEvent::FIX_MTE1>(0);
     }
 
@@ -437,7 +437,7 @@ private:
         p.quantPre = QuantMode_t::F322BF16;
         p.unitFlag = 0;
         p.isChannelSplit = false;
-        AscendC::Fixpipe<bfloat16_t, float, AscendC::CFG_NZ_L1>(l1A_, l0CTask_[0], p);
+        AscendC::Fixpipe<bfloat16_t, float, Prep::CFG_NZ_L1>(l1A_, l0CTask_[0], p);
         AscendC::SetFlag<AscendC::HardEvent::FIX_MTE1>(0);
     }
 
@@ -474,26 +474,47 @@ private:
     }
 
     // ========================= Stage 7 (AIC) =========================
+    // W/U are [64,128] and live in UB as BF16 for the GM drain. Prepare's
+    // FixpipeL0cToUbFp32Nd is square (nSize = mSize = chunkSize) and takes a
+    // float destination, so W/U need this bf16 NZ2ND variant with explicit m/n.
+    __aicore__ inline void FixpipeWuToUb(LocalTensor<bfloat16_t> ub)
+    {
+        AscendC::FixpipeParamsArch3510<AscendC::CO2Layout::ROW_MAJOR> p;
+        p.nSize = static_cast<uint16_t>(kHeadDim);
+        p.mSize = static_cast<uint16_t>(kChunk);
+        p.srcStride = static_cast<uint16_t>(kChunk);
+        p.dstStride = static_cast<uint32_t>(kHeadDim);
+        p.quantPre = QuantMode_t::F322BF16;
+        p.dualDstCtl = 0;
+        p.isChannelSplit = false;
+        p.unitFlag = 0;
+        p.params.ndNum = 1;
+        p.params.srcNdStride = 0;
+        p.params.dstNdStride = 0;
+        p.subBlockId = false;
+        AscendC::Fixpipe<bfloat16_t, float, Prep::CFG_ROW_MAJOR_UB>(ub, l0CTask_[0], p);
+    }
+
     __aicore__ inline void Stage7Wu(const ChunkWindow &)
     {
         AicWaitMte1(kProdFlagWuIn);
         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(0);
         Prep::WuMatmulToL0C<bfloat16_t>(l1A_, l1Kbg_, l0A_[0], l0B_[0], l0CTask_[0],
                                         static_cast<int32_t>(kChunk), static_cast<int32_t>(kHeadDim),
-                                        static_cast<int32_t>(kHeadDim), 0);
+                                        static_cast<int32_t>(kChunk), 0);
         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(0);
         AscendC::SetFlag<AscendC::HardEvent::M_FIX>(0);
         AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(0);
-        Prep::FixpipeL0cToUbFp32Nd(ubW_, l0CTask_[0], static_cast<uint32_t>(kChunk), 0);
+        FixpipeWuToUb(ubW_);
         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(0);
         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(0);
         Prep::WuMatmulToL0C<bfloat16_t>(l1A_, l1Vb_, l0A_[0], l0B_[0], l0CTask_[0],
                                         static_cast<int32_t>(kChunk), static_cast<int32_t>(kHeadDim),
-                                        static_cast<int32_t>(kHeadDim), 0);
+                                        static_cast<int32_t>(kChunk), 0);
         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(0);
         AscendC::SetFlag<AscendC::HardEvent::M_FIX>(0);
         AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(0);
-        Prep::FixpipeL0cToUbFp32Nd(ubU_, l0CTask_[0], static_cast<uint32_t>(kChunk), 0);
+        FixpipeWuToUb(ubU_);
         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(0);
         AicSetFix(kProdFlagWu);
     }

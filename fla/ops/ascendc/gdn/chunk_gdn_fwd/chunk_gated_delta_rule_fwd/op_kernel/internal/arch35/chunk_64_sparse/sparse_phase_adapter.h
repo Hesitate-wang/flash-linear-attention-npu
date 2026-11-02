@@ -86,10 +86,12 @@ __aicore__ inline void RunH(const GDN::FwdHKernelArgs &args)
 template <bool UseExp2, bool StateVFirst>
 __aicore__ inline void RunHO(const PhaseArgs &args, const FusedTilingData &td)
 {
-    const GM_ADDR user = AscendC::GetUserWorkspace(args.workspace);
+    // GM_ADDR is a macro (`__gm__ uint8_t*`), so `const GM_ADDR x` would mean
+    // pointer-to-const and would not convert to a plain GM_ADDR parameter.
+    GM_ADDR user = AscendC::GetUserWorkspace(args.workspace);
     const bool normalize = td.prepare.enableQueryKeyL2NormInKernel != 0;
-    const GM_ADDR qCompute = normalize ? args.qHat : args.q;
-    const GM_ADDR kCompute = normalize ? args.kHat : args.k;
+    GM_ADDR qCompute = normalize ? args.qHat : args.q;
+    GM_ADDR kCompute = normalize ? args.kHat : args.k;
     GDN::FwdHKernelArgs hArgs{};
     hArgs.k = kCompute;
     hArgs.w = args.w;

@@ -6,6 +6,13 @@
 #ifndef MEM_H
 #define MEM_H
 
+// The kernel entry includes both the prepare kernel headers and this solve_tri
+// copy; both define the same global on-chip types. The first definition wins
+// and the other skips its copy (all GetBuffer call sites pass an explicit
+// dtype, so the differing default template argument is never observed).
+#ifndef GDN_SHARED_ONCHIP_TYPES_DEFINED
+#define GDN_SHARED_ONCHIP_TYPES_DEFINED
+
 struct HardwareInfo {
     static uint32_t const l1Size = 512 * 1024;
     static uint32_t const l0ASize = 64 * 1024;
@@ -58,5 +65,7 @@ public:
 private:
     AscendC::LocalTensor<uint8_t> buffer_[(uint32_t)BufferType::ASCEND_MAX];
 };
+
+#endif // GDN_SHARED_ONCHIP_TYPES_DEFINED
 
 #endif  // MEM_H

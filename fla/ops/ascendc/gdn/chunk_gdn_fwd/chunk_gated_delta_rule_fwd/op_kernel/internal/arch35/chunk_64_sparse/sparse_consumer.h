@@ -131,9 +131,9 @@ __aicore__ inline void FixpipeHalfFp32Ub(LocalTensor<float> ub, LocalTensor<floa
     p.params.srcNdStride = 0;
     p.params.dstNdStride = 0;
     p.subBlockId = false;
-    AscendC::Fixpipe<float, float, AscendC::CFG_ROW_MAJOR_UB>(ub, l0C, p);
+    AscendC::Fixpipe<float, float, Prep::CFG_ROW_MAJOR_UB>(ub, l0C, p);
     p.subBlockId = true;
-    AscendC::Fixpipe<float, float, AscendC::CFG_ROW_MAJOR_UB>(
+    AscendC::Fixpipe<float, float, Prep::CFG_ROW_MAJOR_UB>(
         ub, l0C[static_cast<uint32_t>(fullM / 2) * 16U], p);
 }
 
@@ -206,8 +206,9 @@ public:
         if ASCEND_IS_AIV {
             const uint32_t firstRow = GetSubBlockIdx() * static_cast<uint32_t>(kHalfRows);
             const uint32_t rows = static_cast<uint32_t>(window.rows);
+            const uint32_t halfRows = static_cast<uint32_t>(kHalfRows);
             const uint32_t nRows = rows > firstRow ? rows - firstRow : 0U;
-            RunChunkAiv(localChunk, window, firstRow, nRows < kHalfRows ? nRows : kHalfRows);
+            RunChunkAiv(localChunk, window, firstRow, nRows < halfRows ? nRows : halfRows);
         }
         if ASCEND_IS_AIC {
             RunChunkAic(localChunk);

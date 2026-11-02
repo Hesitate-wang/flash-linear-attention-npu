@@ -98,6 +98,26 @@ consumer: W, U -> fwdh -> v_new, h -> fwdo
    原来的 `CopyGmNdToL1Nz` 与之写同一 `l1A_` 且无 FIX↔MTE2 同步；另外 3510 上
    GM→L1 连续 `DataCopy` 会占用 mode-4 flagId 1/17，正好撞 `kProdFlagKkt`。
 
+## 5b. 首轮真机编译反馈的修正（2026-11-02）
+
+1. **`AscendC::CFG_ROW_MAJOR_UB` 不存在**：该常量是仓库在
+   `chunk_gated_delta_rule_fwd_prepare_common.h` 的 `ChunkGatedDeltaRuleFwdPrepare`
+   命名空间里自定义的（`CFG_ROW_MAJOR_UB`/`CFG_NZ_L1`），不是 AscendC 符号。
+   consumer/producer 一律改用 `Prep::CFG_ROW_MAJOR_UB` / `Prep::CFG_NZ_L1`。
+2. **`HardwareInfo`/`BufferType`/`OnChipBuffer` 重定义**：prepare 的 `_common.h` 与
+   coefficient_generation 的 `arch35/mem.h` 在全局命名空间各定义了一份，而
+   `arch35.cpp` 同时包含两者。两份定义在 `GDN_SHARED_ONCHIP_TYPES_DEFINED` 宏下
+   二选一（所有 `GetBuffer` 调用都显式传 dtype，默认模板实参差异不生效）。
+3. **`GDN::ChunkFwdOA5Dispatch` no match**：根因是 `const GM_ADDR`。`GM_ADDR` 是宏
+   （`__gm__ uint8_t*`），`const GM_ADDR x` 展开成 `const __gm__ uint8_t* x`
+   （pointer-to-const），不能转成 `GM_ADDR` 形参；改为 `GM_ADDR x`。
+4. **`FixpipeL0cToUbFp32Nd` bf16→float**：W/U 是 bf16 且是 [64,128]，该 helper 只接受
+   float 目的且固定方阵。producer 新增 `FixpipeWuToUb`：ROW_MAJOR + F322BF16 +
+   `mSize=64/nSize=128/srcStride=64/dstStride=128`，直接落 bf16 UB。
+5. **W/U matmul 的 k 维写错**：`WuMatmulToL0C(A,B,m,n,kDim)` 的 kDim 是 A 的列数，
+   应为 `kChunk=64`（A=[64,64]、B=[64,128]）；原代码传了 `kHeadDim=128`。已按
+   Prepare Stage7 的 `bt, nK, bt` 参数顺序修正。
+
 ## 6. 复用的数学助手（不要重推）
 
 `chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/`：

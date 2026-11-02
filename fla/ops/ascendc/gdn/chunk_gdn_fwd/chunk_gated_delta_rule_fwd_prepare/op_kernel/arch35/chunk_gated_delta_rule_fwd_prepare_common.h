@@ -11,6 +11,14 @@
 
 #include "kernel_operator.h"
 
+// Shared by the prepare kernel and the coefficient-generation solve_tri copy
+// (internal/coefficient_generation/.../arch35/mem.h). Both headers define the
+// same global types; the kernel entry includes both, so the first one wins and
+// the other skips its copy. All GetBuffer call sites pass an explicit dtype,
+// so the differing default template argument is never observed.
+#ifndef GDN_SHARED_ONCHIP_TYPES_DEFINED
+#define GDN_SHARED_ONCHIP_TYPES_DEFINED
+
 struct HardwareInfo {
     static uint32_t const l1Size = 512 * 1024;
     static uint32_t const l0ASize = 64 * 1024;
@@ -63,6 +71,8 @@ public:
 private:
     AscendC::LocalTensor<uint8_t> buffer_[(uint32_t)BufferType::ASCEND_MAX];
 };
+
+#endif // GDN_SHARED_ONCHIP_TYPES_DEFINED
 
 constexpr int64_t kGdnChunkSize = 64;
 constexpr int64_t kGdnHeadDimK = 128;
