@@ -226,14 +226,13 @@ private:
     __aicore__ inline void Stage1Inputs(const ChunkWindow &window)
     {
         const uint32_t rows = static_cast<uint32_t>(window.rows);
-        const uint32_t rowOff = static_cast<uint32_t>(window.tokenStart * kHeadDim);
 
         SetFlag<AscendC::HardEvent::V_MTE2>(kProdEvtUb);
         WaitFlag<AscendC::HardEvent::V_MTE2>(kProdEvtUb);
         if (rows < static_cast<uint32_t>(kChunk)) {
-            AscendC::Duplicate(ubQ_[rows * kHeadDim], static_cast<bfloat16_t>(0),
+            AscendC::Duplicate(ubQ_[static_cast<uint32_t>(rows * kHeadDim)], static_cast<bfloat16_t>(0),
                                static_cast<int32_t>((kChunk - window.rows) * kHeadDim));
-            AscendC::Duplicate(ubK_[rows * kHeadDim], static_cast<bfloat16_t>(0),
+            AscendC::Duplicate(ubK_[static_cast<uint32_t>(rows * kHeadDim)], static_cast<bfloat16_t>(0),
                                static_cast<int32_t>((kChunk - window.rows) * kHeadDim));
         }
         Prep::CopyGmToUbElems(ubQ_, gmQ_[OffsetBhtd(loc_.batch, loc_.kh, window.tokenStart, hk_, t_, kHeadDim)],
@@ -301,7 +300,9 @@ private:
             Prep::GateSoftplusVF<float>(ubGPrime_, ubGPrime_, aLog, dtBias,
                                         static_cast<uint32_t>(kChunk));
         }
-        Prep::CumsumScaleVF(ubGPrime_, useExp2_ ? Prep::kGdnRcpLn2 : 1.0f,
+        // kGdnRcpLn2 is a global constant in prepare_common.h (outside the
+        // ChunkGatedDeltaRuleFwdPrepare namespace), so it must stay unqualified.
+        Prep::CumsumScaleVF(ubGPrime_, useExp2_ ? kGdnRcpLn2 : 1.0f,
                             static_cast<uint32_t>(kChunk));
         if (useBetaSigmoid_) {
             Prep::BetaSigmoidVF<float>(ubBeta_, ubBeta_, allowNegEigval_ ? 2.0f : 1.0f,

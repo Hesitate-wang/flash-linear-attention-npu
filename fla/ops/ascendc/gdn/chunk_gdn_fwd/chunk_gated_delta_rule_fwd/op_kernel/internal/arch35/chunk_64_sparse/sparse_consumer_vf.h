@@ -39,7 +39,7 @@ constexpr CastTrait kSparseF32ToB16 = {
     RoundMode::CAST_RINT,
 };
 
-__simd_callee__ inline void SparseLoadB16AsF32(RegTensor<float> &dst, __ubuf__ bfloat16_t *src,
+__aicore__ inline void SparseLoadB16AsF32(RegTensor<float> &dst, __ubuf__ bfloat16_t *src,
                                                MaskReg &mask32)
 {
     RegTensor<bfloat16_t> raw;
@@ -47,7 +47,7 @@ __simd_callee__ inline void SparseLoadB16AsF32(RegTensor<float> &dst, __ubuf__ b
     Cast<float, bfloat16_t, kSparseB16ToF32>(dst, raw, mask32);
 }
 
-__simd_callee__ inline void SparseStoreB16(__ubuf__ bfloat16_t *dst, RegTensor<float> &src,
+__aicore__ inline void SparseStoreB16(__ubuf__ bfloat16_t *dst, RegTensor<float> &src,
                                            MaskReg &mask32)
 {
     RegTensor<bfloat16_t> packed;

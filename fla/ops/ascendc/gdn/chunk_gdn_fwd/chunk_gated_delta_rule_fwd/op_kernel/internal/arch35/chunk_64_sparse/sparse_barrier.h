@@ -9,6 +9,7 @@
 #include "sparse_fused_tiling.h"
 
 namespace GdnChunk64Sparse {
+using namespace AscendC;
 
 // Mode 0 is the only CrossCore mode that spans AI Cores: every AIC (or every
 // AIV) of the launch sets the same id and waits for the full set. It therefore

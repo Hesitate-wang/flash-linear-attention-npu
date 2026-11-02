@@ -8,6 +8,7 @@
 #include "kernel_operator.h"
 
 namespace GdnChunk64Sparse {
+using namespace AscendC;
 
 constexpr uint16_t kPhaseAicAllFlag = 12;
 constexpr uint16_t kPhaseAivAllFlag = 13;

@@ -117,6 +117,19 @@ consumer: W, U -> fwdh -> v_new, h -> fwdo
 5. **W/U matmul 的 k 维写错**：`WuMatmulToL0C(A,B,m,n,kDim)` 的 kDim 是 A 的列数，
    应为 `kChunk=64`（A=[64,64]、B=[64,128]）；原代码传了 `kHeadDim=128`。已按
    Prepare Stage7 的 `bt, nK, bt` 参数顺序修正。
+6. **`Prep::kGdnRcpLn2` 不存在**：`kGdnChunkSize`/`kGdnRcpLn2`/`kGdnLn2`/
+   `kGdnL2NormEps`/`kGdnGateClip` 是 `prepare_common.h` 里**命名空间之外**的全局常量，
+   不能加 `Prep::`；已改为未限定名（`useExp2_ ? kGdnRcpLn2 : 1.0f`）。
+   同一类问题还有全局的 `HardwareInfo`/`BufferType`/`OnChipBuffer`（已不用 `Prep::`）。
+7. **`sparse_barrier.h`/`sparse_sync.h` 命名空间自洽**：它们先于 `sparse_common.h` 被
+   包含，函数体里未限定的 `PIPE_MTE3`/`PIPE_FIX`/`PIPE_ALL` 等需要在文件内引入
+   `using namespace AscendC;`，否则单独包含时找不到；已补上。
+8. **VF 辅助函数的链接属性**：`SparseLoadB16AsF32`/`SparseStoreB16` 从
+   `__simd_callee__` 改为 `__aicore__ inline`，与 chunk32 `_vf.h` 的
+   `LoadCastB16`/`StoreCastBf16`（在 `__VEC_SCOPE__` 里直接调用）一致。
+9. **清理**：删除 producer `Stage1Inputs` 的未使用局部 `rowOff`；两个
+   `ubQ_[rows * kHeadDim]`/`ubK_[...]` 的 LocalTensor 下标显式转 `uint32_t`
+   （`LocalTensor::operator[]` 只接受 `uint32_t`）。
 
 ## 6. 复用的数学助手（不要重推）
 
