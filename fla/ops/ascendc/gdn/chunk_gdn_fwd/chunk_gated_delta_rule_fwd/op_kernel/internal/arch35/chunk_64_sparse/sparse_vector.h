@@ -119,7 +119,8 @@ __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
         for (uint16_t stage = 0; stage < 6; ++stage) {
             LoadAlign(index, sAddr + static_cast<uint32_t>(stage) * 64);
             Gather(gathered, value, index);
-            MaskReg lower = UpdateMask<float>(1U << stage);
+            uint32_t lowerCount = 1U << stage;
+            MaskReg lower = UpdateMask<float>(lowerCount);
             MaskReg active;
             Xor(active, all, lower, all);
             Add<float, MaskMergeMode::MERGING>(value, value, gathered, active);
@@ -280,7 +281,8 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, score, all);
-            MaskReg lowerMask = UpdateMask<float>(row);
+            uint32_t lowerCount = static_cast<uint32_t>(row);
+            MaskReg lowerMask = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lowerMask);
             StoreAlign(l + static_cast<uint32_t>(row) * 64, gate, all);
         }
@@ -398,7 +400,8 @@ __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
             Mul(gate, ei, invJ, all);
             LoadAlign(raw, score + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, raw, all);
-            MaskReg lower = UpdateMask<float>(globalRow + 1);
+            uint32_t lowerCount = globalRow + 1U;
+            MaskReg lower = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lower);
             StoreBf16(dst + static_cast<uint32_t>(row) * 64, gate, all);
         }
