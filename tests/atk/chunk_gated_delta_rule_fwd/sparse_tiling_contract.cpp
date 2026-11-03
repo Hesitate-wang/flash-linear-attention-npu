@@ -12,8 +12,9 @@ int main()
     using namespace optiling;
     static_assert(std::is_standard_layout<GdnChunk64Sparse::FusedTilingData>::value);
     static_assert(std::is_trivially_copyable<GdnChunk64Sparse::FusedTilingData>::value);
-    static_assert(sizeof(GdnChunk64Sparse::PrepareTilingData) == 24 * sizeof(int64_t));
-    static_assert(offsetof(GdnChunk64Sparse::FusedTilingData, prepare) == 0);
+    static_assert(sizeof(GdnChunk64Sparse::FusedTilingData) % sizeof(uint64_t) == 0);
+    static_assert(offsetof(GdnChunk64Sparse::FusedTilingData, batch) == 0);
+    static_assert(GdnChunk64Sparse::kSparseAPrimeBytesPerTile == 64 * 64 * 2);
     assert(IsChunkGatedDeltaRuleFwdSparseLowParallelism(1, 8, 16));
     assert(!IsChunkGatedDeltaRuleFwdSparseLowParallelism(1, 9, 16));
     assert(!IsChunkGatedDeltaRuleFwdSparseLowParallelism(0, 1, 16));
@@ -54,8 +55,6 @@ int main()
     assert(!PlaceSparseWorkspaceRegion(8, 1, &cursor, &offset));
     assert(!AlignSparseWorkspace(1, 0, &offset));
 
-    static_assert(std::is_standard_layout<GdnChunk64Sparse::PipelineTilingData>::value);
-    static_assert(std::is_trivially_copyable<GdnChunk64Sparse::PipelineTilingData>::value);
     static_assert(GdnChunk64Sparse::kSparseScheduleSerial !=
                   GdnChunk64Sparse::kSparseSchedulePipeline);
     // The role barrier must stay clear of the stage-local 0..6 ids and of the

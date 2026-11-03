@@ -1,59 +1,51 @@
-# Arch35 Chunk64 GDN Forward Development Validation
+# Arch35 Chunk64 Sparse GDN Forward Validation
 
-## Scope and status
+## Current status
 
-The existing public ACLNN entry has an arch35 key-64 branch for BF16 Q/K/V, K=V=128 and FP32 gate/beta (optional a_log/dt_bias also FP32); low-precision gate/beta inputs are now cast to FP32 unconditionally, so the fused op is the only key-64 route. The internal schema is append-only and key 64 uses a private POD. For eligible low-parallelism calls (`B*Hv <= AIC/2`) the key-64 tiling selects a producer/consumer schedule: producer group c builds chunk i while consumer group `chainCount + c` finishes chunk i-1, paced by one all-AIV mode-0 barrier per iteration. Above that bound a group-serial schedule gives every group every launchGroups-th chain outright (producer half, one mode-1 rendezvous, consumer half; no mode-0 barrier). The operator is self-contained: the sparse roles use the internal `sparse_prep_lib.h` copy instead of chunk_gated_delta_rule_fwd_prepare headers, the standalone Prepare/H/O composition and its l0op calls are removed, and the CMake dependency machinery plus external `-I` paths are gone. This path exists only at source level; it has not been compiled by ccec or executed on Ascend 950, so it is not yet evidence of correctness, synchronization safety, or overlap.
+The chunk64 directory was redesigned and implemented from scratch. It uses a two-group producer/consumer pipeline, an FP32 register triangular solve, producer-side A', four consumer GEMMs, and a dedicated A' workspace. It does not reuse the former sparse implementation or its FP32 Cube solve.
 
-This host is macOS without the Ascend compiler/device. Source integration and ordinary host-side contract checks are distinct from CANN compilation, numerical correctness, synchronization safety and performance.
+The development host is macOS without `ccec`, an Ascend toolkit, or a visible NPU. Ascend compilation, device numerical correctness, synchronization stress, MSS and performance therefore remain unverified. No performance improvement is claimed without device measurements.
 
-## Contract and implementation
-
-| Item | Current source contract |
-|---|---|
-| Public API | Existing ACLNN signature and Python ten-element result unchanged |
-| Beta | Sigmoid follows non-null beta_eff output; allowNegEigval retains the existing requirement |
-| Internal schema | Two appended inputs, ten optional outputs, five appended attributes |
-| Dispatch | fused_prepare branches before Phase6 validation; key 64 has its own POD |
-| Topology | PlatformAscendC::GetCoreNumAic() determines the common MIX group count; schedule mode 1 |
-| Workspace | Prepare L×64 KiB; H 32 MiB + L×704 KiB; O L×64 KiB; disjoint regions plus system workspace |
-| Intermediate tensors | Existing ACLNN executor allocations, not duplicated scratch records |
-| Modes | Dense/packed metadata, norm, exp/exp2, stateVFirst and initial/final state carried in tiling |
-| Compatibility | Key 32 and Phase6 keys 1/2/301 retain their layouts and code paths; device regression pending |
-
-## Checks actually run
+## Checks run in this session
 
 | Check | Method | Result |
 |---|---|---|
-| Public ACLNN and ctypes ABI | Person/.venv Python: tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py | Passed; 29 public parameters |
-| Shared POD and workspace helper | C++17 with -Wall -Wextra -Werror: sparse_tiling_contract.cpp | Compiled and ran successfully |
-| Source whitespace | git diff --check | Passed at host integration checkpoint |
-| Internal OpDef/device argument order | sparse_entry_contract.py, including Prepare mirror field order | Passed for arch35 and arch22 |
-| Producer/consumer source integration | `sparse_pipeline.h` NT+1 loop, `sparse_consumer.h` cube/vector roles, `sparse_producer.h` wiring | Source complete; no compiler or device evidence |
-| Ascend C API contract review | knowledge-query/ascendc-api-knowledge-query cards: CrossCoreSetFlag/CrossCoreWaitFlag (modes 0/1/2/4, flagId ranges), FixpipeL0CToUB (FixpipeParamsArch3510, srcStride units), LoadData 2D V2, Mmad | Checked; fixed AIV1 mode-4 raw-id routing and removed a redundant GM->L1 DataCopy (mode-4 flagId 1/17) |
-| Consumer UB/L1 maps | `sparse_memory.h` static_assert (consumer UB 173 KiB, L1 152 KiB) | Compile-time bounds hold; runtime `GetCoreMemSize` pending |
-| CANN host and kernel compilation | Ascend 950 project build | Not run; toolchain unavailable |
-| CPU golden versus device | Existing gdn_reference.py and ATK harness | Not run; device unavailable |
-| Repeated synchronization and MSS | Ascend 950 | Not run |
-| Legacy routes | Chunk32 and Phase6 device regressions | Not run |
-| Performance | msprof op_summary Task Duration(us) | Not run; no speedup claimed |
+| Public ACLNN ABI | `python3 -I tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py` | Passed; 29 public parameters |
+| Internal OpDef/device argument order | `python3 -I tests/atk/chunk_gated_delta_rule_fwd/sparse_entry_contract.py` | Passed for arch35 and arch22 |
+| Host POD and workspace helpers | C++17 `-Wall -Wextra -Werror`: `sparse_tiling_contract.cpp` | Compiled and ran successfully |
+| Source whitespace | `git diff --check` | Passed |
+| Include boundary | Inspected all `chunk_64_sparse` includes | Only Ascend SDK headers and files inside this operator |
+| 64x64 inverse | NumPy forward substitution versus `inv(I+raw)` | Passed at FP64 tolerance |
+| 64-element scan | Six-stage snapshot scan versus `cumsum` | Passed at FP64 tolerance |
+| Full one-chunk dataflow | New W/U/A'/H/O equations versus token recurrence | Passed for H and O at FP64 tolerance |
+| Ascend C API contract | CANN knowledge cards: CrossCoreSetFlag/CrossCoreWaitFlag, arch35 regbase selection | Mode 0/4 routing and regbase amortization reviewed |
 
-The ABI script initially failed because it searched for the former inline exp/exp2 expression. Prepare now dispatches GateLowerLVF and ScaleRowsBetaExp2gVF by true/false template argument; the source contract check was updated to verify those actual branches and then passed.
+The numerical checks validate the redesigned equations, not Ascend instruction behavior. They are not ATK device tests.
 
-## Remaining verification
+## Resource checks
 
-- Compile on Ascend 950; resolve any CANN API/compiler diagnostics before runtime testing. The producer and consumer roles have never entered ccec.
-- First bring-up: run the NT+1 barrier-only loop (both roles' `RunChunk` disabled) to confirm the mode-0 participant count and repeated-launch flag state, then re-enable producer-only and compare W/U/g_cumsum against the serial Prepare kernel.
-- Source-level phase review: the pipeline uses mode-0 flag 7 across all AIVs, group-local mode-2 id 8 for the iteration boundary, and mode-4 ids 0-6/9 for stage handshakes. All groups, including idle ones, enter every barrier; the AIC never enters mode 0 and is released through its own AIVs. This is a source audit, not a device synchronization proof.
-- Validate dense and packed tails, head ratios 1/2/3/4, both exponential conventions, norm on/off, sigmoid/output coupling, state layout and dtype, initial/final state, and every optional public output. `A'` includes the diagonal (`j <= i`), matching `chunk_fwd_o` Stage3 and chunk32's `GateAttnVF`.
-- Run repeated execution and MSS, then chunk32/Phase6/fallback regressions.
-- Measure a real low-parallelism workload before claiming a performance benefit. Key 64 now has a source-level producer/consumer schedule but no device or timing evidence.
+- Producer UB map: 144 KiB per AIV; L1 map: 72 KiB.
+- Consumer UB map: 190 KiB per AIV; L1 map: 152 KiB.
+- Both UB maps have static assertions against the 208 KiB regbase budget.
+- A' workspace is exactly `totalChunks * Hv * 8192` bytes before system workspace, with checked host arithmetic.
+- Every ComputeMm has one Fixpipe and one ReleaseL0C. The launch primes and drains M_MTE1/FIX_M once.
 
-## Source locations
+## Required Ascend 950 validation
 
-- op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.cpp: public entry; unconditional FP32 cast plus the single fused call (no other operator invoked).
-- op_host/chunk_gated_delta_rule_fwd_def.cpp and op_host/op_api/chunk_gated_delta_rule_fwd.cpp: appended internal schema and launcher (null optional outputs occupy dummy slots).
-- op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp: key64 tiling; serial workspace removed; `GDN_SPARSE_DEBUG_MODE` runtime bisect.
-- op_kernel/internal/arch35/chunk_64_sparse/sparse_fused_tiling.h: shared host/device POD with inlined H/O tiling structs.
-- op_kernel/internal/arch35/chunk_64_sparse/sparse_prep_lib.h: internal copy of the Prepare math/datacopy/matmul helpers.
-- op_kernel/internal/arch35/chunk_64_sparse/sparse_pipeline.h: pipeline and group-serial schedules.
-- fused-entry-source-analysis.md: historical Phase6 integration analysis, not current implementation status.
+1. Build the standalone operator with `bash build.sh --pkg --soc=ascend950 --vendor_name=fla_npu --ops=chunk_gated_delta_rule_fwd`; fix any CANN-version API diagnostics.
+2. Run `tests/atk/chunk_gated_delta_rule_fwd/scripts/pipeline_smoke_test.py`, starting with dense case 348 and varlen case 187. Compare DUT, the six-ACLNN benchmark and FP64 golden outputs.
+3. Cover tails 1/16/31/32/33/63/64/65 tokens, Hv/Hk=1/2/3/4, norm on/off, exp/exp2, beta sigmoid/output coupling, allowNegEigval, stateVFirst, FP32/BF16 initial/final state, A output and zero-length varlen sequences.
+4. Repeat execution and run MSS to validate mode-0/mode-4 counters and GM/UB/L1/L0 lifetimes.
+5. Regress chunk32 and Phase6/fallback routes.
+6. Measure the same real low-parallelism workload with `msprof op_summary` `Task Duration(us)`. Compare against the pre-change implementation only after both pass the same accuracy gate; retain or revert optimizations based on measured medians.
+
+## Main source files
+
+- `op_kernel/internal/arch35/chunk_64_sparse/sparse_vector.h`: scan, normalization, inverse, gates, state and output VF.
+- `sparse_cube.h`: LoadData/Mmad/Fixpipe helpers and L0 operand reuse.
+- `sparse_producer.h`: KKT/QK, inverse, W/U/A' production.
+- `sparse_consumer.h`: H recurrence and O production.
+- `sparse_sync.h`: mode-0 pipeline and mode-4 directional handshakes.
+- `sparse_memory.h`: UB/L1/L0 maps.
+- `sparse_fused_tiling.h`: minimal shared POD.
+- `op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp`: selector, exact launch width and A' workspace.

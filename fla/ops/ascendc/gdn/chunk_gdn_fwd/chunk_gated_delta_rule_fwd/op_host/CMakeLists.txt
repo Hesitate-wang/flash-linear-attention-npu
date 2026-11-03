@@ -1,9 +1,7 @@
 add_op_to_compiled_list()
 
-# 本算子自包含：kernel/host 不引用其他算子目录的头文件或实现（chunk_64_sparse
-# 使用内部副本 sparse_prep_lib.h，串行回退已由组内串行编排取代），因此不再需要
-# 把 chunk_gated_delta_rule_fwd_prepare / chunk_fwd_h / chunk_fwd_o 的 op_host
-# 拉入过滤构建，也不再需要指向算子目录之外的 -I 路径。
+# 本算子自包含：chunk_64_sparse 直接实现 Prep 与 H/O，不引用其他算子目录的
+# 头文件或实现，也不需要为过滤构建拉入其他算子或添加算子外 include 路径。
 
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE
@@ -16,10 +14,6 @@ add_ops_compile_options(
     OP_NAME ChunkGatedDeltaRuleFwd
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
-            # 临时实验（507015 排查）：屏蔽 chunk_64_sparse 全部 CrossCore 同步，
-            # 用于判定超时是否由跨核同步协议导致。输出必然错误（竞态），
-            # 实验结束必须删除本行。详见 chunk_64_sparse/HANDOFF.md §9。
-            -DGDN_SPARSE_DEBUG_NO_CROSSCORE_SYNC
             -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/internal/coefficient_generation
             -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/internal/coefficient_generation/gated_delta_rule_solve_tri
             -I${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/internal/operators/chunk_gated_delta_rule_fwd_h/op_kernel

@@ -28,13 +28,9 @@ def main():
         actual = re.findall(r"GM_ADDR\s+(\w+)", match.group(1))
         assert actual == INPUTS + OUTPUTS + ["workspace", "tiling"], (arch, actual)
     mirror = (OP / "op_kernel/internal/arch35/chunk_64_sparse/sparse_fused_tiling.h").read_text()
-    prepare = (OP.parent / "chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/"
-               "chunk_gated_delta_rule_fwd_prepare_common.h").read_text()
-    def fields(source, name):
-        body = re.search(rf"struct\s+{name}\s*\{{(.*?)\}};", source, re.S)
-        assert body, name
-        return re.findall(r"int64_t\s+(\w+)\s*;", body.group(1))
-    assert fields(mirror, "PrepareTilingData") == fields(prepare, "ChunkGatedDeltaRuleFwdStageTilingData")
+    assert "struct FusedTilingData" in mirror
+    assert "PrepareTilingData" not in mirror
+    assert "ChunkFwdHPlainTilingData" not in mirror
     public_header = (OP / "op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.h").read_text()
     assert "fused_prepare" not in public_header
     assert "ChunkGatedDeltaRuleFwdPrepareArgs" not in public_header

@@ -1,66 +1,77 @@
-# Arch35 Chunk64 Fused GDN Forward Design
+# Arch35 Chunk64 Sparse GDN Forward Design
 
-方案设计规则版本：`V2`
+## 1. Scope
 
-This document retains the original design baseline and review checklist. The current development implementation and selector are described in [`api.md`](api.md); actual checks are recorded in [`validation.md`](validation.md). The existing ACLNN entry now selects the private key-64 integration for eligible calls, casting low-precision gate/beta to FP32 first, so the standalone Prepare -> H -> O route is no longer used. This source integration is not evidence of Ascend 950 build or device correctness.
+This is a clean chunk64 implementation for Ascend 950 / arch35. It targets BF16 Q/K/V, FP32 gate/beta, `K=V=128`, and low parallelism `B*Hv <= AIC/2`. The public ACLNN ABI and ten-element Python result are unchanged. The implementation is self-contained under `chunk_gated_delta_rule_fwd`; it does not include another operator's headers or call standalone Prepare/H/O operators.
 
-## 1. Goal
+Device compilation and performance are not claimed by this document; actual checks are listed in `validation.md`.
 
-Implement a private Ascend 950 / arch35 chunk64 GDN path from optional Q/K L2Norm through FwdO, targeting low parallelism `B*Hv <= AICcores/2`. The existing Prepare kernel already performs chunk64 stages 0-7 in MIX AIC:AIV 1:2; Phase6 composes coefficient generation, H and O inside a separate single kernel entry. The ACLNN composite currently enqueues Prepare, H and O as separate launches. The new route must combine the computations in one device kernel; adding a key that aliases Phase6 is not fusion.
+## 2. Dataflow
 
-No user-supplied performance model case or latency target exists. No speedup or target reachability claim is made. The local macOS host has no `ccec` or `/usr/local/Ascend`, so device-only resource/build evidence is pending.
+For each `(sequence, value-head)` chain, two MIX groups execute a one-chunk skewed pipeline.
 
-## 2. Dependency and source-derived stage contract
+Producer, per chunk:
 
-For each dense `(b,hv)` chain, `hk = hv / (Hv/Hk)` and the recurrent state obeys `state[c+1] <- H(W[c],U[c],state[c])`. Chunks on one chain are strictly ordered. O consumes the same chunk's H and `v_new`; it must not run before those records are published.
+1. Two AIVs load independent 32-row Q/K/V bands. They compute gate/beta transforms, a 64-element Sklansky prefix sum, exp/exp2 energies, optional L2 normalization, `vb=v*beta`, and `kbg=k_hat*beta*E(g)`.
+2. AIC computes `KKT=K@K^T` and `QK=Q@K^T`.
+3. AIV0 constructs `-raw` and computes `A=(I+raw)^-1` in FP32 registers. Eight rows stay live per VF scope; eight scopes cover the 64 rows. No FP32 Cube solve or FP32 L1 NZ path is used.
+4. AIC computes `W=A@kbg` and `U=A@vb`. U reuses A already loaded in L0A by W.
+5. Both AIVs compute their own `A'` row band from QK and the gate energies. W/U/A' and requested Prepare outputs are published through GM.
 
-Prepare's source stages are: S0 resident identity/leaf initialization; S1 optional q/k L2Norm, gate transform/cumsum and beta transform; S2 KKT Cube; S3 lower gate/leaf transforms; S4 Y Cube with GM workspace round trip; S5 A/inverse coefficient Cube; S6 `vb`/`kbg` Vector inputs; S7 W/U Cube. The implementation is `ChunkGatedDeltaRuleFwdPrepareKernel::Init/Process` in `chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare.h`; its source map and helpers are in `_common.h`.
+Consumer, one chunk behind:
 
-Existing H/O stages are called by `RunPhase6` through `DispatchFwdH` and `DispatchFwdO` in `op_kernel/internal/arch35/chunk_gated_delta_rule_fwd_arch35.cpp`. ACLNN currently calls `l0op::ChunkGatedDeltaRuleFwdPrepare`, `ChunkFwdH`, and `ChunkFwdO` separately in `op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.cpp`; the wrapper is one public API but not one device launch.
+1. Load W/U/Q/K/A' and gate cumsum; upload the current BF16 state mirror and inputs to L1.
+2. AIC computes `P=W@H` and `O_s=Q@H`. The second product reuses H already loaded in L0B by P.
+3. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, then publishes both to L1.
+4. AIC computes `D=K^T@right` (or `right^T@K` for stateVFirst) and `O_l=A'@v_new`.
+5. AIV writes `o=(E(g)*O_s+O_l)*scale`, updates the FP32 state with `H=E(g_last)*H+D`, and refreshes its BF16 cube mirror.
 
-Numeric facts already visible in source: Prepare uses `kGdnL2NormEps=1e-6`; vector normalization math is FP32 and normalized Q/K are stored at input precision. Beta sigmoid and optional `2*sigmoid(beta)` are controlled by explicit Prepare attributes and the beta-eff output contract. Gate cumsum honors the selected exp/exp2 convention. Exact solve, BF16 rounding, state update, O scaling and output conversion order must be reconciled expression-by-expression against H/O and `tests/atk/chunk_gated_delta_rule_fwd/gdn_reference.py` before calling the new implementation numerically equivalent.
+Per chain, the Cube MAC count is approximately 2.10M in producer and 3.67M in consumer. QK/A' and the FP32 triangular solve are not repeated in consumer.
 
-## 3. Ownership and topology
+## 3. Schedule and synchronization
 
-Prepare's MIX mapping is specific and source-defined: AIV block index maps to the cube group via `/2`, `GetSubBlockIdx()` selects vector lane 0/1, while AIC block index is the group index. Prepare tasks use pack size four (three for `Hv/Hk=3`); AIV0 handles local slots 0,2, AIV1 handles 1,3, and ping/pong is `(task>>1)&1`. Its intra-group flags use IDs 0..15 and AIV1's offset 16. This is not a producer/consumer group protocol.
+Pipeline mode launches exactly `2*chainCount` MIX groups, so there are no idle groups in the mode-0 collective. Chain `c` uses producer group `c` and consumer group `chainCount+c`.
 
-The Prepare class requires its own `ChunkGatedDeltaRuleFwdStageTilingData`, per-core workspace and on-chip initialization. H/O use different task schedulers and Phase6 tiling. Phase6 `SyncAll` calls require all launched participants. H/O's ready records identify `(physical batch,chunk,hv)` and do not establish Prepare→H readiness. Therefore calling Prepare `Process()` then `RunPhase6()` without redesigning roles, TPipe lifecycle, barriers, workspace, and GM visibility is not a valid schedule.
+Iteration `i`:
 
-A fused schedule must define one launch-wide participant topology and an owner for every stage and output. It must prove strict chain ordering, Prepare-to-H visibility, H-to-O readiness, tail/no-work behavior, slot reuse, and final join. No consumer may wait for work only it can produce; no subset may enter a global barrier. The low-parallelism predicate alone does not establish a useful producer/consumer split. The serial-phase baseline makes every participant enter both boundaries; synchronization correctness still requires Ascend compilation and device stress evidence.
+- producer builds chunk `i` when it exists;
+- consumer builds chunk `i-1` when it exists;
+- every launched AIV executes one mode-0 barrier, including short varlen chains.
 
-The serial-phase implementation uses the standalone arch35 Prepare, H and O interfaces, not the Phase6 wrapper. A distinct POD carries all three tilings; intermediate tensors remain owned by the existing ACLNN executor, while scratch regions are disjoint. Every MIX participant must enter both phase boundaries even if its phase has no local work. This establishes a functional fusion baseline, not improved low-parallelism throughput; device validation remains pending.
+The mode-0 Set uses PIPE_MTE3 after a full local pipe barrier, and Wait blocks PIPE_MTE2. This publishes producer GM writes before consumer GM reads. AIC does not enter mode 0; its next chunk cannot start until its own AIVs publish that chunk's L1 inputs through mode 4.
 
-CrossCoreSetFlag/CrossCoreWaitFlag mode 0 provides the all-core same-type phase boundary; mode 2 then joins the AIC and both AIVs in each MIX group. This is phase closure, not per-task producer/consumer readiness. IBSet/IBWait is not used by this adapter. Phase-local credits must be drained before wrapper flag reuse; all participants follow identical phase order. The route is integrated as development code, with Ascend 950 compilation, synchronization stress and MSS still pending.
+Mode-4 flags are directional. AIV0/AIV1 use raw IDs 0..15. AIC waits IDs `id` and `id+16` for a two-AIV input and publishes to either AIV0 only or both AIVs as required. KKT is sent only to AIV0, avoiding unconsumed AIV1 credits.
 
-## 4. Resource and workspace baseline
+Above the low-parallelism bound, each group runs producer then consumer for whole chains. A mode-1 AIV rendezvous publishes the chain inside that group; no mode-0 barrier is used.
 
-Prepare source declares L1 512 KiB, UB 248 KiB, L0A/L0B 64 KiB each and L0C 256 KiB. Its V=128 map peaks at 496 KiB L1 and 236 KiB UB. These figures describe the existing Prepare kernel only; they do not prove a fused adapter's concurrent live set fits. Chunk32 resources are not a valid substitute.
+## 4. A' workspace
 
-Prepare Stage4 uses 64 KiB per core for four FP32 64x64 Y records; its current host tiler requests `coreNum*64KiB` plus system workspace. Phase6 has a separate coefficient/H/O workspace and serialized trailer. The new route needs a private POD and non-overlapping workspace regions for every retained Prepare intermediate, H/vNew, O input, state as applicable, and cross-group flags. Host sizing must align and overflow-check every multiplication/addition; device offsets must match the host POD. Do not reinterpret or modify the key32 or Phase6 tiling layouts.
+A' is not part of the public schema. Host reserves `totalChunks * Hv * 64 * 64 * sizeof(bf16)` bytes, 512-byte aligned, in user workspace. Its tile index is identical to the H tile index:
 
-Before enabling the route, produce complete per-stage absolute half-open L1/UB/L0 address maps, live ranges, peaks, GM record offsets/sizes, transfer counts/bytes, and reuse conditions. The currently checked source-derived numbers are a baseline, not that fused map.
+- dense: `(batch*chunksPerBatch + chunk)*Hv + hv`;
+- varlen: `(sequenceChunkPrefix + chunk)*Hv + hv`.
 
-## 5. Task domain and low-parallelism candidate
+Each AIV writes/reads a 32-row, 4 KiB band. The mode-0 barrier is the cross-group visibility edge. No other serial H/O workspace is retained.
 
-Dense Prepare task identity is `(b,chunk,hv)`; recurrence identity is `(b,hv)`. `B*Hv <= AICcores/2` is only an initial selector condition. A design must also account for number of chunks, actual independent chains, role counts, work waves, tail load and whether any consumer tasks are ready without relying on a consumer-produced dependency. No user performance case was supplied, so use no invented case as a target; report a representative arithmetic case only as a scheduling illustration and do not claim measured performance.
+## 5. On-chip maps
 
-The first supported subset should be the intersection of Prepare, H/O, and ACLNN contracts. Do not silently exclude output/state/mode requests if doing so changes current behavior: such calls may use the fused route only when every requested output and semantic option is implemented; otherwise retain the existing supported route or its current error behavior. In particular, preserve the coupling between `betaEffOutOptional`, sigmoid and `allowNegEigval`.
+| Resource | Producer | Consumer |
+|---|---:|---:|
+| UB per AIV | 144 KiB | 190 KiB |
+| L1 per MIX group | 72 KiB | 152 KiB |
+| L0A/L0B | two 32 KiB banks | two 32 KiB banks |
+| L0C | four 64 KiB banks | four 64 KiB banks |
 
-## 6. R01-R21 status
+Both UB maps are below the 208 KiB regbase budget. `sparse_memory.h` contains compile-time bound assertions. Row bands are always fully defined: invalid Q/K/V/W/U rows are zero-filled before upload; A' workspace is fully written for each tile.
 
-| Rule | Status | Evidence still needed |
-|---|---|---|
-| R01-R02 | Partial | Stage graph identified; a unified role/ownership schedule is not proven |
-| R03-R09 | Partial | Existing Prepare map is source-derived; fused concurrent live ranges/capacity remain open |
-| R10-R18 | Blocked | End-to-end transfers, record ownership, slot lifetimes and AIV mapping |
-| R19 | Blocked | Minimum legal stage count after full live-set analysis |
-| R20 | Partial | Candidate threshold known; unified blockDim/waves/tails and device selection pending |
-| R21 | Partial | Epsilon and storage/compute boundaries known; full range/cast analysis pending |
+State is split into contiguous 64-row halves. For `[K,V]`, each AIV owns 64 K rows; for `[V,K]`, each owns 64 V rows. FP32 state remains resident across chunks, while the BF16 mirror is used for Cube and public H output. Initial/final state may be FP32 or BF16 according to the existing API contract.
 
-Implementation proceeds through the existing public API as requested. The private route is development code pending Ascend compilation, accuracy, synchronization and resource validation; the checklist above records remaining evidence, not an instruction to leave dispatch disconnected.
+## 6. Numeric order
 
-## 7. Implementation and validation
+- Gate softplus, beta sigmoid, L2 epsilon, exp/exp2 selection, scale and output casts follow the existing wrapper/reference semantics.
+- Prefix sum uses six register snapshot gather/add stages.
+- The inverse computes `x[i]=e[i]+sum(t<i, -raw[i,t]*x[t])`, equivalent to `(I+raw)^-1`.
+- Energy ratios `E(g[i])/E(g[j])` form lower/attention gates. A' includes the diagonal.
+- Recurrence state and vector epilogues remain FP32; A/W/U/A'/v_new/right/H cube inputs are BF16.
 
-Add a distinct fused kernel body and tiling data, rather than aliasing Phase6. Keep key 32 and Phase6 keys 1/2/301 unchanged. Reuse existing Prepare and H/O math only through interfaces whose tiling, ownership, resource lifetime and synchronization assumptions have been proven compatible. Integrate exactly one fused `ADD_TO_LAUNCHER_LIST_AICORE` operation for eligible calls; host selector, tiling key and device dispatch must agree. Preserve the public ten-element return contract and every requested optional output.
-
-Complete all stage and ACLNN integration work before the requested consolidated test phase. On Ascend950, verify build/install, CPU golden and ATK accuracy, eligibility/fallback boundaries, tails and supported state/output modes, repeat synchronization and MSS, legacy keys, and performance using `msprof op_summary` `Task Duration(us)`. Record only actual evidence in `docs/validation.md`, then execute `operator-review`. On this Mac, source/static checks are possible but Ascend build, device accuracy, MSS and performance remain unverified.
+CPU checks for the independent inverse, scan, and full one-chunk dataflow are recorded in `validation.md`; these do not replace device accuracy tests.
