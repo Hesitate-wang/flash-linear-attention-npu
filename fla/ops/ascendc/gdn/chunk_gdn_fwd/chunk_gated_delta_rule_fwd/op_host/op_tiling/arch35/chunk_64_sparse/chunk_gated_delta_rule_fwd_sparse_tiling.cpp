@@ -9,6 +9,7 @@
 #include "tiling_base/tiling_templates_registry.h"
 #include "securec.h"
 #include <cstddef>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 
@@ -304,6 +305,11 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.pipeline.maxChunks = usePipeline ? pipeline.maxChunks : 0;
     td.pipeline.producerGroups = usePipeline ? pipeline.producerGroups : 0;
     td.pipeline.consumerGroups = usePipeline ? pipeline.consumerGroups : 0;
+    // Bring-up bisect switch: GDN_SPARSE_DEBUG_MODE=1/2/3 runs barrier-only /
+    // producer-only / consumer-only on device without a rebuild.
+    if (const char *debugEnv = std::getenv("GDN_SPARSE_DEBUG_MODE")) {
+        td.pipeline.debugMode = static_cast<uint32_t>(std::atoi(debugEnv));
+    }
 
     // Serial baseline (schedule=0 only): Prepare scratch, then the standalone
     // H and O recipes. The pipeline roles exchange every intermediate through

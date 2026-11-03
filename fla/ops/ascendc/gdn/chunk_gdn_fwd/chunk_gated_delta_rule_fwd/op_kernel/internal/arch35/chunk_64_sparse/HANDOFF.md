@@ -216,13 +216,28 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
    已验证的串行 Prepare（`Stage2_AicOne`）对同一个 k̂ k̂ᵀ 用 `transposeB=false`
    （"B NZ is [n,k]: same k' tile as A, n=m"），已改回 `false`——不修则 KKT
    拿到转置错误的 B，A/W/U/o 全错（精度门会拦，不是 507015 的成因）。
-7. **P0 延迟优化落地（精度无关）**：
+7. **第五轮（2026-11-03 11:09，plog 到手）**：`timeout or trap error,
+   subErrType 0x4`，core 2 与 core 18（均 aicore，PC 不同）、
+   `cube/vec error=0`——同步死锁特征（与 `aiv_crosscoreflag_subblock_507015`
+   卡的三联征一致）。core 2 是 producer 组、core 18 是空闲组；不同 PC 与
+   "AIC 分别停在 mode-4 stage 等待 / mode-2 relay 等待"一致，即某个 AIV
+   未到达 mode-0 栅栏导致全局卡住。本轮按 API 卡逐项复核：mode 0/2/4 语义、
+   flagId 范围（0-15 / AIC 0-31）、pipe 约束（显式、非 PIPE_S/PIPE_ALL）、
+   ±16 路由，**全部符合官方契约**；模式 0 要求同类型全核到达——任一 AIV
+   先挂则整网超时。**调试开关改为运行时**：host tiling 读环境变量
+   `GDN_SPARSE_DEBUG_MODE`（0 默认全流水 / 1 只栅栏 / 2 只 producer /
+   3 只 consumer）写入 `td.pipeline.debugMode`，免重编译：
+   `GDN_SPARSE_DEBUG_MODE=1 python3 pipeline_smoke_test.py ...`。
+   二分顺序 1→2→3；mode 2/3 的精度必然错（对方角色不写输出），只看是否
+   507015。若 mode=1 就挂，下一步把 plog 中 aivec 侧条目（本次未贴出）拿来
+   确认 AIV 停在哪个 stage。
+8. **P0 延迟优化落地（精度无关）**（本轮同 §12 修订）：
    - host 在 `usePipeline` 时不再序列化串行 H/O workspace（~55MiB → 0，
      kernel 在 pipeline 模式不读这些区域，aclnn workspace 随之缩小）；
    - varlen 的 `td.pipeline.maxChunks` 收紧为逐序列 `max ceil(len_s/64)`
      （host 经 `GetOptionalInputTensor` 读 cu_seqlens，ValueDepend 已声明），
      短链不再空跑栅栏轮。dense 路径与 chain 位置映射不变。
-8. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
+9. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
    dispatch/链解析/串行适配（审计一致，设备行为待 §9 分步验证）。
 
 ### 6.1 数值/算法

@@ -68,6 +68,11 @@ struct PipelineTilingData {
     // Producer groups [0, chainCount), consumer groups [chainCount, 2*chainCount).
     uint32_t producerGroups;
     uint32_t consumerGroups;
+    // Bring-up bisect switch, host-filled from the GDN_SPARSE_DEBUG_MODE
+    // environment variable so no rebuild is needed: 0 = full pipeline,
+    // 1 = barrier/relay only, 2 = producer only, 3 = consumer only.
+    uint32_t debugMode;
+    uint32_t reserved;
 };
 
 struct FusedTilingData {

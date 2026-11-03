@@ -95,15 +95,11 @@ __aicore__ inline void RunIdlePipeline(const FusedTilingData &td)
     }
 }
 
-// Compile-time bring-up switch (see HANDOFF §9). Build with
-//   --cxx-flag=-DGDN_SPARSE_DEBUG_MODE=<n>
-// 0 (default): full pipeline; 1: barrier only; 2: producer only;
-// 3: consumer only. Mode 2/3 leave the partner role's outputs unwritten, so
-// they isolate the crashing side rather than produce correct numbers.
-#ifndef GDN_SPARSE_DEBUG_MODE
-#define GDN_SPARSE_DEBUG_MODE 0
-#endif
-
+// Bring-up bisect switch, driven at runtime by the host-filled
+// td.pipeline.debugMode (GDN_SPARSE_DEBUG_MODE env). 0 (default): full
+// pipeline; 1: barrier/relay only; 2: producer only; 3: consumer only.
+// Mode 2/3 leave the partner role's outputs unwritten, so they isolate the
+// crashing side rather than produce correct numbers.
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
 {
     const uint32_t chains = td.pipeline.chainCount;
@@ -113,18 +109,19 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
         return;
     }
     const uint32_t groupIdx = SparseGroupIndex();
+    const uint32_t debugMode = td.pipeline.debugMode;
     if (groupIdx < chains) {
-#if GDN_SPARSE_DEBUG_MODE == 1 || GDN_SPARSE_DEBUG_MODE == 3
-        RunIdlePipeline(td);
-#else
-        RunProducerPipeline(args, td, groupIdx);
-#endif
+        if (debugMode == 1 || debugMode == 3) {
+            RunIdlePipeline(td);
+        } else {
+            RunProducerPipeline(args, td, groupIdx);
+        }
     } else if (groupIdx < 2U * chains) {
-#if GDN_SPARSE_DEBUG_MODE == 1 || GDN_SPARSE_DEBUG_MODE == 2
-        RunIdlePipeline(td);
-#else
-        RunConsumerPipeline(args, td, groupIdx - chains);
-#endif
+        if (debugMode == 1 || debugMode == 2) {
+            RunIdlePipeline(td);
+        } else {
+            RunConsumerPipeline(args, td, groupIdx - chains);
+        }
     } else {
         RunIdlePipeline(td);
     }
