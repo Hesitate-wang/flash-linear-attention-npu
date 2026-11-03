@@ -140,6 +140,22 @@ def _run_streaming(cmd: list[str], cwd: Path, env: dict[str, str]) -> tuple[int,
     return process.wait(), "".join(lines)
 
 
+def _atk_error_excerpt(log_path: Path, limit: int = 60) -> str:
+    """ATK 会把内部异常记录到任务日志后以 0 退出，这里提取真正的失败原因。"""
+    if not log_path.is_file():
+        return f"\n未找到 ATK 任务日志：{log_path}"
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    pattern = re.compile(
+        r"Error:|Traceback|atk task failed|run_opp_task fail|create_dataset fail|"
+        r"failed to|缺少|不支持|ACLRuntimeError|ATKRuntimeError",
+        re.IGNORECASE,
+    )
+    hits = [line.strip() for line in lines if pattern.search(line)]
+    if not hits:
+        hits = [line.strip() for line in lines[-limit:] if line.strip()]
+    return f"\nATK 日志摘录（{log_path}）：\n" + "\n".join(hits[-limit:])
+
+
 def run_accuracy(
     case_json: Path, device: int, atk_bin: str, result_dir: Path
 ) -> dict:
@@ -157,8 +173,10 @@ def run_accuracy(
     )
     matches = re.findall(r"双标杆精度测试完成：(.+)", output)
     if rc != 0 or not matches:
+        detail = _atk_error_excerpt(result_dir / "atk_task.log")
         raise RuntimeError(
-            f"双标杆执行失败（rc={rc}），日志尾部：\n{output[-2000:]}"
+            f"run_double_benchmark.sh 失败（rc={rc}）。"
+            f"{detail}\n命令输出尾部：\n{output[-2000:]}"
         )
     run_dir = Path(matches[-1].strip())
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))

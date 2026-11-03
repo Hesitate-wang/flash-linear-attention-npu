@@ -23,65 +23,115 @@ bool SparseBool(const Attrs *attrs, size_t index)
 
 bool SparseShape(const gert::StorageShape *shape, std::initializer_list<int64_t> dims)
 {
-    if (shape == nullptr || shape->GetStorageShape().GetDimNum() != dims.size()) {
+    if (shape == nullptr) {
         return false;
     }
-    size_t index = 0;
-    for (int64_t dim : dims) {
-        if (shape->GetStorageShape().GetDim(index++) != dim) {
+    const auto matches = [&dims](const gert::Shape &candidate) {
+        if (candidate.GetDimNum() != dims.size()) {
             return false;
         }
+        size_t index = 0;
+        for (int64_t dim : dims) {
+            if (candidate.GetDim(index++) != dim) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return matches(shape->GetStorageShape()) || matches(shape->GetOriginShape());
+}
+
+int64_t SparseNumel(std::initializer_list<int64_t> dims)
+{
+    int64_t numel = 1;
+    for (int64_t dim : dims) {
+        numel *= dim;
     }
-    return true;
+    return numel;
+}
+
+// Executor-owned and caller output tensors may reach tiling with the storage
+// descriptor collapsed to the flat element count (same lesson as the chunk32
+// path). ACLNN already validated the logical shape, so accept a rank-1 storage
+// whose element count matches in addition to the storage/origin forms.
+bool SparseShapeTolerant(const gert::StorageShape *shape, std::initializer_list<int64_t> dims)
+{
+    if (SparseShape(shape, dims)) {
+        return true;
+    }
+    if (shape == nullptr) {
+        return false;
+    }
+    const gert::Shape &storage = shape->GetStorageShape();
+    return storage.GetDimNum() == 1 && storage.GetDim(0) == SparseNumel(dims);
 }
 } // namespace
 
 ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *context)
 {
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid sparse tiling context."),
+                return ge::GRAPH_FAILED);
     const auto *attrs = context->GetAttrs();
     const auto *q = context->GetOptionalInputShape(0);
     const auto *v = context->GetOptionalInputShape(2);
-    if (attrs == nullptr || q == nullptr || v == nullptr ||
-        q->GetStorageShape().GetDimNum() != 4 || v->GetStorageShape().GetDimNum() != 4) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(attrs == nullptr || q == nullptr || v == nullptr ||
+                    q->GetStorageShape().GetDimNum() != 4 || v->GetStorageShape().GetDimNum() != 4,
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 requires attrs and rank-4 q/v storage shapes."),
+                return ge::GRAPH_FAILED);
     const auto &qs = q->GetStorageShape();
     const int64_t batch = qs.GetDim(0);
     const int64_t hk = qs.GetDim(1);
     const int64_t tokens = qs.GetDim(2);
     const int64_t hv = v->GetStorageShape().GetDim(1);
     const int64_t *chunkSize = attrs->GetAttrPointer<int64_t>(1);
-    if (batch <= 0 || hk <= 0 || hv <= 0 || tokens <= 0 || hk > hv || hv % hk != 0 || hv / hk > 4 ||
-        qs.GetDim(3) != 128 || chunkSize == nullptr || *chunkSize != 64 ||
-        !SparseShape(context->GetOptionalInputShape(1), {batch, hk, tokens, 128}) ||
-        !SparseShape(v, {batch, hv, tokens, 128}) ||
-        !SparseShape(context->GetOptionalInputShape(3), {batch, hv, tokens}) ||
-        !SparseShape(context->GetOptionalInputShape(5), {batch, hv, tokens})) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(batch <= 0 || hk <= 0 || hv <= 0 || tokens <= 0 || hk > hv || hv % hk != 0 ||
+                    hv / hk > 4 || qs.GetDim(3) != 128 || chunkSize == nullptr || *chunkSize != 64,
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 requires positive B/Hk/Hv/T, Hk<=Hv, Hv%Hk==0, Hv/Hk<=4, "
+                        "K=128 and chunk_size=64; got B=%ld Hk=%ld Hv=%ld T=%ld K=%ld.",
+                        batch, hk, hv, tokens, qs.GetDim(3)),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!SparseShape(context->GetOptionalInputShape(1), {batch, hk, tokens, 128}) ||
+                    !SparseShape(v, {batch, hv, tokens, 128}) ||
+                    !SparseShape(context->GetOptionalInputShape(3), {batch, hv, tokens}) ||
+                    !SparseShape(context->GetOptionalInputShape(5), {batch, hv, tokens}),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 input storage mismatch: k/v=[%ld,%ld,%ld,128], beta/g=[%ld,%ld,%ld].",
+                        batch, hk, tokens, batch, hv, tokens),
+                return ge::GRAPH_FAILED);
     for (size_t index : {size_t(0), size_t(1), size_t(2)}) {
         const auto *desc = context->GetInputDesc(index);
-        if (desc == nullptr || desc->GetDataType() != ge::DT_BF16) {
-            return ge::GRAPH_FAILED;
-        }
+        OP_CHECK_IF(desc == nullptr || desc->GetDataType() != ge::DT_BF16,
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 requires BF16 q/k/v; input %zu violates the contract.",
+                            index),
+                    return ge::GRAPH_FAILED);
     }
     for (size_t index : {size_t(3), size_t(5), size_t(10), size_t(11)}) {
         const auto *desc = context->GetOptionalInputDesc(index);
-        if ((index < 6 && desc == nullptr) || (desc != nullptr && desc->GetDataType() != ge::DT_FLOAT)) {
-            return ge::GRAPH_FAILED;
-        }
+        OP_CHECK_IF((index < 6 && desc == nullptr) ||
+                        (desc != nullptr && desc->GetDataType() != ge::DT_FLOAT),
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 requires FP32 beta/raw_g (and FP32 a_log/dt_bias when "
+                            "present); input %zu violates the contract.",
+                            index),
+                    return ge::GRAPH_FAILED);
     }
     const auto *qkvLayout = attrs->GetAttrPointer<int64_t>(5);
     const auto *oLayout = attrs->GetAttrPointer<int64_t>(6);
-    if ((qkvLayout != nullptr && *qkvLayout != 0) ||
-        (oLayout != nullptr && *oLayout != 1)) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF((qkvLayout != nullptr && *qkvLayout != 0) ||
+                    (oLayout != nullptr && *oLayout != 1),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 requires qkv_layout=0 and o_layout=1(BSND)."),
+                return ge::GRAPH_FAILED);
     for (size_t index : {size_t(10), size_t(11)}) {
         const auto *shape = context->GetOptionalInputShape(index);
-        if (shape != nullptr && !SparseShape(shape, {hv})) {
-            return ge::GRAPH_FAILED;
-        }
+        OP_CHECK_IF(shape != nullptr && !SparseShape(shape, {hv}),
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 optional input %zu must have shape [Hv=%ld].", index, hv),
+                    return ge::GRAPH_FAILED);
     }
     const auto *cu = context->GetOptionalInputShape(8);
     const auto *indices = context->GetOptionalInputShape(9);
@@ -89,10 +139,12 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     int64_t sequenceCount = batch;
     uint64_t chunkCount = 0;
     if (varlen) {
-        if (batch != 1 || indices == nullptr || cu->GetStorageShape().GetDimNum() != 1 ||
-            cu->GetStorageShape().GetDim(0) < 2) {
-            return ge::GRAPH_FAILED;
-        }
+        OP_CHECK_IF(batch != 1 || indices == nullptr || cu->GetStorageShape().GetDimNum() != 1 ||
+                        cu->GetStorageShape().GetDim(0) < 2,
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 varlen requires physical B=1, paired chunk_indices and "
+                            "cu_seqlens with at least two entries."),
+                    return ge::GRAPH_FAILED);
         sequenceCount = cu->GetStorageShape().GetDim(0) - 1;
         const auto &is = indices->GetStorageShape();
         if (is.GetDimNum() == 1 && is.GetDim(0) > 0 && is.GetDim(0) % 2 == 0) {
@@ -100,28 +152,39 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         } else if (is.GetDimNum() == 2 && is.GetDim(0) > 0 && is.GetDim(1) == 2) {
             chunkCount = static_cast<uint64_t>(is.GetDim(0));
         } else {
+            OP_LOGE("ChunkGatedDeltaRuleFwd",
+                    "Sparse key64 chunk_indices must be (seq,chunk) pairs.");
             return ge::GRAPH_FAILED;
         }
         for (size_t index : {size_t(8), size_t(9)}) {
             const auto *desc = context->GetOptionalInputDesc(index);
-            if (desc == nullptr || desc->GetDataType() != ge::DT_INT64) {
-                return ge::GRAPH_FAILED;
-            }
+            OP_CHECK_IF(desc == nullptr || desc->GetDataType() != ge::DT_INT64,
+                        OP_LOGE("ChunkGatedDeltaRuleFwd",
+                                "Sparse key64 varlen metadata must be INT64; input %zu violates it.",
+                                index),
+                        return ge::GRAPH_FAILED);
         }
-    } else if (indices != nullptr ||
-               !CheckedMulU64(static_cast<uint64_t>(batch),
-                              static_cast<uint64_t>(tokens / 64 + (tokens % 64 != 0)), &chunkCount)) {
-        return ge::GRAPH_FAILED;
+    } else {
+        OP_CHECK_IF(indices != nullptr ||
+                        !CheckedMulU64(static_cast<uint64_t>(batch),
+                                       static_cast<uint64_t>(tokens / 64 + (tokens % 64 != 0)),
+                                       &chunkCount),
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 dense mode forbids chunk_indices without cu_seqlens."),
+                    return ge::GRAPH_FAILED);
     }
     const auto *initialShape = context->GetOptionalInputShape(7);
-    if (initialShape != nullptr && !SparseShape(initialShape, {sequenceCount, hv, 128, 128})) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(initialShape != nullptr &&
+                    !SparseShapeTolerant(initialShape, {sequenceCount, hv, 128, 128}),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 initial_state must be [%ld,%ld,128,128] (flat storage accepted).",
+                        sequenceCount, hv),
+                return ge::GRAPH_FAILED);
     platform_ascendc::PlatformAscendC platform(context->GetPlatformInfo());
     const uint32_t groups = platform.GetCoreNumAic();
-    if (groups == 0) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(groups == 0,
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse key64 requires a nonzero AIC count."),
+                return ge::GRAPH_FAILED);
     GdnChunk64Sparse::FusedTilingData td{};
     auto &p = td.prepare;
     p.inputBatchSize = batch;
@@ -148,46 +211,48 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     p.gateStorageDtype = static_cast<int64_t>(ge::DT_FLOAT);
     p.betaStorageDtype = static_cast<int64_t>(ge::DT_FLOAT);
     uint64_t tileCount = 0;
-    if (!CheckedMulU64(chunkCount, static_cast<uint64_t>(hv), &tileCount) ||
-        tileCount > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(!CheckedMulU64(chunkCount, static_cast<uint64_t>(hv), &tileCount) ||
+                    tileCount > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse key64 chunk tile count overflows."),
+                return ge::GRAPH_FAILED);
     p.totalChunkTileCount = static_cast<int64_t>(tileCount);
     p.hasAOutput = SparseBool(attrs, 13);
     const bool norm = p.enableQueryKeyL2NormInKernel != 0;
     for (size_t index : {size_t(9), size_t(10), size_t(11), size_t(12), size_t(13)}) {
-        if (context->GetOutputShape(index) == nullptr) {
-            return ge::GRAPH_FAILED;
-        }
+        OP_CHECK_IF(context->GetOutputShape(index) == nullptr,
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 requires output %zu (h/w/u/v_new/g_cumsum_bht).", index),
+                    return ge::GRAPH_FAILED);
     }
-    if (!SparseShape(context->GetOutputShape(10), {batch, hv, tokens, 128}) ||
-        !SparseShape(context->GetOutputShape(11), {batch, hv, tokens, 128}) ||
-        !SparseShape(context->GetOutputShape(12), {batch, hv, tokens, 128}) ||
-        !SparseShape(context->GetOutputShape(13), {batch, hv, tokens}) ||
-        (p.enableBetaSigmoid && !SparseShape(context->GetOutputShape(8), {batch, hv, tokens}))) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(10), {batch, hv, tokens, 128}) ||
+                    !SparseShapeTolerant(context->GetOutputShape(11), {batch, hv, tokens, 128}) ||
+                    !SparseShapeTolerant(context->GetOutputShape(12), {batch, hv, tokens, 128}) ||
+                    !SparseShapeTolerant(context->GetOutputShape(13), {batch, hv, tokens}) ||
+                    (p.enableBetaSigmoid &&
+                     !SparseShapeTolerant(context->GetOutputShape(8), {batch, hv, tokens})),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 output storage mismatch: w/u/v_new=[%ld,%ld,%ld,128], "
+                        "g_cumsum_bht/beta_eff=[%ld,%ld,%ld] (flat storage accepted).",
+                        batch, hv, tokens, batch, hv, tokens),
+                return ge::GRAPH_FAILED);
     const auto *hShape = context->GetOutputShape(9);
-    if (hShape->GetStorageShape().GetDimNum() != 5 ||
-        hShape->GetStorageShape().GetDim(0) != batch ||
-        hShape->GetStorageShape().GetDim(1) != static_cast<int64_t>(varlen ? chunkCount : chunkCount / batch) ||
-        hShape->GetStorageShape().GetDim(2) != hv ||
-        hShape->GetStorageShape().GetDim(3) != 128 ||
-        hShape->GetStorageShape().GetDim(4) != 128) {
-        return ge::GRAPH_FAILED;
-    }
+    const int64_t hChunks =
+        varlen ? static_cast<int64_t>(chunkCount) : static_cast<int64_t>(chunkCount) / batch;
+    OP_CHECK_IF(!SparseShapeTolerant(hShape, {batch, hChunks, hv, 128, 128}),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 h output must be [%ld,%ld,%ld,128,128] (flat storage accepted).",
+                        batch, hChunks, hv),
+                return ge::GRAPH_FAILED);
     if (norm) {
-        if (!SparseShape(context->GetOutputShape(4), {batch, hk, tokens, 128}) ||
-            !SparseShape(context->GetOutputShape(5), {batch, hk, tokens, 128}) ||
-            !SparseShape(context->GetOutputShape(6), {batch, hk, tokens}) ||
-            !SparseShape(context->GetOutputShape(7), {batch, hk, tokens})) {
-            return ge::GRAPH_FAILED;
-        }
-        for (size_t index : {size_t(4), size_t(5), size_t(6), size_t(7)}) {
-            if (context->GetOutputShape(index) == nullptr) {
-                return ge::GRAPH_FAILED;
-            }
-        }
+        OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(4), {batch, hk, tokens, 128}) ||
+                        !SparseShapeTolerant(context->GetOutputShape(5), {batch, hk, tokens, 128}) ||
+                        !SparseShapeTolerant(context->GetOutputShape(6), {batch, hk, tokens}) ||
+                        !SparseShapeTolerant(context->GetOutputShape(7), {batch, hk, tokens}),
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 norm outputs must be q_hat/k_hat=[%ld,%ld,%ld,128] and "
+                            "q_rstd/k_rstd=[%ld,%ld,%ld] (flat storage accepted).",
+                            batch, hk, tokens, batch, hk, tokens),
+                    return ge::GRAPH_FAILED);
     }
     auto &h = td.h;
     h.batch = sequenceCount;
@@ -262,10 +327,11 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     // needs from `pipeline.schedule`.
     if (usePipeline) {
         uint64_t pipelineOffset = 0;
-        if (!PlaceSparseWorkspaceRegion(pipeline.totalWorkspaceBytes, 512, &cursor,
-                                        &pipelineOffset)) {
-            return ge::GRAPH_FAILED;
-        }
+        OP_CHECK_IF(!PlaceSparseWorkspaceRegion(pipeline.totalWorkspaceBytes, 512, &cursor,
+                                                &pipelineOffset),
+                    OP_LOGE("ChunkGatedDeltaRuleFwd",
+                            "Sparse key64 pipeline workspace placement overflows."),
+                    return ge::GRAPH_FAILED);
         td.pipeline.workspaceOffset = pipelineOffset;
         td.pipeline.workspaceBytes = pipeline.totalWorkspaceBytes;
     } else {
@@ -279,24 +345,36 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     const auto *initialDesc = context->GetOptionalInputDesc(7);
     td.stateDtype = initialDesc == nullptr ? static_cast<uint32_t>(ge::DT_FLOAT)
                                          : static_cast<uint32_t>(initialDesc->GetDataType());
-    if (td.stateDtype != static_cast<uint32_t>(ge::DT_FLOAT) &&
-        td.stateDtype != static_cast<uint32_t>(ge::DT_BF16)) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(td.stateDtype != static_cast<uint32_t>(ge::DT_FLOAT) &&
+                    td.stateDtype != static_cast<uint32_t>(ge::DT_BF16),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 initial_state must be FP32 or BF16."),
+                return ge::GRAPH_FAILED);
     auto *raw = context->GetRawTilingData();
     auto *workspace = context->GetWorkspaceSizes(1);
     uint64_t totalWorkspace = 0;
-    if (raw == nullptr || raw->GetCapacity() < sizeof(td) || workspace == nullptr ||
-        !CheckedAddU64(cursor, platform.GetLibApiWorkSpaceSize(), &totalWorkspace) ||
-        totalWorkspace > std::numeric_limits<size_t>::max() ||
-        memcpy_s(raw->GetData(), raw->GetCapacity(), &td, sizeof(td)) != EOK) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(raw == nullptr || raw->GetCapacity() < sizeof(td) || workspace == nullptr ||
+                    !CheckedAddU64(cursor, platform.GetLibApiWorkSpaceSize(), &totalWorkspace) ||
+                    totalWorkspace > std::numeric_limits<size_t>::max(),
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 tiling buffer or workspace accounting failed: capacity=%lu, "
+                        "tilingBytes=%zu.",
+                        raw == nullptr ? 0UL : static_cast<unsigned long>(raw->GetCapacity()),
+                        sizeof(td)),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(memcpy_s(raw->GetData(), raw->GetCapacity(), &td, sizeof(td)) != EOK,
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse key64 tiling serialization failed."),
+                return ge::GRAPH_FAILED);
     raw->SetDataSize(sizeof(td));
     workspace[0] = static_cast<size_t>(totalWorkspace);
     context->SetTilingKey(64);
     context->SetBlockDim(groups);
     context->SetScheduleMode(1);
+    OP_LOGD("ChunkGatedDeltaRuleFwd",
+            "Sparse key64 tiling: B=%ld Hk=%ld Hv=%ld T=%ld varlen=%d chains=%u maxChunks=%u "
+            "pipeline=%d groups=%u workspace=%llu.",
+            batch, hk, hv, tokens, varlen ? 1 : 0, td.pipeline.chainCount, td.pipeline.maxChunks,
+            usePipeline ? 1 : 0, groups, static_cast<unsigned long long>(totalWorkspace));
     return ge::GRAPH_SUCCESS;
 }
 } // namespace optiling

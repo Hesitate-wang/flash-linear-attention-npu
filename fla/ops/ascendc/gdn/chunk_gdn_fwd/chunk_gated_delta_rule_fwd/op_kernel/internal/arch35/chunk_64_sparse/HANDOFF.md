@@ -161,6 +161,27 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
 
 ## 6. 本轮修正记录（按类别）
 
+### 6.0 首轮设备运行：key-64 tiling 静默失败（2026-11-02 晚）
+
+1. **现象**：ATK case 348（dense B=3 Hk=Hv=2 T=511 chunk=64，B*Hv=6<=AIC/2）
+   报 `aclnnChunkGatedDeltaRuleFwdGetWorkspaceSize failed: 169104` /
+   EZ1008 "Failed to execute tiling"，plog 无任何算子侧 OP_LOGE。
+2. **根因**：稀疏 tiling 的 `SparseShape` 只认 `GetStorageShape()`。`initial_state`
+   （调用方张量）与 `h/w/u/v_new/g_cumsum_bht/beta_eff`（executor `AllocTensor`
+   产物）按 chunk32 已实测的教训可能以**拍平成 numel 的 rank-1 storage** 到达
+   tiling（见 chunk32 tiling 注释），storage 形状校验静默返回 GRAPH_FAILED。
+3. **修复**（`op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp`）：
+   - `SparseShape` 改为 storage∨origin 匹配（同 chunk32 `IsShape`）；
+   - 新增 `SparseShapeTolerant`：额外接受 numel 相等的 rank-1 拍平 storage，
+     用于 initial_state 与全部 executor 自有/调用方输出（逻辑形状 ACLNN 已校验）；
+   - 维度来源只有 q/v 的 storage（entry 仍强制 rank-4），不受影响；
+   - 所有静默 `return ge::GRAPH_FAILED` 补上带上下文的 `OP_LOGE`，
+     末尾加 `OP_LOGD` 摘要；下次失败可直接从 plog 定位分支。
+4. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
+   dispatch/链解析/串行适配（审计一致，设备行为待 §9 分步验证）。
+
+### 6.1 数值/算法
+
 ### 6.1 数值/算法
 
 1. **A' 必须包含对角线**：`o_i` 含 token i 自身的 delta 更新，`A'[i,j]=(j<=i)`。
