@@ -319,13 +319,16 @@ private:
     }
 
     // ========================= Stage 2 (AIC) =========================
+    // KKT = k̂ k̂ᵀ. The verified serial Prepare calls this with transposeB=false
+    // ("B NZ is [n,k]: same k̂ tile as A, n=m"); transposeB=true would read a
+    // wrongly transposed B and silently corrupt the gate matrix.
     __aicore__ inline void Stage2Kkt()
     {
         AicWaitMte1(kProdFlagInputs);
         AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(0);
         Prep::MatmulToL0C<bfloat16_t>(l1KHat_, l1KHat_, l0A_[0], l0B_[0], l0CTask_[0],
                                       static_cast<int32_t>(kChunk), static_cast<int32_t>(kChunk),
-                                      static_cast<int32_t>(kHeadDim), true, true, false, 0);
+                                      static_cast<int32_t>(kHeadDim), true, false, false, 0);
         AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(0);
         AscendC::SetFlag<AscendC::HardEvent::M_FIX>(0);
         AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(0);

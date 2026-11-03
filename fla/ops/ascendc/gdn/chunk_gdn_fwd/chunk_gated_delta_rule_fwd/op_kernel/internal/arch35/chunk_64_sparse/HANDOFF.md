@@ -204,13 +204,25 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
      `mix_507015_aic_aiv_dual_side_anomaly` 的四步手法与
      `aiv_crosscoreflag_subblock_507015` 的同步契约检查表），按核型与 PC
      分流后再改。
-6. **P0 延迟优化落地（精度无关）**：
+6. **第四轮（2026-11-03 上午，507015 复现）**：对 producer/consumer 做了逐事件
+   配平审计（FIX_M/M_MTE1/M_FIX 全链路：Init prime → Stage2/4/5/7 每个 MMAD 后
+   Fixpipe 补回 → Finish drain，全部平衡；consumer 每个 CubeMatmul 后跟
+   CubeFinish 补回，同样平衡）、Fixpipe 参数对照（`FixpipeYToL1` dstStride=m*8、
+   `FixpipeAToL1` dstStride=m*16，与 chunk32/solve_tri 的 L1 NZ 约定一致；
+   `isChannelSplit=false` 与已验证的 L1/UB 目的地用法一致）、UB/L1/L0 逐槽边界
+   （全部恰好不越界）、GM 偏移（全部在界内）。**未找到崩溃级静态缺陷**；
+   507015 根因必须靠设备证据（§9 二分或 plog）。
+   **实锤一个数值 bug**：`Stage2Kkt` 的 `MatmulToL0C` 误用 `transposeB=true`，
+   已验证的串行 Prepare（`Stage2_AicOne`）对同一个 k̂ k̂ᵀ 用 `transposeB=false`
+   （"B NZ is [n,k]: same k' tile as A, n=m"），已改回 `false`——不修则 KKT
+   拿到转置错误的 B，A/W/U/o 全错（精度门会拦，不是 507015 的成因）。
+7. **P0 延迟优化落地（精度无关）**：
    - host 在 `usePipeline` 时不再序列化串行 H/O workspace（~55MiB → 0，
      kernel 在 pipeline 模式不读这些区域，aclnn workspace 随之缩小）；
    - varlen 的 `td.pipeline.maxChunks` 收紧为逐序列 `max ceil(len_s/64)`
      （host 经 `GetOptionalInputTensor` 读 cu_seqlens，ValueDepend 已声明），
      短链不再空跑栅栏轮。dense 路径与 chain 位置映射不变。
-7. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
+8. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
    dispatch/链解析/串行适配（审计一致，设备行为待 §9 分步验证）。
 
 ### 6.1 数值/算法
