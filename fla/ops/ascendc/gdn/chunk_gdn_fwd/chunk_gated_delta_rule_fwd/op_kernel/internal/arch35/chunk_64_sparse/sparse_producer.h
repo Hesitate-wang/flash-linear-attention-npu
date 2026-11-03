@@ -29,10 +29,7 @@
 #include "sparse_common.h"
 #include "sparse_fused_tiling.h"
 #include "sparse_memory.h"
-#include "../../../../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare_common.h"
-#include "../../../../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare_vf.h"
-#include "../../../../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare_datacopy.h"
-#include "../../../../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare_matmul.h"
+#include "sparse_prep_lib.h"
 
 namespace GdnChunk64Sparse {
 
@@ -51,11 +48,11 @@ constexpr int32_t kProdEvtPack = 1;
 
 class ProducerRole {
 public:
-    __aicore__ inline void Init(const PhaseArgs &args, const FusedTilingData &td, uint32_t chainIdx)
+    // One-time launch setup. Per-chain state resolves in BeginChain so the
+    // same role instance can walk several chains in group-serial mode.
+    __aicore__ inline void Init(const PhaseArgs &args, const FusedTilingData &td)
     {
         td_ = td;
-        chainIdx_ = chainIdx;
-        loc_ = ResolveChain(td, args.cuSeqlens, chainIdx);
 
         b_ = td.prepare.inputBatchSize;
         hk_ = td.prepare.queryKeyHeadCount;
@@ -108,6 +105,12 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(0);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(0);
         }
+    }
+
+    __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chainIdx)
+    {
+        chainIdx_ = chainIdx;
+        loc_ = ResolveChain(td_, args.cuSeqlens, chainIdx);
     }
 
     // Return the fixed L0 event ids to their primed state so a later launch or

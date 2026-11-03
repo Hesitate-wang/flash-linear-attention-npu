@@ -154,8 +154,8 @@ def main() -> None:
         "NTD legacy layout": r'std::strcmp\(params\.layout,\s*"NTD"\)\s*==\s*0',
         "prepare path A5 guard": r"if\s*\(UsePreparePath\(params\)\)\s*\{\s*"
         r"CHECK_COND\(IsAscend950\(\),\s*ACLNN_ERR_PARAM_INVALID",
-        "direct BSND output": r"ChunkFwdO\(.*?params\.useExp2,\s*params\.stateVFirst,\s*"
-        r'"BSND",\s*params\.oOut,\s*executorPtr\)',
+        "direct BSND output": r"l0op::ChunkGatedDeltaRuleFwd\([\s\S]*?"
+        r"params\.oOut, finalState, gCumsumBht, a, 0, 0, 1,",
         "gCumsum scratch": r"gCumsumCompute\s*=\s*executorPtr->AllocTensor",
         "A scratch": r"aCompute\s*=\s*executorPtr->AllocTensor",
     }
@@ -192,7 +192,7 @@ def main() -> None:
                      rf"{helper}<[^;]*true>.*?\}}\s*else\s*\{{\s*"
                      rf"{helper}<[^;]*false>", prepare_kernel, re.DOTALL) is None:
             raise SystemExit(f"prepare kernel 缺少 {helper} 的 exp/exp2 模板分派")
-    if implementation.count("params.useExp2") < 4:
+    if implementation.count("params.useExp2") < 3:
         raise SystemExit("大融合新路径未完整透传 useExp2")
 
     fwd_o_tiling = FWD_O_TILING.read_text(encoding="utf-8")

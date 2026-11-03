@@ -491,11 +491,9 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
             q, k, v, raw_g, beta, a_log, dt_bias, cu_seqlens, chunk_indices,
             g_cumsum_bht, w, u, A, q_hat, k_hat, q_rstd, k_rstd, beta_eff,
             h, v_new, o, initial_state, final_state, workspace};
-        if (fusedTiling.pipeline.schedule == GdnChunk64Sparse::kSparseSchedulePipeline) {
-            GdnChunk64Sparse::RunSparsePipeline(args, fusedTiling);
-        } else {
-            GdnChunk64Sparse::RunSerialPhases(args, fusedTiling);
-        }
+        // RunSparsePipeline dispatches internally: producer/consumer pipeline
+        // when the schedule and group budget allow, group-serial otherwise.
+        GdnChunk64Sparse::RunSparsePipeline(args, fusedTiling);
     } else if (TILING_KEY_IS(32)) {
         KERNEL_TASK_TYPE(32, KERNEL_TYPE_MIX_AIC_1_2);
         GET_TILING_DATA_WITH_STRUCT(

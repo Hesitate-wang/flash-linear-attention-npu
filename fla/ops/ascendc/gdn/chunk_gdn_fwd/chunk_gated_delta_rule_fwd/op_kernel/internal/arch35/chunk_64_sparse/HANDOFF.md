@@ -1,33 +1,37 @@
 # chunk64 sparse（key 64）producer/consumer 实现交接
 
-> 面向下一次会话。先读本文，再看 `gdn_fwd.md`、`../../../../../docs/design.md`、
-> 计划文件 `~/.claude/plans/crystalline-tickling-bentley.md`。
-> 最近更新：2026-11-02（含首轮真机编译反馈修正）。
+> 面向下一次会话。先读本文，再看 `gdn_fwd.md`、`../../../../../docs/design.md`。
+> 最近更新：2026-11-03（算子自包含重构）。
 
 ## 1. 当前实现摘要
 
-key 64（`B*Hv <= AIC/2`、chunk=64、K=V=128、BF16 输入 FP32 计算）的
-producer/consumer 流水已经**在源码层完整落地**：
+key 64（chunk=64、K=V=128、BF16 输入 FP32 计算）的稀疏融合路径
+**已完全自包含**：不引用任何其他算子目录的头文件/实现，aclnn 层也不再
+调用其他算子。
 
-- `sparse_pipeline.h`：`RunSparsePipeline` 实现 NT+1 轮循环。链 `c` 用 producer 组 `c`、
-  consumer 组 `C+c`；第 i 轮 producer 算 chunk i、consumer 算 chunk i-1；每轮末尾全体
-  AIV 进一次 mode-0 栅栏（id 7）发布 GM 并节拍；空转组只进栅栏；组内 AIC 由自己的
-  AIV 用 mode-2（id 8）转发迭代边界。`schedule=0` 仍走原有串行 Prepare→H→O 回退。
-- `sparse_producer.h`：Stage0–8 完整（L2Norm/cumsum/gate/beta → KKT → solve/VCS →
-  Y → A → vb/kbg → W/U → W/U 落 GM），AIV0 做全部向量、AIV1 只镜像握手；AIC 只读
-  L1、Fixpipe 到 AIV0 UB，W/U 由 AIV0 落 GM。
-- `sparse_consumer.h`：H→O 全流程。状态 fp32+bf16 镜像常驻 UB，按 K（`stateVFirst`
-  时按 V）64/64 切分；行/向量按 32/32 切分；AIC 依次做 `P=W@H`、`O_s=Q@H`
-  （复用 L0B 的 H）、`A_raw=Q@Kᵀ`、`D=Kᵀ@right`（`stateVFirst` 时 `rightᵀ@K`）、
-  `O_l=A'@V_new`，每个结果半块 Fixpipe 到两个 AIV；AIV 完成 `v_new/right`、`A'`、
-  `o`、`R=αR+D`，并写 `o`（BSND）、`v_new`、`h`、`final_state`。
-- Host：`BuildChunkGatedDeltaRuleFwdPipelinePlan` 接入选定条件，`PipelineTilingData`
-  随 POD 下发，`schedule=1` 时 device 走流水。
-- 首轮 ccec 编译反馈的 4 类错误已全部修复，并额外做了作用域/参数/类型的系统核对
-  （见 §6）。
+- `sparse_prep_lib.h`：Prep 数学/DataCopy/matmul 助手的内部副本（逐字复制自
+  chunk_gated_delta_rule_fwd_prepare 的已验证实现，命名空间保持
+  `ChunkGatedDeltaRuleFwdPrepare`，并保留 `GDN_SHARED_ONCHIP_TYPES_DEFINED`
+  与 coefficient_generation/mem.h 的二选一 guard）。
+- `sparse_pipeline.h`：两种调度。`schedule=1`（`B*Hv <= AIC/2`）走
+  producer/consumer 流水：链 `c` 用组 `c` 与组 `C+c`，NT+1 轮、每轮一次
+  mode-0 栅栏（id 7）+ 组内 mode-2 relay（id 8）。`schedule=0` 走
+  **group-serial**：组 g 独立处理链 g, g+L, g+2L…，每条链先 producer 全部
+  chunk、经一次 mode-1 组内交接（id 15）、再 consumer 全部 chunk；链间无
+  依赖、无 mode-0 栅栏。原先包含外部 Prepare/H/O 三个 kernel 的
+  `sparse_phase_adapter.h` 串行回退已删除（连同 `sparse_sync.h`、
+  `sparse_math.h`）。
+- `sparse_producer.h` / `sparse_consumer.h`：角色实现不变（见 §4）；
+  `Init` 已拆为一次性 `Init` + 每条链 `BeginChain`（consumer 另有
+  `EndChain` 写 final_state）。
+- Host：tiling 无条件下发 `chainCount`（dense B*Hv / varlen seq*Hv 上界），
+  不再序列化任何 H/O workspace（两调度都用 aclnn 输出张量做中间交换）。
+- aclnn：g/beta 无条件 cast 到 FP32（bf16→fp32 精确），只走 fused
+  单算子分支；六算子 l0op 组合（Prepare/H/O）及其头文件引用已删除；
+  CMakeLists 的 depends 拉入机制与外部 -I 已全部移除。
 
-**当前状态**：源码完成，本机 host 契约测试通过；CANN 编译仍在迭代（已修完已知
-诊断，尚无“编译通过”证据），设备精度/同步/性能全部未验证。
+**当前状态**：源码完成，本机 host 契约测试通过；设备精度/同步/性能
+全部未验证（507015 排查见 §6.0 第 5-7 条）。
 
 ## 2. 目标与范围
 
@@ -146,18 +150,18 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
 
 | 文件 | 状态 |
 |---|---|
-| `sparse_fused_tiling.h` | ✅ `PipelineTilingData`（schedule/barrierFlagId/chainCount/maxChunks/producer•consumerGroups/workspace）、`kSparseScheduleSerial/Pipeline`、`kSparseBarrierFlagId=7` |
-| `op_host/.../chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.{h,cpp}` | ✅ 选定条件、POD 填充、workspace 追加；host 契约测试通过 |
-| `chunk_gated_delta_rule_fwd_arch35.cpp` | ✅ 按 `pipeline.schedule` 分派 |
-| `sparse_pipeline.h` | ✅ NT+1 轮 producer/consumer 循环；串行回退保留 |
-| `sparse_common.h` | ✅ `ChainLoc`/`ResolveChain`/`ResolveWindow`/GM 偏移 |
+| `sparse_fused_tiling.h` | ✅ 共享 POD + 内联 H/O tiling 结构；`PipelineTilingData` 增加 `debugMode` |
+| `sparse_prep_lib.h` | ✅ Prep 助手内部副本（vf/datacopy/matmul 使用子集） |
+| `op_host/.../chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.{h,cpp}` | ✅ 选定条件、POD 填充；serial workspace 已删；host 契约测试通过 |
+| `chunk_gated_delta_rule_fwd_arch35.cpp` | ✅ key-64 统一调 `RunSparsePipeline` |
+| `sparse_pipeline.h` | ✅ pipeline（NT+1 轮）+ group-serial（链跨组跳步）双调度；`GDN_SPARSE_DEBUG_MODE` 运行时二分 |
+| `sparse_common.h` | ✅ `PhaseArgs`/`ChainLoc`/`ResolveChain`/`ResolveWindow`/GM 偏移 |
 | `sparse_memory.h` | ✅ 两套 UB/L1/L0 半开区间表 + `static_assert` |
 | `sparse_barrier.h` | ✅ `AivRoleBarrier`/`AivRelayToAic`/`AicWaitRelayMte1`/mode-4 握手；AIV 传 raw id |
-| `sparse_producer.h` | ✅ 约 570 行，Stage0–8；`ChunkCount()`；`FixpipeWuToUb` |
+| `sparse_producer.h` | ✅ Stage0–8；`Init`/`BeginChain` 拆分；`FixpipeWuToUb`；KKT `transposeB=false` |
 | `sparse_consumer_vf.h` | ✅ 全部向量单元 + `LastGateVF`/`StateMirrorVF`/`ChunkUploadL1` |
-| `sparse_consumer.h` | ✅ 约 620 行，GM/UB/L1/L0 绑定 + 每 chunk H→O 全流程 |
-| `sparse_phase_adapter.h` / `sparse_sync.h` | ✅ 串行回退（保留） |
-| `sparse_math.h` | 串行/历史用，当前未被 include |
+| `sparse_consumer.h` | ✅ GM/UB/L1/L0 绑定 + 每 chunk H→O；`Init`/`BeginChain`/`EndChain` 拆分 |
+| ~~`sparse_phase_adapter.h` / `sparse_sync.h` / `sparse_math.h`~~ | 已删除（外部 kernel 依赖随 group-serial 重构移除） |
 
 ## 6. 本轮修正记录（按类别）
 
@@ -239,6 +243,39 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
      短链不再空跑栅栏轮。dense 路径与 chain 位置映射不变。
 9. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
    dispatch/链解析/串行适配（审计一致，设备行为待 §9 分步验证）。
+10. **算子自包含重构（2026-11-03，应用户要求“禁止引用算子外的头文件”）**：
+    - 新增 `sparse_prep_lib.h`：Prep 助手内部副本（common/vf/datacopy/matmul
+      的使用子集，逐字复制、命名空间不变），producer/consumer 不再 include
+      chunk_gated_delta_rule_fwd_prepare 的任何头文件。
+    - `sparse_fused_tiling.h`：内联 `ChunkFwdHPlainTilingData` /
+      `ChunkFwdOTilingData` / `ChunkFwdOOutputLayout`（原引自
+      chunk_fwd_h/chunk_fwd_o；命名空间改入 `GdnChunk64Sparse`）。
+    - 串行回退让位给 **group-serial**：删除 `sparse_phase_adapter.h`（含对
+      Prepare/ChunkFwdH/ChunkFwdO 三个外部 kernel 的 include）、
+      `sparse_sync.h`、`sparse_math.h`；`PhaseArgs` 移入 `sparse_common.h`；
+      角色拆 `Init`/`BeginChain`（consumer 加 `EndChain`）；新交接
+      `AivChainHandoff`（PipeBarrier + mode-1 id 15）发布 producer 的
+      W/U/g_cumsum 给同组 consumer。arch35.cpp key-64 统一调
+      `RunSparsePipeline`（内部按 schedule 分发）。
+    - host：serial 的 ~55MiB H/O workspace 整块删除（两调度都不需要）；
+      `chainCount` 无条件下发。
+    - aclnn：g/beta 无条件 cast FP32；删六算子 l0op 组合与 3 个外部头；
+      `fusedPrepare` 不满足时显式报 169116。ABI 契约脚本的
+      “direct BSND output” 检查改为匹配 fused 调用（o_layout=1）。
+    - CMakeLists：删除 depends 拉入机制与全部外部 `-I`（prepare/chunk_fwd_h/
+      chunk_fwd_o/solve_tri op_kernel），保留内部 `-I`。
+    - 注意：950 上 bf16 g/beta 改走 cast+fused（精度等价）；`B*Hv > AIC/2`
+      的 fused 形状改走**未经设备验证**的 group-serial（原来也走未验证的
+      串行回退，风险不增）。
+11. **OnChipBuffer 类型去重（2026-11-03，用户指出）**：`HardwareInfo`/
+    `BufferType`/`OnChipBuffer` 曾在算子内重复定义三份（coefficient_generation
+    的 `mem.h`、`sparse_prep_lib.h`、chunk32 的 `_32_common.h`，前两份靠
+    `GDN_SHARED_ONCHIP_TYPES_DEFINED` 宏二选一）。现收敛为唯一内部共享头
+    `op_kernel/internal/gdn_onchip_types.h`（全局命名空间、普通 include
+    guard）：`mem.h` 与 `sparse_prep_lib.h` 改为直接 include 它；chunk32 的
+    `_32_common.h` 删除本地定义并在 `GdnFwd32` 内 `using ::...` 重导出，
+    限定/非限定用法均不变。guard 宏之舞随之消失。**规则：算子内部唯一定义、
+    任意复用；只有跨算子引用才禁止。**
 
 ### 6.1 数值/算法
 
@@ -284,7 +321,13 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
    需要文件内 `using namespace AscendC;`；已补上。
 7. **VF 辅助函数属性**：`SparseLoadB16AsF32`/`SparseStoreB16` 从 `__simd_callee__`
    改为 `__aicore__ inline`，与 chunk32 `_vf.h` 的 `LoadCastB16`/`StoreCastBf16`
-   （在 `__VEC_SCOPE__` 里直接调用）一致。
+   （在 `__VEC_SCOPE__` 里直接调用）一致。**注意**（2026-11-03 复核）：文档语义上
+   这类裸 MicroAPI 函数应标 `__simd_vf__`，但 CANN 9.1.0/DAV_3510 下 bisheng 前端
+   解析 `__simd_vf__` 会 SIGSEGV（exit 139，知识卡
+   `regbase_vf_simd_vf_bisheng_exit139_banned`，路线评级 banned；`if constexpr`
+   组合 exit 70）。`__aicore__ inline` 靠内联嵌入调用点的 `__VEC_SCOPE__`，是
+   chunk32/Prepare 两个设备验证 kernel 的实际模式；函数头已加注释禁止改修饰符、
+   禁止在 `__VEC_SCOPE__` 外调用。
 8. **清理**：删除 `Stage1Inputs` 未使用的 `rowOff`；`ubQ_[rows*kHeadDim]`/
    `ubK_[...]` 的下标显式转 `uint32_t`（`LocalTensor::operator[]` 只接受 `uint32_t`）。
 9. **系统核对结论**：26 个 `Prep::` 函数/常量全部在命名空间内；prepare 调用的参数
@@ -329,16 +372,22 @@ python3 -I tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py         # 
 
 ## 9. 下一步（按顺序）
 
+0. **机制级隔离（当前实验）**：`op_host/CMakeLists.txt` 里已临时打开
+   `-DGDN_SPARSE_DEBUG_NO_CROSSCORE_SYNC`（`sparse_barrier.h` 顶部宏把全部
+   `CrossCoreSetFlag/CrossCoreWaitFlag` 变 no-op，核内 PipeBarrier/本地
+   HardEvent 保留）。**判读**：还超时 → 问题在数据路径（越界/trap），按
+   plog 的 PC/core 分流；不再超时 → 同步协议是根因，再按 mode-4 → mode-2 →
+   mode-0 逐个恢复定位。**输出必然错误（竞态），实验后必须删掉该编译行。**
 1. **收完 ccec 编译诊断**：继续按编译报错修 API/类型；本目录已做过作用域、参数个数、
    字段与宏陷阱核对，剩余多为 CANN 版本差异。
-2. **空流水调试**：临时注掉两个 role 的 `RunChunk`，只留 NT+1 次 `AivRoleBarrier`，
+2. **空流水调试**：`GDN_SPARSE_DEBUG_MODE=1`（免重编译），只留 NT+1 次栅栏/relay，
    确认 mode-0 计数、重复调用与空转组不挂死。
-3. **producer-only 比对**：让 consumer 组只进栅栏，把 producer 的 W/U/g_cumsum 与
+3. **producer-only 比对**：`GDN_SPARSE_DEBUG_MODE=2`，把 producer 的 W/U/g_cumsum 与
    串行 Prepare 输出逐元素比对（dense/varlen、tail、G=1..4）。
-4. **consumer 比对**：恢复流水，跑 ATK key-64 用例（dense/varlen、tail、norm、exp2、
+4. **consumer 比对**：恢复全流水，跑 ATK key-64 用例（dense/varlen、tail、norm、exp2、
    stateVFirst、allowNegEigval、初/末状态），对照 `gdn_reference.py`。
 5. **收尾**：重复执行 3 次 + MSS、`msprof op_summary` Task Duration、chunk32/Phase6
-   回归；可选去掉 host 侧并行的串行 workspace。
+   回归；P1 优化按 §12 顺序。
 
 ## 10. 坑与规则
 

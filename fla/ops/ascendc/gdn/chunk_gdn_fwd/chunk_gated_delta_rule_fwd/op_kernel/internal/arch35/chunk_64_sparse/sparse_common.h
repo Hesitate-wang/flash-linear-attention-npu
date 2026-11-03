@@ -16,6 +16,34 @@ namespace GdnChunk64Sparse {
 
 using namespace AscendC;
 
+// GM argument bundle shared by every sparse role.
+struct PhaseArgs {
+    GM_ADDR q;
+    GM_ADDR k;
+    GM_ADDR v;
+    GM_ADDR rawG;
+    GM_ADDR beta;
+    GM_ADDR aLog;
+    GM_ADDR dtBias;
+    GM_ADDR cuSeqlens;
+    GM_ADDR chunkIndices;
+    GM_ADDR gCumsum;
+    GM_ADDR w;
+    GM_ADDR u;
+    GM_ADDR a;
+    GM_ADDR qHat;
+    GM_ADDR kHat;
+    GM_ADDR qRstd;
+    GM_ADDR kRstd;
+    GM_ADDR betaEff;
+    GM_ADDR h;
+    GM_ADDR vNew;
+    GM_ADDR o;
+    GM_ADDR initialState;
+    GM_ADDR finalState;
+    GM_ADDR workspace;
+};
+
 constexpr int64_t kChunk = 64;
 constexpr int64_t kHeadDim = 128;
 constexpr int64_t kChunkElems = kChunk * kHeadDim;

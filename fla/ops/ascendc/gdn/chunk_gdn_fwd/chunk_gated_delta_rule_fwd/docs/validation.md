@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-The existing public ACLNN entry has an incomplete arch35 key-64 branch for BF16 Q/K/V, K=V=128 and FP32 gate/beta (optional a_log/dt_bias also FP32). The internal schema is append-only and key 64 uses a separate Prepare/H/O POD. Native low-precision Prepare inputs retain the existing three-stage route. For eligible low-parallelism calls (`B*Hv <= AIC/2`) the key-64 tiling now selects a producer/consumer schedule: producer group c builds chunk i while consumer group `chainCount + c` finishes chunk i-1, paced by one all-AIV mode-0 barrier per iteration. The serial Prepare -> H -> O composition remains as the fallback when the pipeline plan is not selected. This producer/consumer path exists only at source level; it has not been compiled by ccec or executed on Ascend 950, so it is not yet evidence of correctness, synchronization safety, or overlap.
+The existing public ACLNN entry has an arch35 key-64 branch for BF16 Q/K/V, K=V=128 and FP32 gate/beta (optional a_log/dt_bias also FP32); low-precision gate/beta inputs are now cast to FP32 unconditionally, so the fused op is the only key-64 route. The internal schema is append-only and key 64 uses a private POD. For eligible low-parallelism calls (`B*Hv <= AIC/2`) the key-64 tiling selects a producer/consumer schedule: producer group c builds chunk i while consumer group `chainCount + c` finishes chunk i-1, paced by one all-AIV mode-0 barrier per iteration. Above that bound a group-serial schedule gives every group every launchGroups-th chain outright (producer half, one mode-1 rendezvous, consumer half; no mode-0 barrier). The operator is self-contained: the sparse roles use the internal `sparse_prep_lib.h` copy instead of chunk_gated_delta_rule_fwd_prepare headers, the standalone Prepare/H/O composition and its l0op calls are removed, and the CMake dependency machinery plus external `-I` paths are gone. This path exists only at source level; it has not been compiled by ccec or executed on Ascend 950, so it is not yet evidence of correctness, synchronization safety, or overlap.
 
 This host is macOS without the Ascend compiler/device. Source integration and ordinary host-side contract checks are distinct from CANN compilation, numerical correctness, synchronization safety and performance.
 
@@ -50,9 +50,10 @@ The ABI script initially failed because it searched for the former inline exp/ex
 
 ## Source locations
 
-- op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.cpp: existing public composite and fused/fallback choice.
-- op_host/chunk_gated_delta_rule_fwd_def.cpp and op_host/op_api/chunk_gated_delta_rule_fwd.cpp: appended internal schema and launcher.
-- op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp: key64 tiling and workspace.
-- op_kernel/internal/arch35/chunk_64_sparse/sparse_fused_tiling.h: shared host/device POD.
-- op_kernel/internal/arch35/chunk_64_sparse/sparse_phase_adapter.h and sparse_sync.h: device phase composition and handoff.
+- op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.cpp: public entry; unconditional FP32 cast plus the single fused call (no other operator invoked).
+- op_host/chunk_gated_delta_rule_fwd_def.cpp and op_host/op_api/chunk_gated_delta_rule_fwd.cpp: appended internal schema and launcher (null optional outputs occupy dummy slots).
+- op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp: key64 tiling; serial workspace removed; `GDN_SPARSE_DEBUG_MODE` runtime bisect.
+- op_kernel/internal/arch35/chunk_64_sparse/sparse_fused_tiling.h: shared host/device POD with inlined H/O tiling structs.
+- op_kernel/internal/arch35/chunk_64_sparse/sparse_prep_lib.h: internal copy of the Prepare math/datacopy/matmul helpers.
+- op_kernel/internal/arch35/chunk_64_sparse/sparse_pipeline.h: pipeline and group-serial schedules.
 - fused-entry-source-analysis.md: historical Phase6 integration analysis, not current implementation status.

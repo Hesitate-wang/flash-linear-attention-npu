@@ -2,7 +2,7 @@
 
 方案设计规则版本：`V2`
 
-This document retains the original design baseline and review checklist. The current development implementation and selector are described in [`api.md`](api.md); actual checks are recorded in [`validation.md`](validation.md). The existing ACLNN entry now selects the private key-64 integration for eligible calls, while native low-precision inputs retain Prepare -> H -> O. This source integration is not evidence of Ascend 950 build or device correctness.
+This document retains the original design baseline and review checklist. The current development implementation and selector are described in [`api.md`](api.md); actual checks are recorded in [`validation.md`](validation.md). The existing ACLNN entry now selects the private key-64 integration for eligible calls, casting low-precision gate/beta to FP32 first, so the standalone Prepare -> H -> O route is no longer used. This source integration is not evidence of Ascend 950 build or device correctness.
 
 ## 1. Goal
 

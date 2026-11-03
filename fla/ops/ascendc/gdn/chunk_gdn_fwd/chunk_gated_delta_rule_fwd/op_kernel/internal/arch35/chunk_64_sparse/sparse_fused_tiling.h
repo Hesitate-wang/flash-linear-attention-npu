@@ -6,10 +6,65 @@
 #define GDN_CHUNK64_SPARSE_FUSED_TILING_H
 
 #include <cstdint>
-#include "../../../../../chunk_fwd_h/op_kernel/chunk_fwd_h_struct.h"
-#include "../../../../../chunk_fwd_o/op_kernel/chunk_fwd_o_struct.h"
 
 namespace GdnChunk64Sparse {
+
+// Self-contained copies of the plain H/O tiling PODs (previously included
+// from the chunk_fwd_h / chunk_fwd_o operators; the operator must not include
+// headers from other operators). Only the fields the sparse roles consume
+// are kept; the layout is unchanged from the original definitions.
+struct ChunkFwdHPlainTilingData {
+    int64_t batch;
+    int64_t seqlen;
+    int64_t kNumHead;
+    int64_t vNumHead;
+    int64_t kHeadDim;
+    int64_t vHeadDim;
+    int64_t chunkSize;
+    bool useInitialState;
+    bool storeFinalState;
+    int64_t isVariedLen;
+    int64_t shapeBatch;
+    int64_t tokenBatch;
+    int64_t vWorkspaceOffset;
+    int64_t vUpdateWorkspaceOffset;
+    int64_t kDecayWorkspaceOffset;
+    int64_t hWorkspaceOffset;
+};
+
+enum ChunkFwdOOutputLayout : int64_t {
+    CHUNK_FWD_O_LAYOUT_BNSD = 0,
+    CHUNK_FWD_O_LAYOUT_BSND = 1,
+    CHUNK_FWD_O_LAYOUT_TND = 2,
+    CHUNK_FWD_O_LAYOUT_NTD = 3,
+};
+
+struct ChunkFwdOTilingData {
+    int64_t shapeBatch;
+    int64_t seqlen;
+    int64_t kNumHead;
+    int64_t vNumHead;
+    int64_t kHeadDim;
+    int64_t vHeadDim;
+    int64_t chunkSize;
+    int64_t isVariedLen;
+    int64_t tokenBatch;
+    int64_t dataType;
+    int64_t gDataType;
+    int64_t vWorkspaceOffset;
+    int64_t hWorkspaceOffset;
+    int64_t attnWorkspaceOffset;
+    int64_t aftermaskWorkspaceOffset;
+    int64_t maskWorkspaceOffset;
+    int64_t stateVFirst;
+    int64_t outputLayout;
+    float scale;
+    int64_t chunkNum;
+    int64_t hvPerHk;
+    int64_t taskGroupSize;
+    int64_t numChunksPerBatch;
+    int64_t aPrimeWorkspaceOffset;
+};
 
 // Mirrors Prepare's field contract without including device-only headers.
 struct PrepareTilingData {
@@ -78,7 +133,7 @@ struct PipelineTilingData {
 struct FusedTilingData {
     PrepareTilingData prepare;
     ChunkFwdHPlainTilingData h;
-    GDN::ChunkFwdOTilingData o;
+    ChunkFwdOTilingData o;
     PipelineTilingData pipeline;
     uint64_t hWorkspaceOffset;
     uint64_t oWorkspaceOffset;

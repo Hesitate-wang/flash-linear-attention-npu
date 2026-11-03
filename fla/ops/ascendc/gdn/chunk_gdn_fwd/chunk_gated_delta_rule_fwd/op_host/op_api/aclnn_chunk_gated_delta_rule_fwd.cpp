@@ -5,9 +5,6 @@
 #include "aclnn_chunk_gated_delta_rule_fwd.h"
 
 #include "chunk_gated_delta_rule_fwd.h"
-#include "../../../chunk_fwd_h/op_host/op_api/chunk_fwd_h.h"
-#include "../../../chunk_fwd_o/op_host/op_api/chunk_fwd_o.h"
-#include "../../../chunk_gated_delta_rule_fwd_prepare/op_host/op_api/chunk_gated_delta_rule_fwd_prepare.h"
 
 #include "acl/acl.h"
 #include "aclnn/aclnn_base.h"
@@ -833,17 +830,15 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
     const bool outputFinalState = params.finalStateOutOptional != nullptr;
     const bool usePreparedCumsum = UsePreparedCumsum(params, info);
 
-    const aclTensor *betaUsed = params.beta;
-    const aclTensor *gUsed = params.g;
-    // The legacy Phase6 kernels consume FP32 gate/beta. Keep A5's native
-    // low-precision prepare contract while normalizing the legacy inputs.
-    if (!IsAscend950() || params.beta->GetDataType() == DataType::DT_FLOAT ||
-        params.g->GetDataType() == DataType::DT_FLOAT) {
-        betaUsed = params.beta->GetDataType() == DataType::DT_FLOAT
-                       ? params.beta : l0op::Cast(params.beta, DataType::DT_FLOAT, executorPtr);
-        gUsed = params.g->GetDataType() == DataType::DT_FLOAT
-                    ? params.g : l0op::Cast(params.g, DataType::DT_FLOAT, executorPtr);
-    }
+    // The fused key-64 path consumes FP32 gate/beta. Cast low-precision inputs
+    // unconditionally so the standalone Prepare/H/O composition is no longer
+    // needed on any platform (bf16/fp16 casts to fp32 are exact).
+    const aclTensor *betaUsed = params.beta->GetDataType() == DataType::DT_FLOAT
+                                    ? params.beta
+                                    : l0op::Cast(params.beta, DataType::DT_FLOAT, executorPtr);
+    const aclTensor *gUsed = params.g->GetDataType() == DataType::DT_FLOAT
+                                 ? params.g
+                                 : l0op::Cast(params.g, DataType::DT_FLOAT, executorPtr);
     const aclTensor *gRaw = usePreparedCumsum
                                ? gUsed
                                : (gUsed == nullptr ? nullptr
@@ -909,51 +904,26 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
             vHead = TransposeContiguous(params.v, {0, 2, 1, 3}, executorPtr);
         }
         GDN_STAGE_CHECK(qHead != nullptr && kHead != nullptr && vHead != nullptr, 169108);
-        const aclTensor *qCompute = params.useQkL2norm ? qHat : qHead;
-        const aclTensor *kCompute = params.useQkL2norm ? kHat : kHead;
 
+        // The fused key-64 op is self-contained: gate/beta are already FP32
+        // after the unconditional cast above, so the standalone
+        // Prepare/H/O composition is gone and no other operator is called.
         const bool fusedPrepare = gRaw->GetDataType() == DataType::DT_FLOAT &&
             betaBht->GetDataType() == DataType::DT_FLOAT &&
             (params.aLogOptional == nullptr || params.aLogOptional->GetDataType() == DataType::DT_FLOAT) &&
             (params.dtBiasOptional == nullptr || params.dtBiasOptional->GetDataType() == DataType::DT_FLOAT);
-        if (fusedPrepare) {
-            const l0op::ChunkGatedDeltaRuleFwdPrepareArgs prepareArgs{
-                params.aLogOptional, params.dtBiasOptional, qHat, kHat, qRstd, kRstd,
-                betaEffBht, h, w, u, vNew, gCumsumBht, params.useQkL2norm,
-                params.useExp2, betaEffBht != nullptr, params.aOutOptional != nullptr};
-            const auto result = l0op::ChunkGatedDeltaRuleFwd(
-                qHead, kHead, vHead, betaBht, a, gRaw, nullptr,
-                params.initialStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional,
-                outputFinalState, params.chunkSize, params.scale, false,
-                params.oOut, finalState, gCumsumBht, a, 0, 0, 1,
-                params.stateVFirst, params.allowNegEigval, executorPtr, &prepareArgs);
-            GDN_STAGE_CHECK(result[0] != nullptr, 169104);
-        } else {
-            auto prepareResult = l0op::ChunkGatedDeltaRuleFwdPrepare(
-                qHead, kHead, vHead, gRaw, betaBht, params.aLogOptional, params.dtBiasOptional,
-                params.cuSeqlensOptional, params.chunkIndicesOptional, params.chunkSize,
-                params.allowNegEigval, params.useExp2, params.useQkL2norm,
-                params.aLogOptional != nullptr || params.dtBiasOptional != nullptr, betaEffBht != nullptr,
-                params.aOutOptional != nullptr, gCumsumBht, w, u, a, qHat, kHat, qRstd,
-                kRstd, betaEffBht, executorPtr);
-            GDN_STAGE_CHECK(prepareResult[0] != nullptr && prepareResult[1] != nullptr &&
-                                prepareResult[2] != nullptr &&
-                                (!params.useQkL2norm ||
-                                 (prepareResult[4] != nullptr && prepareResult[5] != nullptr)),
-                            169104);
-
-            auto hResult = l0op::ChunkFwdH(
-                kCompute, w, u, gCumsumBht, nullptr, params.initialStateOptional,
-                params.cuSeqlensOptional, params.chunkIndicesOptional, outputFinalState,
-                params.chunkSize, true, params.useExp2, params.stateVFirst, h, vNew, finalState, executorPtr);
-            GDN_STAGE_CHECK(hResult[0] != nullptr && hResult[1] != nullptr, 169105);
-
-            auto oResult = l0op::ChunkFwdO(
-                qCompute, kCompute, vNew, h, gCumsumBht, params.cuSeqlensOptional,
-                params.chunkIndicesOptional, params.scale, params.chunkSize, params.useExp2, params.stateVFirst,
-                "BSND", params.oOut, executorPtr);
-            GDN_STAGE_CHECK(oResult[0] != nullptr, 169106);
-        }
+        GDN_STAGE_CHECK(fusedPrepare, 169116);
+        const l0op::ChunkGatedDeltaRuleFwdPrepareArgs prepareArgs{
+            params.aLogOptional, params.dtBiasOptional, qHat, kHat, qRstd, kRstd,
+            betaEffBht, h, w, u, vNew, gCumsumBht, params.useQkL2norm,
+            params.useExp2, betaEffBht != nullptr, params.aOutOptional != nullptr};
+        const auto result = l0op::ChunkGatedDeltaRuleFwd(
+            qHead, kHead, vHead, betaBht, a, gRaw, nullptr,
+            params.initialStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional,
+            outputFinalState, params.chunkSize, params.scale, false,
+            params.oOut, finalState, gCumsumBht, a, 0, 0, 1,
+            params.stateVFirst, params.allowNegEigval, executorPtr, &prepareArgs);
+        GDN_STAGE_CHECK(result[0] != nullptr, 169104);
 
         if (params.qHatOutOptional != nullptr) {
             const aclTensor *qHatExport = qHat;

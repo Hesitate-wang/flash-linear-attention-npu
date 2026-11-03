@@ -31,8 +31,7 @@
 #include "sparse_consumer_vf.h"
 #include "sparse_fused_tiling.h"
 #include "sparse_memory.h"
-#include "../../../../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare_datacopy.h"
-#include "../../../../../chunk_gated_delta_rule_fwd_prepare/op_kernel/arch35/chunk_gated_delta_rule_fwd_prepare_matmul.h"
+#include "sparse_prep_lib.h"
 
 namespace GdnChunk64Sparse {
 
@@ -139,16 +138,18 @@ __aicore__ inline void FixpipeHalfFp32Ub(LocalTensor<float> ub, LocalTensor<floa
 
 class ConsumerRole {
 public:
-    __aicore__ inline void Init(const PhaseArgs &args, const FusedTilingData &td, uint32_t chainIdx)
+    // One-time launch setup. Per-chain state and the initial-state mirror
+    // resolve in BeginChain so the same role instance can walk several
+    // chains in group-serial mode.
+    __aicore__ inline void Init(const PhaseArgs &args, const FusedTilingData &td)
     {
         td_ = td;
-        chainIdx_ = chainIdx;
-        loc_ = ResolveChain(td, args.cuSeqlens, chainIdx);
 
         hk_ = td.prepare.queryKeyHeadCount;
         hv_ = td.prepare.valueHeadCount;
         t_ = td.prepare.sequenceTokenLength;
-        chunksPerBatch_ = td.pipeline.maxChunks;
+        const int64_t chunk = td.prepare.tokensPerChunk > 0 ? td.prepare.tokensPerChunk : kChunk;
+        chunksPerBatch_ = (t_ + chunk - 1) / chunk;
         useNorm_ = td.prepare.enableQueryKeyL2NormInKernel != 0;
         useExp2_ = td.useExp2 != 0;
         stateVFirst_ = td.stateVFirst != 0;
@@ -190,6 +191,13 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(kConsEvtCube);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(kConsEvtCube);
         }
+    }
+
+    // Per-chain start: resolve the chain and load its initial state mirror.
+    __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chainIdx)
+    {
+        chainIdx_ = chainIdx;
+        loc_ = ResolveChain(td_, args.cuSeqlens, chainIdx);
         if ASCEND_IS_AIV {
             InitState();
         }
@@ -215,20 +223,26 @@ public:
         }
     }
 
-    // Final state and L0 event credits. The last state update already wrote the
-    // GM h record for its own chunk start; only the post-last-chunk state is
-    // left, and an empty chain matches the standalone H kernel by not writing.
+    // Final state for the current chain. The last state update already wrote
+    // the GM h record for its own chunk start; only the post-last-chunk state
+    // is left, and an empty chain matches the standalone H kernel by not
+    // writing.
+    __aicore__ inline void EndChain()
+    {
+        if ASCEND_IS_AIV {
+            if (loc_.chunks > 0 && storeFinal_) {
+                StoreFinalState();
+            }
+        }
+    }
+
+    // L0 event credits, once at launch end after every chain drained.
     __aicore__ inline void Finish()
     {
         if ASCEND_IS_AIC {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(kConsEvtCube);
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(kConsEvtCube);
             AscendC::PipeBarrier<PIPE_ALL>();
-        }
-        if ASCEND_IS_AIV {
-            if (loc_.chunks > 0 && storeFinal_) {
-                StoreFinalState();
-            }
         }
     }
 

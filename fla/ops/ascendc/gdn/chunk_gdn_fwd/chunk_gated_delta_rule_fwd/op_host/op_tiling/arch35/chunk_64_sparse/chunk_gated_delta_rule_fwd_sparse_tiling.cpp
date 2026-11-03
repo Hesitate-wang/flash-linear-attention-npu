@@ -281,7 +281,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     o.dataType = 1;
     o.gDataType = 2;
     o.stateVFirst = SparseBool(attrs, 7);
-    o.outputLayout = GDN::CHUNK_FWD_O_LAYOUT_BSND;
+    o.outputLayout = GdnChunk64Sparse::CHUNK_FWD_O_LAYOUT_BSND;
     const float *scale = attrs->GetAttrPointer<float>(2);
     o.scale = scale == nullptr ? 1.0f : *scale;
     o.chunkNum = chunkCount;
@@ -292,7 +292,8 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
 
     // Low-parallelism selector: with B*Hv <= AIC/2 every chain gets a producer
     // and a consumer group, and the launch keeps the physical MIX width so the
-    // mode-0 participant set matches the serial path.
+    // mode-0 participant set matches the serial path. Above that bound the
+    // group-serial schedule gives every group every launchGroups-th chain.
     ChunkGatedDeltaRuleFwdPipelinePlan pipeline{};
     const bool usePipeline = BuildChunkGatedDeltaRuleFwdPipelinePlan(
         static_cast<uint64_t>(batch), static_cast<uint64_t>(hv),
@@ -301,7 +302,13 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.pipeline.schedule = usePipeline ? GdnChunk64Sparse::kSparseSchedulePipeline
                                        : GdnChunk64Sparse::kSparseScheduleSerial;
     td.pipeline.barrierFlagId = GdnChunk64Sparse::kSparseBarrierFlagId;
-    td.pipeline.chainCount = usePipeline ? pipeline.chainCount : 0;
+    uint64_t totalChains = 0;
+    OP_CHECK_IF(!CheckedMulU64(static_cast<uint64_t>(varlen ? sequenceCount : batch),
+                               static_cast<uint64_t>(hv), &totalChains) ||
+                    totalChains > std::numeric_limits<uint32_t>::max(),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse key64 chain count overflows."),
+                return ge::GRAPH_FAILED);
+    td.pipeline.chainCount = static_cast<uint32_t>(totalChains);
     td.pipeline.maxChunks = usePipeline ? pipeline.maxChunks : 0;
     td.pipeline.producerGroups = usePipeline ? pipeline.producerGroups : 0;
     td.pipeline.consumerGroups = usePipeline ? pipeline.consumerGroups : 0;
@@ -311,27 +318,12 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         td.pipeline.debugMode = static_cast<uint32_t>(std::atoi(debugEnv));
     }
 
-    // Serial baseline (schedule=0 only): Prepare scratch, then the standalone
-    // H and O recipes. The pipeline roles exchange every intermediate through
-    // the aclnn output tensors and never touch these regions, so skip them
-    // (and the ~55 MiB of H/O workspace) when the pipeline schedule runs.
+    // Both schedules exchange every intermediate through the aclnn output
+    // tensors and never touch a workspace recipe: only the pipeline scratch
+    // (currently unused by the roles, kept for the fused on-chip map) is
+    // reserved below. The historical serial H/O recipe workspace is gone
+    // together with the external-kernel serial fallback.
     uint64_t cursor = 0;
-    if (!usePipeline) {
-        cursor = static_cast<uint64_t>(groups) * 64 * 1024;
-        td.hWorkspaceOffset = cursor;
-        uint64_t hCursor = 16ULL * 1024 * 1024;
-        h.vWorkspaceOffset = hCursor;
-        hCursor += static_cast<uint64_t>(groups) * 128 * 1024;
-        h.vUpdateWorkspaceOffset = hCursor;
-        hCursor += static_cast<uint64_t>(groups) * 64 * 1024;
-        h.kDecayWorkspaceOffset = hCursor;
-        hCursor += static_cast<uint64_t>(groups) * 256 * 1024;
-        h.hWorkspaceOffset = hCursor;
-        hCursor += static_cast<uint64_t>(groups) * 256 * 1024 + 16ULL * 1024 * 1024;
-        cursor += hCursor;
-        td.oWorkspaceOffset = cursor;
-        cursor += static_cast<uint64_t>(groups) * 64 * 1024;
-    }
 
     // Varlen: every group iterates maxChunks + 1 rounds and chains shorter than
     // maxChunks only pace the barrier. Tighten the bound to the largest

@@ -17,6 +17,21 @@ using namespace AscendC;
 // need GM ready slots and IBSet/IBWait instead.
 constexpr uint8_t kBarrierMode = 0x0;
 
+// Debug experiment (bring-up only): defining GDN_SPARSE_DEBUG_NO_CROSSCORE_SYNC
+// stubs out every CrossCoreSetFlag/CrossCoreWaitFlag in this header so the
+// kernel runs the identical dataflow without any cross-core collective. A
+// timeout that persists without sync points at the data path; a timeout that
+// disappears incriminates the sync protocol. Intra-core PipeBarrier and local
+// HardEvent pairs stay on so UB ordering inside one core is unchanged. Results
+// are racy garbage in this mode; never ship it enabled.
+#ifdef GDN_SPARSE_DEBUG_NO_CROSSCORE_SYNC
+#define GDN_SPARSE_XCORE_SET(mode, pipe, id) ((void)0)
+#define GDN_SPARSE_XCORE_WAIT(mode, pipe, id) ((void)0)
+#else
+#define GDN_SPARSE_XCORE_SET(mode, pipe, id) AscendC::CrossCoreSetFlag<mode, pipe>(id)
+#define GDN_SPARSE_XCORE_WAIT(mode, pipe, id) AscendC::CrossCoreWaitFlag<mode, pipe>(id)
+#endif
+
 // Cross-group publication is carried by the AIVs only: on both sides the AIV
 // is the sole GM gateway, so the producer's MTE3 stores and the consumer's
 // MTE2 loads are the same core type and mode 0 orders them. The wait is pinned
@@ -32,8 +47,8 @@ __aicore__ inline void AivRoleBarrier(uint32_t flagId)
     if ASCEND_IS_AIV {
         const uint16_t id = static_cast<uint16_t>(flagId);
         AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::CrossCoreSetFlag<kBarrierMode, PIPE_MTE3>(id);
-        AscendC::CrossCoreWaitFlag<kBarrierMode, PIPE_MTE2>(id);
+        GDN_SPARSE_XCORE_SET(kBarrierMode, PIPE_MTE3, id);
+        GDN_SPARSE_XCORE_WAIT(kBarrierMode, PIPE_MTE2, id);
     }
 }
 
@@ -43,14 +58,14 @@ __aicore__ inline void AivRelayToAic(uint16_t base)
 {
     if ASCEND_IS_AIV {
         AscendC::PipeBarrier<PIPE_ALL>();
-        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(base);
+        GDN_SPARSE_XCORE_SET(0x2, PIPE_MTE3, base);
     }
 }
 
 __aicore__ inline void AicWaitRelayMte1(uint16_t base)
 {
     if ASCEND_IS_AIC {
-        AscendC::CrossCoreWaitFlag<0x2, PIPE_MTE1>(base);
+        GDN_SPARSE_XCORE_WAIT(0x2, PIPE_MTE1, base);
     }
 }
 
@@ -72,36 +87,34 @@ constexpr uint16_t kSubBlockFlagOffset = 16;
 
 __aicore__ inline void AivSetMte3(uint16_t base)
 {
-    AscendC::CrossCoreSetFlag<0x4, PIPE_MTE3>(base);
+    GDN_SPARSE_XCORE_SET(0x4, PIPE_MTE3, base);
 }
 
 __aicore__ inline void AivSetFix(uint16_t base)
 {
-    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(base);
+    GDN_SPARSE_XCORE_SET(0x4, PIPE_FIX, base);
 }
 
 __aicore__ inline void AivWaitMte2(uint16_t base)
 {
-    AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE2>(base);
+    GDN_SPARSE_XCORE_WAIT(0x4, PIPE_MTE2, base);
 }
 
 __aicore__ inline void AivWaitV(uint16_t base)
 {
-    AscendC::CrossCoreWaitFlag<0x4, PIPE_V>(base);
+    GDN_SPARSE_XCORE_WAIT(0x4, PIPE_V, base);
 }
 
 __aicore__ inline void AicSetFix(uint16_t base)
 {
-    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(base);
-    AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(
-        static_cast<uint16_t>(base + kSubBlockFlagOffset));
+    GDN_SPARSE_XCORE_SET(0x4, PIPE_FIX, base);
+    GDN_SPARSE_XCORE_SET(0x4, PIPE_FIX, static_cast<uint16_t>(base + kSubBlockFlagOffset));
 }
 
 __aicore__ inline void AicWaitMte1(uint16_t base)
 {
-    AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE1>(base);
-    AscendC::CrossCoreWaitFlag<0x4, PIPE_MTE1>(
-        static_cast<uint16_t>(base + kSubBlockFlagOffset));
+    GDN_SPARSE_XCORE_WAIT(0x4, PIPE_MTE1, base);
+    GDN_SPARSE_XCORE_WAIT(0x4, PIPE_MTE1, static_cast<uint16_t>(base + kSubBlockFlagOffset));
 }
 
 } // namespace GdnChunk64Sparse

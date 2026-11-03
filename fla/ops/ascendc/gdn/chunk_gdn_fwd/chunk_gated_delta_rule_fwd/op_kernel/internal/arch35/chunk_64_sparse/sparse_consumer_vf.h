@@ -39,6 +39,12 @@ constexpr CastTrait kSparseF32ToB16 = {
     RoundMode::CAST_RINT,
 };
 
+// Bare MicroAPI bodies, called only from __VEC_SCOPE__ below. They are
+// deliberately __aicore__ inline (inlined into the caller's vector scope):
+// the documented __simd_vf__ modifier crashes the bisheng frontend on
+// CANN 9.1.0/DAV_3510 (exit 139, see the regbase_vf_simd_vf runbook), and the
+// device-verified chunk32/Prepare kernels use this exact pattern. Do not call
+// these outside __VEC_SCOPE__ and do not "fix" the modifier.
 __aicore__ inline void SparseLoadB16AsF32(RegTensor<float> &dst, __ubuf__ bfloat16_t *src,
                                                MaskReg &mask32)
 {
