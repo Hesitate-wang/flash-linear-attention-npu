@@ -89,6 +89,35 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     const aclTensor *u = fusedPrepare ? prepare->u : nullptr;
     const aclTensor *vNew = fusedPrepare ? prepare->vNew : nullptr;
     const aclTensor *gCumsumBht = fusedPrepare ? prepare->gCumsumBht : nullptr;
+    if (fusedPrepare) {
+        // GE packs null optional outputs into earlier slots, which would shift
+        // h/w/u/v_new/g_cumsum_bht off their declared indices 9..13 (the Prepare
+        // l0op documents the same pitfall). Occupy every null optional slot
+        // with a dummy; the kernel only writes these outputs when the matching
+        // feature flag is on, and then the caller supplies real tensors.
+        op::Shape dummyShape;
+        dummyShape.SetDimNum(1);
+        dummyShape.SetDim(0, 1);
+        const DataType ioDtype = q->GetDataType();
+        const aclTensor **slots[] = {&qHat, &kHat, &h, &w, &u, &vNew};
+        for (const aclTensor **slot : slots) {
+            if (*slot == nullptr) {
+                *slot = executor->AllocTensor(dummyShape, ioDtype, Format::FORMAT_ND);
+            }
+        }
+        const aclTensor **fp32Slots[] = {&qRstd, &kRstd, &betaEff, &gCumsumBht};
+        for (const aclTensor **slot : fp32Slots) {
+            if (*slot == nullptr) {
+                *slot = executor->AllocTensor(dummyShape, DataType::DT_FLOAT, Format::FORMAT_ND);
+            }
+        }
+        if (qHat == nullptr || kHat == nullptr || qRstd == nullptr || kRstd == nullptr ||
+            betaEff == nullptr || h == nullptr || w == nullptr || u == nullptr ||
+            vNew == nullptr || gCumsumBht == nullptr) {
+            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Create optional output placeholder failed.");
+            return {nullptr, nullptr, nullptr, nullptr};
+        }
+    }
     const aclError ret = ADD_TO_LAUNCHER_LIST_AICORE(
         ChunkGatedDeltaRuleFwd,
         OP_INPUT(q, k, v, beta, aStorage, rawG, gkOptional, initialStateOptional,

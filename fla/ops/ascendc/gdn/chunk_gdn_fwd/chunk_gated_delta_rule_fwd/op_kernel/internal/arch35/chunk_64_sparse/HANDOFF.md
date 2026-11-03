@@ -177,7 +177,18 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
    - 维度来源只有 q/v 的 storage（entry 仍强制 rank-4），不受影响；
    - 所有静默 `return ge::GRAPH_FAILED` 补上带上下文的 `OP_LOGE`，
      末尾加 `OP_LOGD` 摘要；下次失败可直接从 plog 定位分支。
-4. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
+4. **第二轮设备运行（2026-11-03 早）**：新增日志直接命中
+   `Sparse key64 requires output 9`——`GetOutputShape(9)` 为 nullptr。
+   **根因**：fused 分支 l0op 把可选输出 4-8（q_hat/k_hat/q_rstd/k_rstd/beta_eff）
+   传 nullptr、9-13 传真实张量；GE 会把中间的空可选输出槽**打包前移**（Prepare
+   l0op 注释记录过同一陷阱：nullptr 槽会让后续输出 GM 变 0x80000000），
+   h/w/u/v_new/gCumsumBht 被挤到 4-8，索引 9 之后不存在。
+   **修复**（`op_host/op_api/chunk_gated_delta_rule_fwd.cpp`）：fused 调用时
+   为每个空可选输出槽分配 rank-1 `[1]` dummy（q_hat/k_hat/h/w/u/v_new 用
+   q 的 dtype，q_rstd/k_rstd/beta_eff/g_cumsum_bht 用 FP32），与 Prepare
+   l0op 的占位做法一致；特性开启时这些槽位本来就是真实张量，kernel 不会写
+   dummy。非 fused（Phase6/chunk32）调用 4-13 全空、位于尾部，不受影响。
+5. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
    dispatch/链解析/串行适配（审计一致，设备行为待 §9 分步验证）。
 
 ### 6.1 数值/算法
