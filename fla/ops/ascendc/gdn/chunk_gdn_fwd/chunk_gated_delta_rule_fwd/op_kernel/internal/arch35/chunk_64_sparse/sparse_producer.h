@@ -108,7 +108,6 @@ private:
         ubAPrime_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbAPrime);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbGates);
         ubEnergy_ = ubG_[64];
-        ubInvEnergy_ = ubG_[128];
         ubBeta_ = ubG_[192];
         ubQRstd_ = ubG_[256];
         ubKRstd_ = ubG_[288];
@@ -169,9 +168,9 @@ private:
         PrepareGateBetaVF(ubG_, ubBeta_, aLog, dtBias, td_.gateSoftplus != 0,
                           td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_, ubEnergy_, ubInvEnergy_, ubShift_);
+            CumsumEnergyVF<true>(ubG_, ubEnergy_, ubShift_);
         } else {
-            CumsumEnergyVF<false>(ubG_, ubEnergy_, ubInvEnergy_, ubShift_);
+            CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
         }
         if (td_.useNorm != 0) {
             NormalizeRowsVF(ubQ_, ubQHat_, ubQRstd_);
@@ -210,7 +209,11 @@ private:
 
     __aicore__ inline void BuildA(int64_t chunk)
     {
-        Inverse64VF(ubKkt_, ubL_, ubA_, ubEnergy_, ubInvEnergy_, ubBeta_);
+        if (td_.useExp2 != 0) {
+            Inverse64VF<true>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_);
+        } else {
+            Inverse64VF<false>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_);
+        }
         Cast(ubABf_, ubA_, RoundMode::CAST_RINT, kMatrixElems);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -225,7 +228,11 @@ private:
     __aicore__ inline void PublishAPrime(int64_t chunk)
     {
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        APrimeBandVF(ubQk_, ubAPrime_, ubEnergy_, ubInvEnergy_, firstRow);
+        if (td_.useExp2 != 0) {
+            APrimeBandVF<true>(ubQk_, ubAPrime_, ubG_, firstRow);
+        } else {
+            APrimeBandVF<false>(ubQk_, ubAPrime_, ubG_, firstRow);
+        }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
@@ -279,7 +286,7 @@ private:
     LocalTensor<bfloat16_t> ubQ_, ubK_, ubV_, ubQHat_, ubKHat_, ubVb_, ubKbg_, ubW_, ubU_;
     LocalTensor<bfloat16_t> ubABf_, ubAPrime_;
     LocalTensor<float> ubQk_, ubKkt_, ubL_, ubA_;
-    LocalTensor<float> ubG_, ubEnergy_, ubInvEnergy_, ubBeta_, ubQRstd_, ubKRstd_;
+    LocalTensor<float> ubG_, ubEnergy_, ubBeta_, ubQRstd_, ubKRstd_;
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1K_, l1Q_, l1Vb_, l1Kbg_, l1A_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;

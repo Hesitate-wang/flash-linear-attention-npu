@@ -71,7 +71,7 @@ State is split into contiguous 64-row halves. For `[K,V]`, each AIV owns 64 K ro
 - Gate softplus, beta sigmoid, L2 epsilon, exp/exp2 selection, scale and output casts follow the existing wrapper/reference semantics.
 - Prefix sum uses six register snapshot gather/add stages.
 - The inverse computes `x[i]=e[i]+sum(t<i, -raw[i,t]*x[t])`, equivalent to `(I+raw)^-1`.
-- Energy ratios `E(g[i])/E(g[j])` form lower/attention gates. A' includes the diagonal.
+- Lower/attention gates and `right` evaluate `E(g[i]-g[j])` directly. They never form `1/E(g[j])`; this avoids `0*Inf` when a strongly negative cumulative gate underflows. A' includes the diagonal.
 - Recurrence state and vector epilogues remain FP32; A/W/U/A'/v_new/right/H cube inputs are BF16.
 
 CPU checks for the independent inverse, scan, and full one-chunk dataflow are recorded in `validation.md`; these do not replace device accuracy tests.

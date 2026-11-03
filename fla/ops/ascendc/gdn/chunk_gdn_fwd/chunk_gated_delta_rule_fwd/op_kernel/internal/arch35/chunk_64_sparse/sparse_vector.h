@@ -100,17 +100,15 @@ __aicore__ inline void PrepareGateBetaVF(LocalTensor<float> &g,
 template <bool UseExp2>
 __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
                                       LocalTensor<float> &energy,
-                                      LocalTensor<float> &inverseEnergy,
                                       LocalTensor<uint32_t> &shift)
 {
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
-    __ubuf__ float *iAddr = reinterpret_cast<__ubuf__ float *>(inverseEnergy.GetPhyAddr());
     __ubuf__ uint32_t *sAddr = reinterpret_cast<__ubuf__ uint32_t *>(shift.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> value, gathered, one, reciprocal;
+        RegTensor<float> value, gathered;
         RegTensor<uint32_t> index;
         LoadAlign(value, gAddr);
         if constexpr (UseExp2) {
@@ -131,33 +129,25 @@ __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
         }
         Exp(value, value, all);
         StoreAlign(eAddr, value, all);
-        Duplicate(one, 1.0f, all);
-        Div(reciprocal, one, value, all);
-        StoreAlign(iAddr, reciprocal, all);
     }
 }
 
 template <bool UseExp2>
 __aicore__ inline void EnergyVF(LocalTensor<float> &g,
-                                LocalTensor<float> &energy,
-                                LocalTensor<float> &inverseEnergy)
+                                LocalTensor<float> &energy)
 {
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
-    __ubuf__ float *iAddr = reinterpret_cast<__ubuf__ float *>(inverseEnergy.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> value, one, reciprocal;
+        RegTensor<float> value;
         LoadAlign(value, gAddr);
         if constexpr (UseExp2) {
             Muls(value, value, kSparseLn2, all);
         }
         Exp(value, value, all);
         StoreAlign(eAddr, value, all);
-        Duplicate(one, 1.0f, all);
-        Div(reciprocal, one, value, all);
-        StoreAlign(iAddr, reciprocal, all);
     }
 }
 
@@ -254,29 +244,36 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
 
 // A = (I + raw)^-1. L stores -raw, so forward substitution is simply
 // x[i] = e[i] + sum(t<i, L[i,t] * x[t]). No FP32 Cube/NZ conversion is needed.
+template <bool UseExp2>
 __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
                                    LocalTensor<float> &lower,
                                    LocalTensor<float> &a,
-                                   LocalTensor<float> &energy,
-                                   LocalTensor<float> &inverseEnergy,
+                                   LocalTensor<float> &g,
                                    LocalTensor<float> &beta)
 {
     __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
     __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
     __ubuf__ float *x = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
-    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
-    __ubuf__ float *inv = reinterpret_cast<__ubuf__ float *>(inverseEnergy.GetPhyAddr());
+    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> invJ, ei, bi, gate, score, zero;
+        RegTensor<float> gJ, gI, bi, diff, gate, score, zero, clipLo, clipHi;
         Duplicate(zero, 0.0f, all);
-        LoadAlign(invJ, inv);
+        Duplicate(clipLo, -50.0f, all);
+        Duplicate(clipHi, 50.0f, all);
+        LoadAlign(gJ, gAddr);
         for (uint16_t row = 0; row < 64; ++row) {
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(ei, e + row);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + row);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + row);
-            Mul(gate, ei, invJ, all);
+            Sub(diff, gI, gJ, all);
+            Max(diff, diff, clipLo, all);
+            Min(diff, diff, clipHi, all);
+            if constexpr (UseExp2) {
+                Muls(diff, diff, kSparseLn2, all);
+            }
+            Exp(gate, diff, all);
             Mul(gate, gate, bi, all);
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
@@ -378,26 +375,29 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
 #undef SPARSE_SOLVE_LOCAL
 }
 
+template <bool UseExp2>
 __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
                                     LocalTensor<bfloat16_t> &out,
-                                    LocalTensor<float> &energy,
-                                    LocalTensor<float> &inverseEnergy,
+                                    LocalTensor<float> &g,
                                     uint32_t firstRow)
 {
     __ubuf__ float *score = reinterpret_cast<__ubuf__ float *>(qk.GetPhyAddr());
     __ubuf__ bfloat16_t *dst = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
-    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
-    __ubuf__ float *inv = reinterpret_cast<__ubuf__ float *>(inverseEnergy.GetPhyAddr());
+    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> invJ, ei, gate, raw, zero;
+        RegTensor<float> gJ, gI, diff, gate, raw, zero;
         Duplicate(zero, 0.0f, all);
-        LoadAlign(invJ, inv);
+        LoadAlign(gJ, gAddr);
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t globalRow = firstRow + row;
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(ei, e + globalRow);
-            Mul(gate, ei, invJ, all);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
+            Sub(diff, gI, gJ, all);
+            if constexpr (UseExp2) {
+                Muls(diff, diff, kSparseLn2, all);
+            }
+            Exp(gate, diff, all);
             LoadAlign(raw, score + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, raw, all);
             uint32_t lowerCount = globalRow + 1U;
@@ -408,24 +408,24 @@ __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
     }
 }
 
+template <bool UseExp2>
 __aicore__ inline void VNewRightVF(LocalTensor<float> &p,
                                    LocalTensor<bfloat16_t> &u,
                                    LocalTensor<bfloat16_t> &vNew,
                                    LocalTensor<bfloat16_t> &right,
-                                   LocalTensor<float> &energy,
-                                   LocalTensor<float> &inverseEnergy,
-                                   float lastEnergy, uint32_t firstRow)
+                                   LocalTensor<float> &g,
+                                   float gLast, uint32_t firstRow)
 {
     __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
     __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
     __ubuf__ bfloat16_t *vAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(vNew.GetPhyAddr());
     __ubuf__ bfloat16_t *rAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(right.GetPhyAddr());
-    __ubuf__ float *inv = reinterpret_cast<__ubuf__ float *>(inverseEnergy.GetPhyAddr());
+    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> p0, p1, u0, u1, scale, last;
-        Duplicate(last, lastEnergy, all);
+        RegTensor<float> p0, p1, u0, u1, scale, last, diff;
+        Duplicate(last, gLast, all);
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
             LoadAlign(p0, pAddr + offset);
@@ -436,8 +436,12 @@ __aicore__ inline void VNewRightVF(LocalTensor<float> &p,
             Sub(u1, u1, p1, all);
             StoreBf16(vAddr + offset, u0, all);
             StoreBf16(vAddr + offset + 64, u1, all);
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, inv + firstRow + row);
-            Mul(scale, scale, last, all);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, gAddr + firstRow + row);
+            Sub(diff, last, scale, all);
+            if constexpr (UseExp2) {
+                Muls(diff, diff, kSparseLn2, all);
+            }
+            Exp(scale, diff, all);
             Mul(u0, u0, scale, all);
             Mul(u1, u1, scale, all);
             StoreBf16(rAddr + offset, u0, all);

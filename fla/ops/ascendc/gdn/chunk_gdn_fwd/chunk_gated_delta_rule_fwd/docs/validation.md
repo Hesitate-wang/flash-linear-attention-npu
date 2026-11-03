@@ -18,6 +18,8 @@ The development host is macOS without `ccec`, an Ascend toolkit, or a visible NP
 | 64x64 inverse | NumPy forward substitution versus `inv(I+raw)` | Passed at FP64 tolerance |
 | 64-element scan | Six-stage snapshot scan versus `cumsum` | Passed at FP64 tolerance |
 | Full one-chunk dataflow | New W/U/A'/H/O equations versus token recurrence | Passed for H and O at FP64 tolerance |
+| Strongly negative gate regression | FP32 reciprocal path versus direct `E(g[i]-g[j])`; lightweight `--gate-scale 100` | Reciprocal path reproduced NaN; direct-difference path stayed finite |
+| Lightweight test framework | `tests/run_lightweight.sh --case all --cpu-only`, plus exp2/sigmoid/stateVFirst options | Dense, varlen and empty-sequence logs/summaries generated successfully |
 | Ascend C API contract | CANN knowledge cards: CrossCoreSetFlag/CrossCoreWaitFlag, arch35 regbase selection | Mode 0/4 routing and regbase amortization reviewed |
 
 The numerical checks validate the redesigned equations, not Ascend instruction behavior. They are not ATK device tests.
@@ -33,7 +35,7 @@ The numerical checks validate the redesigned equations, not Ascend instruction b
 ## Required Ascend 950 validation
 
 1. Build the standalone operator with `bash build.sh --pkg --soc=ascend950 --vendor_name=fla_npu --ops=chunk_gated_delta_rule_fwd`; fix any CANN-version API diagnostics.
-2. Run `tests/atk/chunk_gated_delta_rule_fwd/scripts/pipeline_smoke_test.py`, starting with dense case 348 and varlen case 187. Compare DUT, the six-ACLNN benchmark and FP64 golden outputs.
+2. Run `bash tests/run_lightweight.sh --case all --gate-scale 100 --device 0` from the operator root for fast DUT + FP64 golden checks, then run `tests/atk/chunk_gated_delta_rule_fwd/scripts/pipeline_smoke_test.py` (dense case 348 and varlen case 187) for the full three-way comparison.
 3. Cover tails 1/16/31/32/33/63/64/65 tokens, Hv/Hk=1/2/3/4, norm on/off, exp/exp2, beta sigmoid/output coupling, allowNegEigval, stateVFirst, FP32/BF16 initial/final state, A output and zero-length varlen sequences.
 4. Repeat execution and run MSS to validate mode-0/mode-4 counters and GM/UB/L1/L0 lifetimes.
 5. Regress chunk32 and Phase6/fallback routes.

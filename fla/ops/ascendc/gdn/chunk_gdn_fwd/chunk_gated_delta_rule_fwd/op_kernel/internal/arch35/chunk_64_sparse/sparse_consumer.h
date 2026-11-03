@@ -118,7 +118,6 @@ private:
         ubO_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbO);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
         ubEnergy_ = ubG_[64];
-        ubInvEnergy_ = ubG_[128];
 
         l1W_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1W);
         l1Q_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1Q);
@@ -180,9 +179,13 @@ private:
         AivWait(kConsP);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
+        const float gLast = ubG_.GetValue(kChunk - 1);
         const float lastEnergy = ubEnergy_.GetValue(kChunk - 1);
-        VNewRightVF(ubP_, ubU_, ubVNew_, ubRight_, ubEnergy_, ubInvEnergy_,
-                    lastEnergy, firstRow);
+        if (td_.useExp2 != 0) {
+            VNewRightVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, gLast, firstRow);
+        } else {
+            VNewRightVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, gLast, firstRow);
+        }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const int64_t token = window_.tokenStart + firstRow;
@@ -243,9 +246,9 @@ private:
         SetFlag<HardEvent::MTE2_V>(0);
         WaitFlag<HardEvent::MTE2_V>(0);
         if (td_.useExp2 != 0) {
-            EnergyVF<true>(ubG_, ubEnergy_, ubInvEnergy_);
+            EnergyVF<true>(ubG_, ubEnergy_);
         } else {
-            EnergyVF<false>(ubG_, ubEnergy_, ubInvEnergy_);
+            EnergyVF<false>(ubG_, ubEnergy_);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -299,7 +302,7 @@ private:
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubOS_, ubOL_;
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubAPrime_, ubO_, ubInitB_;
-    LocalTensor<float> ubG_, ubEnergy_, ubInvEnergy_;
+    LocalTensor<float> ubG_, ubEnergy_;
     LocalTensor<bfloat16_t> l1W_, l1Q_, l1K_, l1H_[2], l1VNew_, l1Right_, l1APrime_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
     LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
