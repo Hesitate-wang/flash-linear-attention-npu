@@ -188,7 +188,29 @@ Q/K/W/V_new/right/A' 镜像始终完整定义；cube 维数保持 64/128，不�
    q 的 dtype，q_rstd/k_rstd/beta_eff/g_cumsum_bht 用 FP32），与 Prepare
    l0op 的占位做法一致；特性开启时这些槽位本来就是真实张量，kernel 不会写
    dummy。非 fused（Phase6/chunk32）调用 4-13 全空、位于尾部，不受影响。
-5. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
+5. **第三轮设备运行（2026-11-03 上午）**：tiling 通过、kernel 启动，输出回拷
+   报 `507015`（AICORE 异常）。静态审计（mode-0/2/4 路由、迭代计数、事件
+   配平、UB/L1/L0 表、GM 偏移）未发现决定性缺陷，需要设备侧证据分流。
+   本轮落地两项：
+   - **二分调试开关**：`sparse_pipeline.h` 支持 `-DGDN_SPARSE_DEBUG_MODE=`
+     （0=全流水默认；1=只跑 NT+1 次栅栏/relay；2=只 producer；3=只
+     consumer），对应 §9 第 2-4 步。重建后按 1→2→3 定位到角色，再逐级
+     恢复 `RunChunk` 内的 stage。
+   - **空转组协议对齐**：`RunIdlePipeline` 改为与工作组完全相同的迭代形
+     （栅栏 + mode-2 relay + AIC wait）。mode-2 若为组内语义则无成本，若
+     该硅片把 mode-2 当全 launch AND-reduce 则可消除一类死锁。
+   - **取数指引**：重跑后抓 plog 的 `sqe_type / errorStr / subErrType /
+     core id / current: 0x / mte|l1|cube|vec error info`（参照知识卡
+     `mix_507015_aic_aiv_dual_side_anomaly` 的四步手法与
+     `aiv_crosscoreflag_subblock_507015` 的同步契约检查表），按核型与 PC
+     分流后再改。
+6. **P0 延迟优化落地（精度无关）**：
+   - host 在 `usePipeline` 时不再序列化串行 H/O workspace（~55MiB → 0，
+     kernel 在 pipeline 模式不读这些区域，aclnn workspace 随之缩小）；
+   - varlen 的 `td.pipeline.maxChunks` 收紧为逐序列 `max ceil(len_s/64)`
+     （host 经 `GetOptionalInputTensor` 读 cu_seqlens，ValueDepend 已声明），
+     短链不再空跑栅栏轮。dense 路径与 chain 位置映射不变。
+7. **未动**：`sparse_tiling.h` 纯函数契约（契约测试不变）、kernel 侧
    dispatch/链解析/串行适配（审计一致，设备行为待 §9 分步验证）。
 
 ### 6.1 数值/算法
@@ -324,11 +346,44 @@ python3 -I tests/atk/chunk_gated_delta_rule_fwd/aclnn_abi_contract.py         # 
 
 - `sparse_common.h` 的 `cu_seqlens` 前缀扫描用 `GlobalTensor::GetValue`（O(numSeq)
   标量读），仓库 `FwdHResolveSequence` 同做法；序列数极大时改成一次 DataCopy 到 UB。
-- 已知性能不均：每 chunk producer ≈2.1 M MAC、consumer ≈4.2 M MAC。跑通后可选拉平：
-  把 `Q@Kᵀ`+`A'` 下放 producer，或 producer 一次带 2 条链（1.5C 组）。
-- host 目前同时序列化串行布局与 pipeline scratch（多占 ~32 MiB）；流水验证通过后
-  可去掉串行区。
-- varlen 的 `maxChunks` 取全局 chunk 总数（host 看不到 cu_seqlens 值），短链场景会多跑
-  空栅栏轮；跑通后可按 chunkIndices/cu_seqlens 优化。
 - 若 ccec 对 `constexpr FixpipeConfig` 作 NTTP 或 `Prep::CFG_*` 的跨命名空间使用有额外
   限制，优先回退为 `AscendC::CFG_ROW_MAJOR`（仅 L0C→GM）或按文件内局部常量处理。
+
+## 12. 优化清单（2026-11-03 源码评审，按优先级）
+
+MAC 账（每 chunk 每链）：producer = KKT 0.52M + Y 2×64³ 0.52M + A 2×64³ 0.52M +
+W/U 2×(64×128×64) 1.05M ≈ **2.6M**；consumer = P 1.05M + O_s 1.05M + A_raw 0.52M +
+D 1.05M + O_l 0.52M ≈ **4.2M**。比例 1.6:1，consumer 是流水瓶颈级。
+
+**P0（host 侧，零 kernel 风险）—— 已于 2026-11-03 落地，见 §6.0 第 6 条**
+
+1. ~~按 schedule 精简 workspace~~（已做：pipeline 模式不再序列化 ~55MiB 串行区）。
+2. ~~varlen maxChunks 收紧~~（已做：逐序列最大值，host 读 ValueDepend cu_seqlens）。
+
+**P1（结构拉平，需 device 验证）**
+
+3. **A_raw=Q@Kᵀ 与 A' 下放 producer**：producer 已有 q/k/g 与 GateRows 能力；
+   移动后 4.2/2.6 (1.6×) → 3.67/3.15 (≈1.17×)，稳态提速约 14%。consumer 去掉
+   K 上传之外的 A_raw/A' 链（UB 省 ~20KiB，AIC 串行 matmul 5→4），A' [64,64]bf16
+   8KiB/chunk 经 GM 发布（同 W/U 的 mode-0 可见性边）。K 上传保留（D 仍要用）。
+4. **每轮 2 chunk 粗化**：producer 一轮产 chunk 2i/2i+1、consumer 消费 2i-2/2i-1，
+   mode-0 栅栏轮数减半；L1 H 双缓冲结构与 chunk 奇偶 parity 已兼容。
+
+**P2（组与核利用）**
+
+5. **blockDim 降到 2×chains**：OL-226 的同驻约束（2C ≤ AIC）仍满足；空转组消失，
+   栅栏扇入更小，余核留给并发任务。当前"全核启动保持与串行路径一致"是保守选择，
+   需 device 验证 mode-0 参与集变化无回归。
+6. **producer AIV1 分担**：Stage1/6/8 的加载与 L2Norm/ScaleRows/drain 按 32/32 行
+   半分给两个 AIV（照 consumer firstRow 模式）；#3 之后 producer AIV0 变挤时收益
+   更明显。
+
+**P3（profiling 后收尾）**
+
+7. 角色对象里 `FusedTilingData td_{}`（584B）瘦身为实际用到的标量。
+8. 各 stage 末尾 `PipeBarrier<PIPE_ALL>` 按真实依赖收窄（PIPE_V/PIPE_MTE3）。
+9. producer 与 consumer 负载进一步拉平的备选：producer 组带 2 链（1.5C 组）——
+   需 producer 内部双链交错，复杂度高于 #3，仅在 #3 不够时考虑。
+
+验证顺序：先 §9 bring-up 正确性，P0 随时可合；P1/P2 逐项用
+`msprof op_summary` 的 Task Duration 对比。

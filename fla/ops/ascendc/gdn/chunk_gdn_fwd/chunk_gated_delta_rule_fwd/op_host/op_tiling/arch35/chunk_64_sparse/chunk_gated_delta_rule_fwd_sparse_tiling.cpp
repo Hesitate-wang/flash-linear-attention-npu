@@ -305,22 +305,48 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.pipeline.producerGroups = usePipeline ? pipeline.producerGroups : 0;
     td.pipeline.consumerGroups = usePipeline ? pipeline.consumerGroups : 0;
 
-    // Serial baseline: Prepare scratch, then the standalone H and O recipes.
-    // H scratch is deliberately not sized by the reduced active count.
-    uint64_t cursor = static_cast<uint64_t>(groups) * 64 * 1024;
-    td.hWorkspaceOffset = cursor;
-    uint64_t hCursor = 16ULL * 1024 * 1024;
-    h.vWorkspaceOffset = hCursor;
-    hCursor += static_cast<uint64_t>(groups) * 128 * 1024;
-    h.vUpdateWorkspaceOffset = hCursor;
-    hCursor += static_cast<uint64_t>(groups) * 64 * 1024;
-    h.kDecayWorkspaceOffset = hCursor;
-    hCursor += static_cast<uint64_t>(groups) * 256 * 1024;
-    h.hWorkspaceOffset = hCursor;
-    hCursor += static_cast<uint64_t>(groups) * 256 * 1024 + 16ULL * 1024 * 1024;
-    cursor += hCursor;
-    td.oWorkspaceOffset = cursor;
-    cursor += static_cast<uint64_t>(groups) * 64 * 1024;
+    // Serial baseline (schedule=0 only): Prepare scratch, then the standalone
+    // H and O recipes. The pipeline roles exchange every intermediate through
+    // the aclnn output tensors and never touch these regions, so skip them
+    // (and the ~55 MiB of H/O workspace) when the pipeline schedule runs.
+    uint64_t cursor = 0;
+    if (!usePipeline) {
+        cursor = static_cast<uint64_t>(groups) * 64 * 1024;
+        td.hWorkspaceOffset = cursor;
+        uint64_t hCursor = 16ULL * 1024 * 1024;
+        h.vWorkspaceOffset = hCursor;
+        hCursor += static_cast<uint64_t>(groups) * 128 * 1024;
+        h.vUpdateWorkspaceOffset = hCursor;
+        hCursor += static_cast<uint64_t>(groups) * 64 * 1024;
+        h.kDecayWorkspaceOffset = hCursor;
+        hCursor += static_cast<uint64_t>(groups) * 256 * 1024;
+        h.hWorkspaceOffset = hCursor;
+        hCursor += static_cast<uint64_t>(groups) * 256 * 1024 + 16ULL * 1024 * 1024;
+        cursor += hCursor;
+        td.oWorkspaceOffset = cursor;
+        cursor += static_cast<uint64_t>(groups) * 64 * 1024;
+    }
+
+    // Varlen: every group iterates maxChunks + 1 rounds and chains shorter than
+    // maxChunks only pace the barrier. Tighten the bound to the largest
+    // per-sequence chunk count; cu_seqlens is ValueDepend, so the host may read
+    // it here (the Phase-5/6 suffix tiling reads it the same way).
+    if (usePipeline && varlen) {
+        const auto *cuTensor = context->GetOptionalInputTensor(8);
+        const int64_t *cuData = cuTensor == nullptr ? nullptr : cuTensor->GetData<int64_t>();
+        if (cuData != nullptr) {
+            uint64_t perChainMax = 0;
+            for (int64_t seq = 0; seq < sequenceCount; ++seq) {
+                const int64_t length = cuData[seq + 1] - cuData[seq];
+                const uint64_t seqChunks =
+                    length <= 0 ? 0 : static_cast<uint64_t>((length + 63) / 64);
+                perChainMax = seqChunks > perChainMax ? seqChunks : perChainMax;
+            }
+            if (perChainMax > 0 && perChainMax < td.pipeline.maxChunks) {
+                td.pipeline.maxChunks = static_cast<uint32_t>(perChainMax);
+            }
+        }
+    }
 
     // The pipeline scratch is appended after the serial recipe until the fused
     // role map stops relying on the fallback; the device picks the region it

@@ -81,14 +81,28 @@ __aicore__ inline void RunConsumerPipeline(const PhaseArgs &args, const FusedTil
     role.Finish();
 }
 
-// Idle and future groups: AIVs only, to keep the mode-0 set complete.
+// Idle and future groups: mirror the working groups' full iteration shape
+// (barrier + group-local relay + AIC wait) instead of the barrier alone. The
+// relay is a no-op cost when mode 2 is group-local, and it keeps the launch
+// deadlock-free if this silicon AND-reduces mode 2 across the whole launch.
 __aicore__ inline void RunIdlePipeline(const FusedTilingData &td)
 {
     const int64_t iterations = static_cast<int64_t>(td.pipeline.maxChunks) + 1;
     for (int64_t i = 0; i < iterations; ++i) {
         AivRoleBarrier(td.pipeline.barrierFlagId);
+        AivRelayToAic(kSparseIterationFlag);
+        AicWaitRelayMte1(kSparseIterationFlag);
     }
 }
+
+// Compile-time bring-up switch (see HANDOFF §9). Build with
+//   --cxx-flag=-DGDN_SPARSE_DEBUG_MODE=<n>
+// 0 (default): full pipeline; 1: barrier only; 2: producer only;
+// 3: consumer only. Mode 2/3 leave the partner role's outputs unwritten, so
+// they isolate the crashing side rather than produce correct numbers.
+#ifndef GDN_SPARSE_DEBUG_MODE
+#define GDN_SPARSE_DEBUG_MODE 0
+#endif
 
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
 {
@@ -100,9 +114,17 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
     }
     const uint32_t groupIdx = SparseGroupIndex();
     if (groupIdx < chains) {
+#if GDN_SPARSE_DEBUG_MODE == 1 || GDN_SPARSE_DEBUG_MODE == 3
+        RunIdlePipeline(td);
+#else
         RunProducerPipeline(args, td, groupIdx);
+#endif
     } else if (groupIdx < 2U * chains) {
+#if GDN_SPARSE_DEBUG_MODE == 1 || GDN_SPARSE_DEBUG_MODE == 2
+        RunIdlePipeline(td);
+#else
         RunConsumerPipeline(args, td, groupIdx - chains);
+#endif
     } else {
         RunIdlePipeline(td);
     }
