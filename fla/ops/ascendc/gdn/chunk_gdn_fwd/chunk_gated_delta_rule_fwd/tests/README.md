@@ -1,6 +1,13 @@
 # Lightweight chunk_gated_delta_rule_fwd tests
 
-只运行 **融合 DUT + CPU FP64 golden**，不依赖 ATK，也不运行六 ACLNN benchmark。默认用例为 `B=1, Hk=Hv=1, T=65, K=V=128, chunk=64`，覆盖一个完整 chunk 和一个单 token 尾块。
+默认运行 **融合 DUT + CPU FP64 golden**，不依赖 ATK。可通过独立选项增加或替换对照路径：
+
+- `--compare-cpu`：显式启用 CPU FP64 golden；
+- `--compare-chain`：启用六 ACLNN NPU 拼接对照；
+- 两者同时指定：执行 DUT、CPU、NPU 拼接三路对齐；
+- 仅指定 `--compare-chain`：跳过 CPU golden，只比较 DUT 与 NPU 拼接。
+
+不指定任何 compare 选项时保持默认的 DUT+CPU 轻量模式。六算子拼接只在显式指定 `--compare-chain` 时运行。
 
 ## 环境
 
@@ -16,8 +23,14 @@
 ## 快速运行
 
 ```bash
-# 默认 dense-tail：DUT + FP64 golden
+# 默认 dense-tail：DUT + CPU FP64 golden
 bash tests/run_lightweight.sh --device 0
+
+# 只比较 DUT 与六 ACLNN NPU 拼接，不运行 CPU golden
+bash tests/run_lightweight.sh --compare-chain --device 0
+
+# DUT、CPU golden、NPU 拼接三路对齐
+bash tests/run_lightweight.sh --compare-cpu --compare-chain --device 0
 
 # varlen：0..17、17..80、80..129
 bash tests/run_lightweight.sh --case varlen --device 0
@@ -64,7 +77,7 @@ bash tests/run_lightweight.sh \
 - `h`：逐 chunk 的状态快照，同时额外记录每个 tile 的误差；
 - 请求时的 `final_state`。
 
-按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。不运行六算子链。
+按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。启用 `--compare-chain` 时，DUT 还会与拼接路径的 `o/final_state/g_cumsum/A/h` 比较，指标单独记录为 `compare_chain` 和 `chain_metrics`。
 
 ## 日志
 
@@ -72,7 +85,8 @@ bash tests/run_lightweight.sh \
 
 - `run.log`：同时输出到终端和文件；
 - `summary.json`：状态、完整配置、环境信息索引、耗时、输出统计和全部误差；
-- `inputs.pt`、`dut_outputs.pt`、`golden_outputs.pt`：指定 `--save-tensors` 时保存。
+- `inputs.pt`、`dut_outputs.pt`、`golden_outputs.pt`：指定 `--save-tensors` 时保存；
+- `chain_outputs.pt`：同时指定 `--compare-chain --save-tensors` 时保存。
 
 日志包含：
 

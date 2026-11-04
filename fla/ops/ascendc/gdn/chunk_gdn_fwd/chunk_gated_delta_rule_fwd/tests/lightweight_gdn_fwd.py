@@ -58,6 +58,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtol", type=float, default=2e-2)
     parser.add_argument("--atol", type=float, default=2e-2)
     parser.add_argument("--save-tensors", action="store_true")
+    parser.add_argument("--compare-cpu", action="store_true",
+                        help="Compare DUT with the CPU FP64 golden")
+    parser.add_argument("--compare-chain", action="store_true",
+                        help="Compare DUT with the six-ACLNN NPU operator chain")
     parser.add_argument("--dump-aprime", action="store_true",
                         help="Debug: export A' through the public A slot and compare it")
     parser.add_argument("--dump-ol", action="store_true",
@@ -84,6 +88,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dump-os cannot be combined with other dump modes")
     if args.dump_scalars and (args.dump_aprime or args.dump_ol or args.dump_os):
         parser.error("--dump-scalars cannot be combined with other dump modes")
+    if args.cpu_only and args.compare_chain:
+        parser.error("--cpu-only cannot be combined with --compare-chain")
     return args
 
 
@@ -105,6 +111,16 @@ def case_config(args: argparse.Namespace, name: str) -> dict:
     if config["cu_seqlens"] is not None:
         config["batch"] = 1
     config["scale"] = args.scale if args.scale is not None else 128.0 ** -0.5
+    debug_compare = args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars
+    if args.cpu_only or debug_compare:
+        config["compare_cpu"] = True
+        config["compare_chain"] = False
+    elif not args.compare_cpu and not args.compare_chain:
+        config["compare_cpu"] = True
+        config["compare_chain"] = False
+    else:
+        config["compare_cpu"] = args.compare_cpu
+        config["compare_chain"] = args.compare_chain
     config["l2norm"] = not args.no_l2norm
     config["initial_state"] = not args.no_initial_state
     config["final_state"] = not args.no_final_state
@@ -353,11 +369,15 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             if tensor is not None:
                 logger.info("input %s %s", tensor_name, json.dumps(tensor_stats(tensor)))
 
-        logger.info("CPU golden started")
-        golden_started = time.perf_counter()
-        expected = golden(inputs, config, cu)
-        summary["golden_seconds"] = time.perf_counter() - golden_started
-        logger.info("CPU golden finished seconds=%.6f", summary["golden_seconds"])
+        expected = {}
+        if config["compare_cpu"]:
+            logger.info("CPU golden started")
+            golden_started = time.perf_counter()
+            expected = golden(inputs, config, cu)
+            summary["golden_seconds"] = time.perf_counter() - golden_started
+            logger.info("CPU golden finished seconds=%.6f", summary["golden_seconds"])
+        else:
+            logger.info("CPU golden skipped (compare_cpu=false)")
         if config["cpu_only"]:
             golden_stats = {name: tensor_stats(tensor) for name, tensor in expected.items()}
             summary["golden_output_stats"] = golden_stats
@@ -460,33 +480,61 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
         summary["output_stats"] = output_stats
 
         metrics = {}
-        for tensor_name, expected_tensor in expected.items():
-            if actual.get(tensor_name) is None:
-                raise RuntimeError(f"DUT output {tensor_name} is required but returned None")
-            metric = error_metrics(actual[tensor_name], expected_tensor, config["rtol"], config["atol"])
-            metrics[tensor_name] = metric
-            logger.info("compare %s %s", tensor_name, json.dumps(metric))
-            if tensor_name == "h":
-                chunk_metrics = []
-                for batch_index in range(actual["h"].shape[0]):
-                    for tile_index in range(actual["h"].shape[1]):
-                        chunk_metric = error_metrics(actual["h"][batch_index, tile_index],
-                                                     expected_tensor[batch_index, tile_index],
-                                                     config["rtol"], config["atol"])
-                        chunk_metrics.append({"batch": batch_index, "tile": tile_index,
-                                              "max_abs": chunk_metric["max_abs"],
-                                              "mismatch_count": chunk_metric["mismatch_count"],
-                                              "passed": chunk_metric["passed"]})
-                        logger.info("compare h batch=%d tile=%d %s", batch_index, tile_index,
-                                    json.dumps(chunk_metrics[-1]))
-                summary["h_chunk_metrics"] = chunk_metrics
+        if config["compare_cpu"]:
+            for tensor_name, expected_tensor in expected.items():
+                if actual.get(tensor_name) is None:
+                    raise RuntimeError(f"DUT output {tensor_name} is required but returned None")
+                metric = error_metrics(actual[tensor_name], expected_tensor, config["rtol"], config["atol"])
+                metrics[tensor_name] = metric
+                logger.info("compare %s %s", tensor_name, json.dumps(metric))
+                if tensor_name == "h":
+                    chunk_metrics = []
+                    for batch_index in range(actual["h"].shape[0]):
+                        for tile_index in range(actual["h"].shape[1]):
+                            chunk_metric = error_metrics(actual["h"][batch_index, tile_index],
+                                                         expected_tensor[batch_index, tile_index],
+                                                         config["rtol"], config["atol"])
+                            chunk_metrics.append({"batch": batch_index, "tile": tile_index,
+                                                  "max_abs": chunk_metric["max_abs"],
+                                                  "mismatch_count": chunk_metric["mismatch_count"],
+                                                  "passed": chunk_metric["passed"]})
+                            logger.info("compare h batch=%d tile=%d %s", batch_index, tile_index,
+                                        json.dumps(chunk_metrics[-1]))
+                    summary["h_chunk_metrics"] = chunk_metrics
         summary["metrics"] = metrics
-        summary["status"] = "passed" if all(metric["passed"] for metric in metrics.values()) else "failed"
+
+        chain_metrics = {}
+        chain_outputs = None
+        if config["compare_chain"]:
+            from npu_chain_reference import run_npu_chain
+            effective = effective_inputs(inputs, config)
+            chain_outputs = run_npu_chain(ascendc, inputs, effective, config, cu, chunk_indices, logger)
+            chain_timings = chain_outputs.pop("_timings")
+            summary["chain_timings"] = chain_timings
+            chain_stats = {}
+            for tensor_name, tensor in chain_outputs.items():
+                if tensor is not None:
+                    chain_stats[tensor_name] = tensor_stats(tensor)
+                    logger.info("chain output %s %s", tensor_name, json.dumps(chain_stats[tensor_name]))
+            summary["chain_output_stats"] = chain_stats
+            for tensor_name, chain_tensor in chain_outputs.items():
+                if actual.get(tensor_name) is None:
+                    raise RuntimeError(f"DUT output {tensor_name} is required for chain comparison")
+                metric = error_metrics(actual[tensor_name], chain_tensor, config["rtol"], config["atol"])
+                chain_metrics[tensor_name] = metric
+                logger.info("compare_chain %s %s", tensor_name, json.dumps(metric))
+        summary["chain_metrics"] = chain_metrics
+        all_metrics = list(metrics.values()) + list(chain_metrics.values())
+        summary["status"] = "passed" if all(metric["passed"] for metric in all_metrics) else "failed"
         if config["save_tensors"]:
             torch.save(inputs, run_dir / "inputs.pt")
             torch.save({key: (None if value is None else value.cpu()) for key, value in actual.items()},
                        run_dir / "dut_outputs.pt")
-            torch.save(expected, run_dir / "golden_outputs.pt")
+            if config["compare_cpu"]:
+                torch.save(expected, run_dir / "golden_outputs.pt")
+            if chain_outputs is not None:
+                torch.save({key: (None if value is None else value.cpu()) for key, value in chain_outputs.items()},
+                           run_dir / "chain_outputs.pt")
             logger.info("tensors saved under %s", run_dir)
     except Exception as exc:
         summary["exception"] = {"type": type(exc).__name__, "message": str(exc)}
