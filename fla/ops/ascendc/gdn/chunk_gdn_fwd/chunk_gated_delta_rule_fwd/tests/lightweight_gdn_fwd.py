@@ -363,6 +363,14 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
     started = time.perf_counter()
     try:
         log_environment(logger, config)
+        if not config["cpu_only"]:
+            import torch_npu
+            from fla_npu.ops import ascendc
+            logger.info("torch_npu=%s path=%s", getattr(torch_npu, "__version__", "unknown"), torch_npu.__file__)
+            logger.info("ascendc path=%s", ascendc.__file__)
+            logger.info("NPU set_device started: %d", config["device"])
+            torch.npu.set_device(config["device"])
+            logger.info("NPU set_device finished")
         cu = parse_cu(config)
         inputs = make_inputs(config, cu)
         for tensor_name, tensor in inputs.items():
@@ -399,13 +407,6 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 logger.removeHandler(handler)
             return True
 
-        import torch_npu
-        from fla_npu.ops import ascendc
-        logger.info("torch_npu=%s path=%s", getattr(torch_npu, "__version__", "unknown"), torch_npu.__file__)
-        logger.info("ascendc path=%s", ascendc.__file__)
-        logger.info("NPU set_device started: %d", config["device"])
-        torch.npu.set_device(config["device"])
-        logger.info("NPU set_device finished")
         device = torch.device(f"npu:{config['device']}")
         logger.info("input H2D copy started")
         npu_inputs = {key: (None if value is None else value.to(device).contiguous())
