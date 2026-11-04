@@ -21,7 +21,7 @@ Producer, per chunk:
 Consumer, one chunk behind:
 
 1. Load W/U/Q/K/A' and gate cumsum; upload the current BF16 state mirror and inputs to L1.
-2. AIC computes `P=W@H` and `O_s=Q@H`. The second product reuses H already loaded in L0B by P.
+2. AIC computes `P=W@H` and `O_s=Q@H`, reloading H for the second product to keep operand lifetimes explicit.
 3. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, then publishes both to L1.
 4. AIC computes `D=K^T@right` (or `right^T@K` for stateVFirst) and `O_l=A'@v_new`.
 5. AIV writes `o=(E(g)*O_s+O_l)*scale`, updates the FP32 state with `H=E(g_last)*H+D`, and refreshes its BF16 cube mirror.

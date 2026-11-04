@@ -74,19 +74,6 @@ __aicore__ inline void ComputeMm(LocalTensor<bfloat16_t> l1A,
     IssueMm(l0A, l0B, l0C, m, n, k);
 }
 
-// Reuse the B operand left in L0 by the immediately preceding GEMM.
-__aicore__ inline void ComputeMmReuseB(LocalTensor<bfloat16_t> l1A,
-                                       LocalTensor<bfloat16_t> l0A,
-                                       LocalTensor<bfloat16_t> l0B,
-                                       LocalTensor<float> l0C,
-                                       int32_t m, int32_t n, int32_t k,
-                                       bool transposeA)
-{
-    WaitFlag<HardEvent::M_MTE1>(0);
-    LoadA(l0A, l1A, m, k, transposeA);
-    IssueMm(l0A, l0B, l0C, m, n, k);
-}
-
 // Reuse the A operand left in L0 by the immediately preceding GEMM.
 __aicore__ inline void ComputeMmReuseA(LocalTensor<bfloat16_t> l1B,
                                        LocalTensor<bfloat16_t> l0A,

@@ -277,7 +277,8 @@ private:
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
-        ComputeMmReuseB(l1Q_, l0A1_, l0B0_, l0C1_, 64, 128, 128, false);
+        ComputeMm(l1Q_, l1H_[chunk & 1], l0A1_, l0B1_, l0C1_, 64, 128, 128,
+                  false, td_.stateVFirst == 0);
         FixF32Halves(ubOS_, l0C1_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsOS);

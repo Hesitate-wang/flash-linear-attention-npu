@@ -238,7 +238,7 @@ private:
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t offset = (tile * td_.valueHeads + loc_.hv) * kMatrixElems + firstRow * kChunk;
         CopyUbToGm(gmAPrime_, offset, ubAPrime_, kHalfRows * kChunk);
-        if (td_.reserved != 0 && td_.outputA != 0) {
+        if (td_.reserved == 1 && td_.outputA != 0) {
             const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
             const uint32_t rows = remaining <= 0 ? 0U
                 : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
