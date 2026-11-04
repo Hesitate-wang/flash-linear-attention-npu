@@ -52,6 +52,7 @@ bash tests/run_lightweight.sh \
 - `--dump-aprime`：调试模式，将 A′ 写入公开 A 输出槽并逐元素比较；此时 A 不再表示逆系数。
 - `--dump-ol`：调试模式，绕过 gate/scale/输出融合，将原始 O_l 写入公开 o 并逐元素比较。
 - `--dump-os`：调试模式，将原始 O_s 写入公开 o 并逐元素比较。
+- `--dump-scalars`：调试模式，在 o 的前四个元素导出 `energy/scale/g/lastEnergy`，用于单 token 标量核对。
 
 ## 比较范围
 

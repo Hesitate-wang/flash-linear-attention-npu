@@ -64,6 +64,8 @@ def parse_args() -> argparse.Namespace:
                         help="Debug: export raw O_l through o and compare it")
     parser.add_argument("--dump-os", action="store_true",
                         help="Debug: export raw O_s through o and compare it")
+    parser.add_argument("--dump-scalars", action="store_true",
+                        help="Debug: export energy/scale/g/lastEnergy in the first four outputs")
     parser.add_argument("--cpu-only", action="store_true",
                         help="Only validate input/golden/log generation; do not touch the NPU")
     parser.add_argument("--log-dir", type=Path, default=TEST_DIR / "logs")
@@ -80,6 +82,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dump-aprime and --dump-ol are mutually exclusive")
     if args.dump_os and (args.dump_aprime or args.dump_ol):
         parser.error("--dump-os cannot be combined with other dump modes")
+    if args.dump_scalars and (args.dump_aprime or args.dump_ol or args.dump_os):
+        parser.error("--dump-scalars cannot be combined with other dump modes")
     return args
 
 
@@ -401,6 +405,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             logger.warning("O_s debug export enabled: public o now contains raw O_s")
         else:
             os.environ.pop("GDN_SPARSE_DEBUG_OS", None)
+        if config["dump_scalars"]:
+            os.environ["GDN_SPARSE_DEBUG_SCALARS"] = "1"
+            logger.warning("scalar debug export enabled: first four o values are energy/scale/g/lastEnergy")
+        else:
+            os.environ.pop("GDN_SPARSE_DEBUG_SCALARS", None)
 
         def invoke():
             return ascendc.chunk_gated_delta_rule_fwd(
@@ -436,6 +445,13 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
         names = ("o", "final_state", "g_cumsum", "A", "beta_eff", "h",
                  "q_hat", "k_hat", "q_rstd", "k_rstd")
         actual = dict(zip(names, outputs))
+        if config["dump_scalars"]:
+            scalar_values = actual["o"].detach().cpu().float().flatten()[:4].tolist()
+            raw_gate = float(inputs["g"][0, 0, 0])
+            expected_gate = 2.0 ** raw_gate if config["use_exp2"] else math.exp(raw_gate)
+            expected_scalars = [expected_gate, config["scale"], raw_gate, expected_gate]
+            summary["scalar_debug"] = {"actual": scalar_values, "expected": expected_scalars}
+            logger.info("scalar debug actual=%s expected=%s", scalar_values, expected_scalars)
         output_stats = {}
         for tensor_name, tensor in actual.items():
             if tensor is not None:

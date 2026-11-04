@@ -181,8 +181,9 @@ private:
         AivWait(kConsP);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
-        const float gLast = ubG_.GetValue(kChunk - 1);
-        const float lastEnergy = ubEnergy_.GetValue(kChunk - 1);
+        const int64_t lastIndex = window_.rows - 1;
+        const float gLast = ubG_.GetValue(lastIndex);
+        const float lastEnergy = ubEnergy_.GetValue(lastIndex);
         if (td_.useExp2 != 0) {
             VNewRightVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, gLast, firstRow);
         } else {
@@ -198,7 +199,18 @@ private:
         AivPublish(kConsVn);
 
         AivWait(kConsOS);
-        if (td_.reserved == 2 || td_.reserved == 3) {
+        if (td_.reserved == 4) {
+            AivWait(kConsOL);
+            ubP_.SetValue(0, ubEnergy_.GetValue(firstRow));
+            ubP_.SetValue(1, td_.scale);
+            ubP_.SetValue(2, ubG_.GetValue(firstRow));
+            ubP_.SetValue(3, lastEnergy);
+            SetFlag<HardEvent::S_V>(0);
+            WaitFlag<HardEvent::S_V>(0);
+            Cast(ubO_, ubP_, RoundMode::CAST_RINT, 4);
+            SetFlag<HardEvent::V_MTE3>(0);
+            WaitFlag<HardEvent::V_MTE3>(0);
+        } else if (td_.reserved == 2 || td_.reserved == 3) {
             AivWait(kConsOL);
             if (td_.reserved == 2) {
                 Cast(ubOLB_, ubOL_, RoundMode::CAST_RINT, kHalfRows * kDim);
