@@ -79,7 +79,7 @@ public:
             AivPublish(kProdA);
             AivWait(kProdQk);
             PublishAPrime(chunk);
-            AivWait(kProdWu);
+            AivWaitMte3(kProdWu);
             DrainWu();
         }
         if ASCEND_IS_AIC {

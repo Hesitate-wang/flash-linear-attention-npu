@@ -57,9 +57,10 @@ bash tests/run_lightweight.sh \
 - `o`：统一为公开 BSND；
 - `g_cumsum`；
 - `A`；
+- `h`：逐 chunk 的状态快照，同时额外记录每个 tile 的误差；
 - 请求时的 `final_state`。
 
-按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。不运行六算子链，也不把中间 `h` 作为默认比较项。
+按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。不运行六算子链。
 
 ## 日志
 

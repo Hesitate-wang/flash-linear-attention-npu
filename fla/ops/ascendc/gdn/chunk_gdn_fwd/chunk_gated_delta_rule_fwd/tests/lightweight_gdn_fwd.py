@@ -181,9 +181,17 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     final = torch.zeros((sequence_count, hv, 128, 128), dtype=torch.float64)
     g_cumsum = torch.zeros((b, t, hv), dtype=torch.float64)
     a_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
+    if cu is None:
+        total_chunks = b * ((t + 63) // 64)
+        h_output = torch.zeros((b, (t + 63) // 64, hv, 128, 128), dtype=torch.bfloat16)
+    else:
+        total_chunks = sum((end - begin + 63) // 64 for begin, end in zip(cu, cu[1:]))
+        h_output = torch.zeros((1, total_chunks, hv, 128, 128), dtype=torch.bfloat16)
     initial = inputs["initial_state"]
 
     for batch, sequence, begin, end in sequence_ranges(config, cu):
+        chunk_base = 0 if cu is None else sum(
+            (cu[index + 1] - cu[index] + 63) // 64 for index in range(sequence))
         for head in range(hv):
             key_head = head // ratio
             if initial is None:
@@ -192,13 +200,18 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                 state = initial[sequence, head].double().clone()
                 if config["state_v_first"]:
                     state = state.transpose(0, 1).contiguous()
-            for token in range(begin, end):
-                decay = torch.exp2(g[batch, token, head]) if config["use_exp2"] else torch.exp(g[batch, token, head])
-                state = state * decay
-                key = k[batch, key_head, token]
-                delta = (v[batch, head, token] - key @ state) * beta[batch, token, head]
-                state = state + torch.outer(key, delta)
-                o[batch, head, token] = (q[batch, key_head, token] @ state) * config["scale"]
+            for local_chunk, chunk_begin in enumerate(range(begin, end, 64)):
+                tile = local_chunk if cu is None else chunk_base + local_chunk
+                state_image = state.transpose(0, 1) if config["state_v_first"] else state
+                h_output[batch, tile, head] = state_image.to(torch.bfloat16)
+                chunk_end = min(chunk_begin + 64, end)
+                for token in range(chunk_begin, chunk_end):
+                    decay = torch.exp2(g[batch, token, head]) if config["use_exp2"] else torch.exp(g[batch, token, head])
+                    state = state * decay
+                    key = k[batch, key_head, token]
+                    delta = (v[batch, head, token] - key @ state) * beta[batch, token, head]
+                    state = state + torch.outer(key, delta)
+                    o[batch, head, token] = (q[batch, key_head, token] @ state) * config["scale"]
             if config["state_v_first"]:
                 state = state.transpose(0, 1).contiguous()
             final[sequence, head] = state
@@ -222,6 +235,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
         "o": o.to(torch.bfloat16).transpose(1, 2).contiguous(),
         "g_cumsum": g_cumsum.float(),
         "A": a_output.to(torch.bfloat16),
+        "h": h_output,
     }
     if config["final_state"]:
         result["final_state"] = final.to(DTYPES[config["initial_dtype"]] if initial is not None else torch.float32)
@@ -360,7 +374,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 use_qk_l2norm_in_kernel=config["l2norm"],
                 use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
                 allow_neg_eigval=config["allow_neg_eigval"], state_v_first=config["state_v_first"],
-                disable_recompute=True, return_intermediate_states=False, layout="BNSD")
+                disable_recompute=True, return_intermediate_states=True, layout="BNSD")
 
         for index in range(config["warmup"]):
             logger.info("warmup %d started", index)
@@ -399,6 +413,20 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             metric = error_metrics(actual[tensor_name], expected_tensor, config["rtol"], config["atol"])
             metrics[tensor_name] = metric
             logger.info("compare %s %s", tensor_name, json.dumps(metric))
+            if tensor_name == "h":
+                chunk_metrics = []
+                for batch_index in range(actual["h"].shape[0]):
+                    for tile_index in range(actual["h"].shape[1]):
+                        chunk_metric = error_metrics(actual["h"][batch_index, tile_index],
+                                                     expected_tensor[batch_index, tile_index],
+                                                     config["rtol"], config["atol"])
+                        chunk_metrics.append({"batch": batch_index, "tile": tile_index,
+                                              "max_abs": chunk_metric["max_abs"],
+                                              "mismatch_count": chunk_metric["mismatch_count"],
+                                              "passed": chunk_metric["passed"]})
+                        logger.info("compare h batch=%d tile=%d %s", batch_index, tile_index,
+                                    json.dumps(chunk_metrics[-1]))
+                summary["h_chunk_metrics"] = chunk_metrics
         summary["metrics"] = metrics
         summary["status"] = "passed" if all(metric["passed"] for metric in metrics.values()) else "failed"
         if config["save_tensors"]:
