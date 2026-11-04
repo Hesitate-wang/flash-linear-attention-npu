@@ -60,6 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-tensors", action="store_true")
     parser.add_argument("--dump-aprime", action="store_true",
                         help="Debug: export A' through the public A slot and compare it")
+    parser.add_argument("--dump-ol", action="store_true",
+                        help="Debug: export raw O_l through o and compare it")
     parser.add_argument("--cpu-only", action="store_true",
                         help="Only validate input/golden/log generation; do not touch the NPU")
     parser.add_argument("--log-dir", type=Path, default=TEST_DIR / "logs")
@@ -72,6 +74,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("repeat must be positive and warmup must be nonnegative")
     if args.allow_neg_eigval and not args.beta_sigmoid:
         parser.error("allow-neg-eigval requires --beta-sigmoid")
+    if args.dump_aprime and args.dump_ol:
+        parser.error("--dump-aprime and --dump-ol are mutually exclusive")
     return args
 
 
@@ -180,6 +184,8 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     ratio = hv // config["key_heads"]
     sequence_count = len(cu) - 1 if cu is not None else b
     o = torch.zeros((b, hv, t, 128), dtype=torch.float64)
+    vnew_output = torch.zeros((b, hv, t, 128), dtype=torch.float64)
+    ol_output = torch.zeros((b, hv, t, 128), dtype=torch.float64)
     final = torch.zeros((sequence_count, hv, 128, 128), dtype=torch.float64)
     g_cumsum = torch.zeros((b, t, hv), dtype=torch.float64)
     a_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
@@ -213,6 +219,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                     state = state * decay
                     key = k[batch, key_head, token]
                     delta = (v[batch, head, token] - key @ state) * beta[batch, token, head]
+                    vnew_output[batch, head, token] = delta
                     state = state + torch.outer(key, delta)
                     o[batch, head, token] = (q[batch, key_head, token] @ state) * config["scale"]
             if config["state_v_first"]:
@@ -236,9 +243,11 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                 attention = q[batch, key_head, chunk_begin:chunk_end] @ k[batch, key_head, chunk_begin:chunk_end].T
                 attention = torch.tril(attention * gate_scale, diagonal=0)
                 attention_output[batch, head, chunk_begin:chunk_end, :size] = attention
+                ol_output[batch, head, chunk_begin:chunk_end] = (
+                    attention @ vnew_output[batch, head, chunk_begin:chunk_end])
 
     result = {
-        "o": o.to(torch.bfloat16).transpose(1, 2).contiguous(),
+        "o": (ol_output if config["dump_ol"] else o).to(torch.bfloat16).transpose(1, 2).contiguous(),
         "g_cumsum": g_cumsum.float(),
         "A": attention_output.to(torch.bfloat16) if config["dump_aprime"] else a_output.to(torch.bfloat16),
         "h": h_output,
@@ -375,6 +384,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             logger.warning("A' debug export enabled: public A now contains A', not the inverse coefficient")
         else:
             os.environ.pop("GDN_SPARSE_DEBUG_APRIME", None)
+        if config["dump_ol"]:
+            os.environ["GDN_SPARSE_DEBUG_OL"] = "1"
+            logger.warning("O_l debug export enabled: public o now contains raw O_l")
+        else:
+            os.environ.pop("GDN_SPARSE_DEBUG_OL", None)
 
         def invoke():
             return ascendc.chunk_gated_delta_rule_fwd(

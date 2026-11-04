@@ -108,6 +108,7 @@ private:
         ubP_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbP);
         ubOS_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbOS);
         ubOL_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbOL);
+        ubOLB_ = ubOL_.ReinterpretCast<bfloat16_t>();
         ubU_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbU);
         ubVNew_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbVNew);
         ubRight_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbRight);
@@ -196,10 +197,17 @@ private:
         AivPublish(kConsVn);
 
         AivWait(kConsOS);
-        AivWait(kConsOL);
-        OutputBandVF(ubO_, ubOS_, ubOL_, ubEnergy_, td_.scale, firstRow, rows);
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
+        if (td_.reserved == 2) {
+            AivWait(kConsOL);
+            Cast(ubOLB_, ubOL_, RoundMode::CAST_RINT, kHalfRows * kDim);
+            SetFlag<HardEvent::V_MTE3>(0);
+            WaitFlag<HardEvent::V_MTE3>(0);
+        } else {
+            AivWait(kConsOL);
+            OutputBandVF(ubO_, ubOS_, ubOL_, ubEnergy_, td_.scale, firstRow, rows);
+            SetFlag<HardEvent::V_MTE3>(0);
+            WaitFlag<HardEvent::V_MTE3>(0);
+        }
         if (rows != 0) {
             DataCopyExtParams params{};
             params.blockCount = static_cast<uint16_t>(rows);
@@ -208,7 +216,7 @@ private:
             params.dstStride = (td_.valueHeads - 1) * kDim * sizeof(bfloat16_t);
             params.rsv = 0;
             DataCopyPad(gmO_[OffsetOutput(loc_.batch, token, loc_.hv, td_.valueHeads, td_.tokens)],
-                        ubO_, params);
+                        td_.reserved == 2 ? ubOLB_ : ubO_, params);
         }
 
         AivWait(kConsD);
@@ -301,7 +309,7 @@ private:
     GlobalTensor<float> gmG_, gmInitF_, gmFinalF_;
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubOS_, ubOL_;
-    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubAPrime_, ubO_, ubInitB_;
+    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubAPrime_, ubO_, ubInitB_, ubOLB_;
     LocalTensor<float> ubG_, ubEnergy_;
     LocalTensor<bfloat16_t> l1W_, l1Q_, l1K_, l1H_[2], l1VNew_, l1Right_, l1APrime_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
