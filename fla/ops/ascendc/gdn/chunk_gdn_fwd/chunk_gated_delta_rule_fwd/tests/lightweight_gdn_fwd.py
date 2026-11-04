@@ -507,8 +507,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
         chain_outputs = None
         if config["compare_chain"]:
             from npu_chain_reference import run_npu_chain
-            effective = effective_inputs(inputs, config)
-            chain_outputs = run_npu_chain(ascendc, inputs, effective, config, cu, chunk_indices, logger)
+            chain_outputs = run_npu_chain(ascendc, inputs, config, cu, chunk_indices, logger)
             chain_timings = chain_outputs.pop("_timings")
             summary["chain_timings"] = chain_timings
             chain_stats = {}

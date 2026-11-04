@@ -3,11 +3,11 @@
 默认运行 **融合 DUT + CPU FP64 golden**，不依赖 ATK。可通过独立选项增加或替换对照路径：
 
 - `--compare-cpu`：显式启用 CPU FP64 golden；
-- `--compare-chain`：启用六 ACLNN NPU 拼接对照；
+- `--compare-chain`：启用 Prepare → FwdH → FwdO 的 NPU 拼接对照；
 - 两者同时指定：执行 DUT、CPU、NPU 拼接三路对齐；
 - 仅指定 `--compare-chain`：跳过 CPU golden，只比较 DUT 与 NPU 拼接。
 
-不指定任何 compare 选项时保持默认的 DUT+CPU 轻量模式。六算子拼接只在显式指定 `--compare-chain` 时运行。
+不指定任何 compare 选项时保持默认的 DUT+CPU 轻量模式。Prepare → FwdH → FwdO 拼接只在显式指定 `--compare-chain` 时运行。
 
 ## 环境
 
@@ -16,6 +16,7 @@
 - Ascend NPU 和 CANN；
 - PyTorch、torch_npu；
 - 已安装包含当前算子的 `fla_npu`；
+- 使用 `--compare-chain` 时，还需安装 `chunk_gated_delta_rule_fwd_prepare`、`chunk_gated_delta_rule_fwd_h` 和 `chunk_fwd_o`；
 - 已加载 CANN 和 `fla_npu_transformer` vendor 环境。
 
 不需要 TensorFlow，也不需要 ATK。`--cpu-only` 仅需要 PyTorch。
@@ -26,7 +27,7 @@
 # 默认 dense-tail：DUT + CPU FP64 golden
 bash tests/run_lightweight.sh --device 0
 
-# 只比较 DUT 与六 ACLNN NPU 拼接，不运行 CPU golden
+# 只比较 DUT 与 Prepare → FwdH → FwdO，不运行 CPU golden
 bash tests/run_lightweight.sh --compare-chain --device 0
 
 # DUT、CPU golden、NPU 拼接三路对齐
@@ -77,7 +78,7 @@ bash tests/run_lightweight.sh \
 - `h`：逐 chunk 的状态快照，同时额外记录每个 tile 的误差；
 - 请求时的 `final_state`。
 
-按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。启用 `--compare-chain` 时，DUT 还会与拼接路径的 `o/final_state/g_cumsum/A/h` 比较，指标单独记录为 `compare_chain` 和 `chain_metrics`。
+按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。启用 `--compare-chain` 时，DUT 还会与 Prepare → FwdH → FwdO 的对应输出比较，指标单独记录为 `compare_chain` 和 `chain_metrics`。Prepare 在 NPU 上独立完成 L2Norm 和 beta sigmoid，无需 CPU 预计算 hats。
 
 ## 日志
 
