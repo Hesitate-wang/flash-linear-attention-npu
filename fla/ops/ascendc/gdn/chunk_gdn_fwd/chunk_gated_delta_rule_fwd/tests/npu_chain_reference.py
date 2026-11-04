@@ -18,7 +18,10 @@ def run_npu_chain(ascendc, inputs: dict, config: dict,
     v = inputs["v"].to(device).contiguous()
     # Prepare uses BHT for gate/beta; the fused public wrapper uses BTH.
     g = inputs["g"].transpose(1, 2).to(device).contiguous()
-    beta = inputs["beta"].transpose(1, 2).to(device).contiguous()
+    beta = inputs["beta"].float().transpose(1, 2).to(device).contiguous()
+    logger.info("chain input layouts q=%s/%s k=%s/%s v=%s/%s g=%s/%s beta=%s/%s",
+                tuple(q.shape), q.dtype, tuple(k.shape), k.dtype, tuple(v.shape), v.dtype,
+                tuple(g.shape), g.dtype, tuple(beta.shape), beta.dtype)
     initial = inputs["initial_state"]
     if initial is not None:
         initial = initial.to(device).contiguous()
