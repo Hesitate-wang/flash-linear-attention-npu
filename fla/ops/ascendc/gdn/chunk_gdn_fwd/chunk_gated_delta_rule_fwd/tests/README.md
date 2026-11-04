@@ -60,7 +60,7 @@ bash tests/run_lightweight.sh \
 - `--initial-dtype bf16`：使用 BF16 初态和末态。
 - `--allow-neg-eigval`：要求同时指定 `--beta-sigmoid`。
 - `--cu-seqlens 0,31,96,129`：覆盖自定义变长边界。
-- `--rtol/--atol`：默认均为 `2e-2`，按实际精度门禁调整。
+- `--diff-thd/--pct-thd/--max-diff-hd`：混合容差，默认 `0.001/0.0001/0.1`，即绝对误差小于 `0.001` 直接通过、相对误差阈值为 `0.001`、至少 99.99% 元素通过、最大混合误差小于 0.1。
 - `--seed`：固定输入随机种子，默认 19。
 - `--gate-scale`：负 gate 的幅值，默认 0.05；设为 100 可覆盖累积极负时的 exp 下溢场景。
 - `--dump-aprime`：调试模式，将 A′ 写入公开 A 输出槽并逐元素比较；此时 A 不再表示逆系数。
@@ -96,7 +96,8 @@ bash tests/run_lightweight.sh \
 - 输入和全部非空输出的 shape、dtype、min/max/mean/std、finite；
 - golden 和每次 DUT 的耗时；
 - 每个比较输出的 `max_abs/mean_abs/RMSE/max_rel/mean_rel`；
-- 超差元素数量/比例、最差元素位置及 DUT/golden 数值；
+- 超差元素数量/比例、通过率、最大混合误差、最差元素位置及 DUT/golden 数值；
+- DUT 和参考输出中任意 NaN/Inf 都直接判定失败；
 - NPU 同步结果、异常完整 traceback 和最终状态。
 
 `summary.json.status` 可能为 `passed`、`failed` 或 `cpu-only`。`cpu-only` 不代表设备 DUT 已执行或通过。

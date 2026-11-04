@@ -55,8 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-initial-state", action="store_true")
     parser.add_argument("--no-final-state", action="store_true")
     parser.add_argument("--initial-dtype", choices=tuple(DTYPES), default="fp32")
-    parser.add_argument("--rtol", type=float, default=2e-2)
-    parser.add_argument("--atol", type=float, default=2e-2)
+    parser.add_argument("--diff-thd", type=float, default=1e-3,
+                        help="Mixed absolute/relative error threshold")
+    parser.add_argument("--pct-thd", type=float, default=1e-4,
+                        help="Allowed failed-element fraction; default 0.0001 = 0.01%")
+    parser.add_argument("--max-diff-hd", type=float, default=0.1,
+                        help="Maximum allowed mixed error")
     parser.add_argument("--save-tensors", action="store_true")
     parser.add_argument("--compare-cpu", action="store_true",
                         help="Compare DUT with the CPU FP64 golden")
@@ -80,6 +84,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("value-heads must be divisible by key-heads")
     if args.repeat <= 0 or args.warmup < 0:
         parser.error("repeat must be positive and warmup must be nonnegative")
+    if args.diff_thd <= 0 or args.max_diff_hd <= 0 or not 0 <= args.pct_thd <= 1:
+        parser.error("diff-thd/max-diff-hd must be positive and pct-thd must be in [0,1]")
     if args.allow_neg_eigval and not args.beta_sigmoid:
         parser.error("allow-neg-eigval requires --beta-sigmoid")
     if args.dump_aprime and args.dump_ol:
@@ -303,28 +309,53 @@ def tensor_stats(tensor: torch.Tensor) -> dict:
     return stats
 
 
-def error_metrics(actual: torch.Tensor, expected: torch.Tensor, rtol: float, atol: float) -> dict:
+def error_metrics(actual: torch.Tensor, expected: torch.Tensor, config: dict) -> dict:
+    """Mixed absolute/relative comparison with mandatory finite-value checks."""
     if actual.shape != expected.shape:
         raise ValueError(f"shape mismatch: actual={tuple(actual.shape)}, expected={tuple(expected.shape)}")
     actual = actual.detach().cpu().float()
     expected = expected.detach().cpu().float()
+    diff_thd = config["diff_thd"]
+    pct_thd = config["pct_thd"]
+    max_diff_hd = config["max_diff_hd"]
+    count = actual.numel()
+    finite = bool(torch.isfinite(actual).all() and torch.isfinite(expected).all())
+    if not finite:
+        return {"max_abs": math.inf, "mean_abs": math.inf, "rmse": math.inf,
+                "max_rel": math.inf, "mean_rel": math.inf,
+                "mismatch_count": count, "mismatch_ratio": 1.0 if count else 0.0,
+                "fulfill_percent": 0.0, "max_error": math.inf,
+                "passed": False, "finite": False}
     difference = (actual - expected).abs()
     denominator = expected.abs().clamp_min(1e-6)
     relative = difference / denominator
-    mismatches = ~torch.isclose(actual, expected, rtol=rtol, atol=atol)
-    worst = int(difference.flatten().argmax()) if difference.numel() else 0
+    # Same mixed rule as data_compare_h.py, with finite-value enforcement:
+    # small absolute errors pass directly; larger errors use a symmetric
+    # relative denominator with a near-zero floor.
+    floor = (1.0 / (1 << 14)) / diff_thd
+    mixed_denominator = torch.maximum(actual.abs(), expected.abs()).clamp_min(floor) + 1e-9
+    mixed = torch.where(difference < diff_thd, difference, difference / mixed_denominator)
+    failures = mixed > diff_thd
+    error_count = int(failures.sum())
+    fulfill_percent = 100.0 * (count - error_count) / count if count else 100.0
+    max_error = float(mixed[failures].max()) if error_count else 0.0
+    passed = fulfill_percent >= (1.0 - pct_thd) * 100.0 and max_error < max_diff_hd
+    worst = int(difference.flatten().argmax()) if count else 0
     return {
-        "max_abs": float(difference.max()) if difference.numel() else 0.0,
-        "mean_abs": float(difference.mean()) if difference.numel() else 0.0,
-        "rmse": float(difference.square().mean().sqrt()) if difference.numel() else 0.0,
-        "max_rel": float(relative.max()) if relative.numel() else 0.0,
-        "mean_rel": float(relative.mean()) if relative.numel() else 0.0,
-        "mismatch_count": int(mismatches.sum()),
-        "mismatch_ratio": float(mismatches.float().mean()) if mismatches.numel() else 0.0,
+        "max_abs": float(difference.max()) if count else 0.0,
+        "mean_abs": float(difference.mean()) if count else 0.0,
+        "rmse": float(difference.square().mean().sqrt()) if count else 0.0,
+        "max_rel": float(relative.max()) if count else 0.0,
+        "mean_rel": float(relative.mean()) if count else 0.0,
+        "mismatch_count": error_count,
+        "mismatch_ratio": error_count / count if count else 0.0,
+        "fulfill_percent": fulfill_percent,
+        "max_error": max_error,
         "worst_flat_index": worst,
-        "worst_actual": float(actual.flatten()[worst]) if actual.numel() else 0.0,
-        "worst_expected": float(expected.flatten()[worst]) if expected.numel() else 0.0,
-        "passed": not bool(mismatches.any()),
+        "worst_actual": float(actual.flatten()[worst]) if count else 0.0,
+        "worst_expected": float(expected.flatten()[worst]) if count else 0.0,
+        "passed": passed,
+        "finite": True,
     }
 
 
@@ -493,7 +524,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             for tensor_name, expected_tensor in expected.items():
                 if actual.get(tensor_name) is None:
                     raise RuntimeError(f"DUT output {tensor_name} is required but returned None")
-                metric = error_metrics(actual[tensor_name], expected_tensor, config["rtol"], config["atol"])
+                metric = error_metrics(actual[tensor_name], expected_tensor, config)
                 metrics[tensor_name] = metric
                 logger.info("compare %s %s", tensor_name, json.dumps(metric))
                 if tensor_name == "h":
@@ -501,8 +532,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                     for batch_index in range(actual["h"].shape[0]):
                         for tile_index in range(actual["h"].shape[1]):
                             chunk_metric = error_metrics(actual["h"][batch_index, tile_index],
-                                                         expected_tensor[batch_index, tile_index],
-                                                         config["rtol"], config["atol"])
+                                                         expected_tensor[batch_index, tile_index], config)
                             chunk_metrics.append({"batch": batch_index, "tile": tile_index,
                                                   "max_abs": chunk_metric["max_abs"],
                                                   "mismatch_count": chunk_metric["mismatch_count"],
@@ -528,7 +558,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             for tensor_name, chain_tensor in chain_outputs.items():
                 if actual.get(tensor_name) is None:
                     raise RuntimeError(f"DUT output {tensor_name} is required for chain comparison")
-                metric = error_metrics(actual[tensor_name], chain_tensor, config["rtol"], config["atol"])
+                metric = error_metrics(actual[tensor_name], chain_tensor, config)
                 chain_metrics[tensor_name] = metric
                 logger.info("compare_chain %s %s", tensor_name, json.dumps(metric))
         summary["chain_metrics"] = chain_metrics
