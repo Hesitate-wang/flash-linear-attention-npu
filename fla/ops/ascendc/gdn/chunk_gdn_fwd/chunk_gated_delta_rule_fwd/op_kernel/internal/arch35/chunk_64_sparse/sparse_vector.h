@@ -450,37 +450,30 @@ __aicore__ inline void VNewRightVF(LocalTensor<float> &p,
     }
 }
 
-__aicore__ inline void OutputBandVF(LocalTensor<bfloat16_t> &out,
-                                    LocalTensor<float> &os,
-                                    LocalTensor<float> &ol,
-                                    LocalTensor<float> &energy,
-                                    float outputScale, uint32_t firstRow,
-                                    uint32_t rows)
+__simd_vf__ inline void OutputBandVF(__ubuf__ float *out,
+                                     __ubuf__ float *os,
+                                     __ubuf__ float *ol,
+                                     __ubuf__ float *energy,
+                                     float outputScale, uint32_t firstRow,
+                                     uint32_t rows)
 {
-    __ubuf__ bfloat16_t *dst = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
-    __ubuf__ float *s = reinterpret_cast<__ubuf__ float *>(os.GetPhyAddr());
-    __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(ol.GetPhyAddr());
-    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
-    __VEC_SCOPE__
-    {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> s0, s1, l0, l1, gate;
-        for (uint16_t row = 0; row < rows; ++row) {
-            const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadAlign(s0, s + offset);
-            LoadAlign(s1, s + offset + 64);
-            LoadAlign(l0, l + offset);
-            LoadAlign(l1, l + offset + 64);
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(gate, e + firstRow + row);
-            Mul(s0, s0, gate, all);
-            Mul(s1, s1, gate, all);
-            Add(s0, s0, l0, all);
-            Add(s1, s1, l1, all);
-            Muls(s0, s0, outputScale, all);
-            Muls(s1, s1, outputScale, all);
-            StoreBf16(dst + offset, s0, all);
-            StoreBf16(dst + offset + 64, s1, all);
-        }
+    RegTensor<float> s0, s1, l0, l1, gate, out0, out1;
+    MaskReg all = CreateMask<float, MaskPattern::ALL>();
+    for (uint32_t row = 0; row < rows; ++row) {
+        const uint32_t offset = row * 128;
+        LoadAlign(s0, os + offset);
+        LoadAlign(s1, os + offset + 64);
+        LoadAlign(l0, ol + offset);
+        LoadAlign(l1, ol + offset + 64);
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(gate, energy + firstRow + row);
+        Mul(out0, s0, gate, all);
+        Mul(out1, s1, gate, all);
+        Add(out0, out0, l0, all);
+        Add(out1, out1, l1, all);
+        Muls(out0, out0, outputScale, all);
+        Muls(out1, out1, outputScale, all);
+        StoreAlign(out + offset, out0, all);
+        StoreAlign(out + offset + 64, out1, all);
     }
 }
 

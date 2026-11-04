@@ -209,7 +209,14 @@ private:
             WaitFlag<HardEvent::V_MTE3>(0);
         } else {
             AivWait(kConsOL);
-            OutputBandVF(ubO_, ubOS_, ubOL_, ubEnergy_, td_.scale, firstRow, rows);
+            asc_vf_call<OutputBandVF>(
+                reinterpret_cast<__ubuf__ float *>(ubP_.GetPhyAddr()),
+                reinterpret_cast<__ubuf__ float *>(ubOS_.GetPhyAddr()),
+                reinterpret_cast<__ubuf__ float *>(ubOL_.GetPhyAddr()),
+                reinterpret_cast<__ubuf__ float *>(ubEnergy_.GetPhyAddr()),
+                td_.scale, firstRow, rows);
+            PipeBarrier<PIPE_V>();
+            Cast(ubO_, ubP_, RoundMode::CAST_RINT, kHalfRows * kDim);
             SetFlag<HardEvent::V_MTE3>(0);
             WaitFlag<HardEvent::V_MTE3>(0);
         }
