@@ -403,12 +403,20 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
         from fla_npu.ops import ascendc
         logger.info("torch_npu=%s path=%s", getattr(torch_npu, "__version__", "unknown"), torch_npu.__file__)
         logger.info("ascendc path=%s", ascendc.__file__)
+        logger.info("NPU set_device started: %d", config["device"])
         torch.npu.set_device(config["device"])
+        logger.info("NPU set_device finished")
         device = torch.device(f"npu:{config['device']}")
+        logger.info("input H2D copy started")
         npu_inputs = {key: (None if value is None else value.to(device).contiguous())
                       for key, value in inputs.items()}
+        torch.npu.synchronize()
+        logger.info("input H2D copy finished")
         if config["state_v_first"] and npu_inputs["initial_state"] is not None:
+            logger.info("initial-state transpose started")
             npu_inputs["initial_state"] = npu_inputs["initial_state"].transpose(-1, -2).contiguous()
+            torch.npu.synchronize()
+            logger.info("initial-state transpose finished")
         chunk_indices = canonical_chunk_indices(cu)
         if config["dump_aprime"]:
             os.environ["GDN_SPARSE_DEBUG_APRIME"] = "1"
