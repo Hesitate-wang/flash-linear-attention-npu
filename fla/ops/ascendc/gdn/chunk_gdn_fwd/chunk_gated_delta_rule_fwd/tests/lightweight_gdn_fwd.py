@@ -62,6 +62,8 @@ def parse_args() -> argparse.Namespace:
                         help="Debug: export A' through the public A slot and compare it")
     parser.add_argument("--dump-ol", action="store_true",
                         help="Debug: export raw O_l through o and compare it")
+    parser.add_argument("--dump-os", action="store_true",
+                        help="Debug: export raw O_s through o and compare it")
     parser.add_argument("--cpu-only", action="store_true",
                         help="Only validate input/golden/log generation; do not touch the NPU")
     parser.add_argument("--log-dir", type=Path, default=TEST_DIR / "logs")
@@ -76,6 +78,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("allow-neg-eigval requires --beta-sigmoid")
     if args.dump_aprime and args.dump_ol:
         parser.error("--dump-aprime and --dump-ol are mutually exclusive")
+    if args.dump_os and (args.dump_aprime or args.dump_ol):
+        parser.error("--dump-os cannot be combined with other dump modes")
     return args
 
 
@@ -186,6 +190,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     o = torch.zeros((b, hv, t, 128), dtype=torch.float64)
     vnew_output = torch.zeros((b, hv, t, 128), dtype=torch.float64)
     ol_output = torch.zeros((b, hv, t, 128), dtype=torch.float64)
+    os_output = torch.zeros((b, hv, t, 128), dtype=torch.float64)
     final = torch.zeros((sequence_count, hv, 128, 128), dtype=torch.float64)
     g_cumsum = torch.zeros((b, t, hv), dtype=torch.float64)
     a_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
@@ -214,6 +219,8 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                 state_image = state.transpose(0, 1) if config["state_v_first"] else state
                 h_output[batch, tile, head] = state_image.to(torch.bfloat16)
                 chunk_end = min(chunk_begin + 64, end)
+                os_output[batch, head, chunk_begin:chunk_end] = (
+                    q[batch, key_head, chunk_begin:chunk_end] @ state)
                 for token in range(chunk_begin, chunk_end):
                     decay = torch.exp2(g[batch, token, head]) if config["use_exp2"] else torch.exp(g[batch, token, head])
                     state = state * decay
@@ -247,7 +254,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                     attention @ vnew_output[batch, head, chunk_begin:chunk_end])
 
     result = {
-        "o": (ol_output if config["dump_ol"] else o).to(torch.bfloat16).transpose(1, 2).contiguous(),
+        "o": (os_output if config["dump_os"] else (ol_output if config["dump_ol"] else o)).to(torch.bfloat16).transpose(1, 2).contiguous(),
         "g_cumsum": g_cumsum.float(),
         "A": attention_output.to(torch.bfloat16) if config["dump_aprime"] else a_output.to(torch.bfloat16),
         "h": h_output,
@@ -389,6 +396,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             logger.warning("O_l debug export enabled: public o now contains raw O_l")
         else:
             os.environ.pop("GDN_SPARSE_DEBUG_OL", None)
+        if config["dump_os"]:
+            os.environ["GDN_SPARSE_DEBUG_OS"] = "1"
+            logger.warning("O_s debug export enabled: public o now contains raw O_s")
+        else:
+            os.environ.pop("GDN_SPARSE_DEBUG_OS", None)
 
         def invoke():
             return ascendc.chunk_gated_delta_rule_fwd(

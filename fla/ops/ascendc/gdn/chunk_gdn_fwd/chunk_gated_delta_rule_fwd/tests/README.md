@@ -51,6 +51,7 @@ bash tests/run_lightweight.sh \
 - `--gate-scale`：负 gate 的幅值，默认 0.05；设为 100 可覆盖累积极负时的 exp 下溢场景。
 - `--dump-aprime`：调试模式，将 A′ 写入公开 A 输出槽并逐元素比较；此时 A 不再表示逆系数。
 - `--dump-ol`：调试模式，绕过 gate/scale/输出融合，将原始 O_l 写入公开 o 并逐元素比较。
+- `--dump-os`：调试模式，将原始 O_s 写入公开 o 并逐元素比较。
 
 ## 比较范围
 
