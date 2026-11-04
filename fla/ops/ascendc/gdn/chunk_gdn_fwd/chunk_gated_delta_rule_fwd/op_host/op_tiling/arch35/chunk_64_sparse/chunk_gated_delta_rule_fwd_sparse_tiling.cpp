@@ -9,6 +9,7 @@
 #include "tiling_base/tiling_templates_registry.h"
 #include "securec.h"
 #include <cstddef>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 
@@ -234,6 +235,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.varlen = varlen;
     td.hasALog = context->GetOptionalInputShape(10) != nullptr;
     td.hasDtBias = context->GetOptionalInputShape(11) != nullptr;
+    td.reserved = std::getenv("GDN_SPARSE_DEBUG_APRIME") == nullptr ? 0U : 1U;
     const float *scale = attrs->GetAttrPointer<float>(2);
     td.scale = scale == nullptr ? 1.0f : *scale;
     const auto *initialDesc = context->GetOptionalInputDesc(7);

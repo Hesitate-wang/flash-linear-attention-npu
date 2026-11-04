@@ -49,6 +49,7 @@ bash tests/run_lightweight.sh \
 - `--rtol/--atol`：默认均为 `2e-2`，按实际精度门禁调整。
 - `--seed`：固定输入随机种子，默认 19。
 - `--gate-scale`：负 gate 的幅值，默认 0.05；设为 100 可覆盖累积极负时的 exp 下溢场景。
+- `--dump-aprime`：调试模式，将 A′ 写入公开 A 输出槽并逐元素比较；此时 A 不再表示逆系数。
 
 ## 比较范围
 

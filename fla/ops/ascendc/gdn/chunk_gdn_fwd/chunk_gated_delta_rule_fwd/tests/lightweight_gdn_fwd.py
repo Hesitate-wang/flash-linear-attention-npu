@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtol", type=float, default=2e-2)
     parser.add_argument("--atol", type=float, default=2e-2)
     parser.add_argument("--save-tensors", action="store_true")
+    parser.add_argument("--dump-aprime", action="store_true",
+                        help="Debug: export A' through the public A slot and compare it")
     parser.add_argument("--cpu-only", action="store_true",
                         help="Only validate input/golden/log generation; do not touch the NPU")
     parser.add_argument("--log-dir", type=Path, default=TEST_DIR / "logs")
@@ -181,6 +183,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     final = torch.zeros((sequence_count, hv, 128, 128), dtype=torch.float64)
     g_cumsum = torch.zeros((b, t, hv), dtype=torch.float64)
     a_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
+    attention_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
     if cu is None:
         total_chunks = b * ((t + 63) // 64)
         h_output = torch.zeros((b, (t + 63) // 64, hv, 128, 128), dtype=torch.bfloat16)
@@ -230,11 +233,14 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                 size = chunk_end - chunk_begin
                 inverse = torch.linalg.inv(torch.eye(size, dtype=torch.float64) + raw)
                 a_output[batch, head, chunk_begin:chunk_end, :size] = inverse
+                attention = q[batch, key_head, chunk_begin:chunk_end] @ k[batch, key_head, chunk_begin:chunk_end].T
+                attention = torch.tril(attention * gate_scale, diagonal=0)
+                attention_output[batch, head, chunk_begin:chunk_end, :size] = attention
 
     result = {
         "o": o.to(torch.bfloat16).transpose(1, 2).contiguous(),
         "g_cumsum": g_cumsum.float(),
-        "A": a_output.to(torch.bfloat16),
+        "A": attention_output.to(torch.bfloat16) if config["dump_aprime"] else a_output.to(torch.bfloat16),
         "h": h_output,
     }
     if config["final_state"]:
@@ -364,6 +370,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
         if config["state_v_first"] and npu_inputs["initial_state"] is not None:
             npu_inputs["initial_state"] = npu_inputs["initial_state"].transpose(-1, -2).contiguous()
         chunk_indices = canonical_chunk_indices(cu)
+        if config["dump_aprime"]:
+            os.environ["GDN_SPARSE_DEBUG_APRIME"] = "1"
+            logger.warning("A' debug export enabled: public A now contains A', not the inverse coefficient")
+        else:
+            os.environ.pop("GDN_SPARSE_DEBUG_APRIME", None)
 
         def invoke():
             return ascendc.chunk_gated_delta_rule_fwd(
