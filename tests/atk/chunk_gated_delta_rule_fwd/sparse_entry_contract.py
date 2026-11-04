@@ -31,6 +31,9 @@ def main():
     assert "struct FusedTilingData" in mirror
     assert "PrepareTilingData" not in mirror
     assert "ChunkFwdHPlainTilingData" not in mirror
+    sparse_tiling = (OP / "op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp").read_text()
+    assert "GetAttrPointer<double>(2)" in sparse_tiling
+    assert "GetAttrPointer<float>(2)" not in sparse_tiling
     public_header = (OP / "op_host/op_api/aclnn_chunk_gated_delta_rule_fwd.h").read_text()
     assert "fused_prepare" not in public_header
     assert "ChunkGatedDeltaRuleFwdPrepareArgs" not in public_header
