@@ -50,7 +50,7 @@ public:
             gmDtBias_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.dtBias));
         }
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-            args.workspace + td.workspaceOffset));
+            GetUserWorkspace(args.workspace) + td.workspaceOffset));
         InitBuffers();
         if ASCEND_IS_AIV {
             GenerateScanIndices(ubShift_);

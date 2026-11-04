@@ -40,7 +40,7 @@ public:
         gmH_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.h));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-            args.workspace + td.workspaceOffset));
+            GetUserWorkspace(args.workspace) + td.workspaceOffset));
         if (args.initialState != nullptr) {
             hasInitial_ = true;
             if (td.stateFp32 != 0) {
