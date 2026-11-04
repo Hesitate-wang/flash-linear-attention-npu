@@ -80,6 +80,14 @@ bash tests/run_lightweight.sh \
 
 按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。启用 `--compare-chain` 时，DUT 还会与 Prepare → FwdH → FwdO 的对应输出比较，指标单独记录为 `compare_chain` 和 `chain_metrics`。Prepare 在 NPU 上独立完成 L2Norm 和 beta sigmoid，无需 CPU 预计算 hats。
 
+## 在线比较
+
+所有 CPU/NPU-chain 对比统一调用 `compare_contract.py::data_compare`，逐元素在线计算，不读取任何已保存张量。日志包含首尾元素、最多 100 个失败元素，以及 `ExpectOut/RealOut/FpDiff/RateDiff`、通过率、最大混合误差和最终结果。`compare_contract.py` 也可独立执行 host 自检：
+
+```bash
+python3 tests/compare_contract.py
+```
+
 ## 日志
 
 每次运行生成 `tests/logs/<timestamp>_<case>/`：
