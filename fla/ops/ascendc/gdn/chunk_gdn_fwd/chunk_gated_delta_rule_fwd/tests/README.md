@@ -33,6 +33,9 @@ bash tests/run_lightweight.sh --compare-chain --device 0
 # DUT、CPU golden、NPU 拼接三路对齐
 bash tests/run_lightweight.sh --compare-cpu --compare-chain --device 0
 
+# chunk32 DUT + CPU golden
+bash tests/run_lightweight.sh --chunk-size 32 --device 0
+
 # varlen：0..17、17..80、80..129
 bash tests/run_lightweight.sh --case varlen --device 0
 
@@ -61,24 +64,18 @@ bash tests/run_lightweight.sh \
 - `--allow-neg-eigval`：要求同时指定 `--beta-sigmoid`。
 - `--cu-seqlens 0,31,96,129`：覆盖自定义变长边界。
 - `--diff-thd/--pct-thd/--max-diff-hd`：混合容差，默认 `0.001/0.0001/0.1`，即绝对误差小于 `0.001` 直接通过、相对误差阈值为 `0.001`、至少 99.99% 元素通过、最大混合误差小于 0.1。
+- `--chunk-size 32`：测试 chunk32 DUT+CPU 路径；自动启用 L2Norm 和 beta sigmoid，设置 `disable_recompute=false`、`return_intermediate_states=false`，并跳过未导出的 `g_cumsum/A/h`。chunk32 不支持 `--compare-chain`、`--use-exp2`、`--no-l2norm` 和 chunk64 调试 dump 选项。
 - `--seed`：固定输入随机种子，默认 19。
 - `--gate-scale`：负 gate 的幅值，默认 0.05；设为 100 可覆盖累积极负时的 exp 下溢场景。
-- `--dump-aprime`：调试模式，将 A′ 写入公开 A 输出槽并逐元素比较；此时 A 不再表示逆系数。
-- `--dump-ol`：调试模式，绕过 gate/scale/输出融合，将原始 O_l 写入公开 o 并逐元素比较。
-- `--dump-os`：调试模式，将原始 O_s 写入公开 o 并逐元素比较。
-- `--dump-scalars`：调试模式，在 o 的前四个元素导出 `energy/scale/g/lastEnergy`，用于单 token 标量核对。
 
 ## 比较范围
 
-始终比较：
+只比较最终输出：
 
 - `o`：统一为公开 BSND；
-- `g_cumsum`；
-- `A`；
-- `h`：逐 chunk 的状态快照，同时额外记录每个 tile 的误差；
 - 请求时的 `final_state`。
 
-按开关额外比较 `beta_eff/q_hat/k_hat/q_rstd/k_rstd`。启用 `--compare-chain` 时，DUT 还会与 Prepare → FwdH → FwdO 的对应输出比较，指标单独记录为 `compare_chain` 和 `chain_metrics`。Prepare 在 NPU 上独立完成 L2Norm 和 beta sigmoid，无需 CPU 预计算 hats。
+`g_cumsum/A/h/beta_eff/q_hat/k_hat/q_rstd/k_rstd` 不参与比较，也不再打印输出统计。`return_intermediate_states` 固定为 false。启用 `--compare-chain` 时，Prepare 链的中间张量只用于计算，最终仍只比较 `o/final_state`。
 
 ## 在线比较
 

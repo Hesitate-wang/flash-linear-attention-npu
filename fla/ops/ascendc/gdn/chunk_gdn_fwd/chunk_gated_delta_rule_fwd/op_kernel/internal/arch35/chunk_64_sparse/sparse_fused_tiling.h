@@ -44,6 +44,7 @@ struct FusedTilingData {
     uint32_t hasALog;
     uint32_t hasDtBias;
     uint32_t reserved;
+    uint32_t writeH;
 };
 
 static_assert(sizeof(FusedTilingData) % sizeof(uint64_t) == 0,

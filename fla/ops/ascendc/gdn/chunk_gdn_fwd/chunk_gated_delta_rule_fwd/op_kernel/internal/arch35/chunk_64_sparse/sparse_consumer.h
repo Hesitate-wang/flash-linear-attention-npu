@@ -36,7 +36,6 @@ public:
         gmW_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.w));
         gmU_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.gCumsum));
-        gmVNew_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.vNew));
         gmH_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.h));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
@@ -173,8 +172,10 @@ private:
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        DataCopy(gmH_[OffsetStateTile(tile, loc_.hv, td_.valueHeads) + sub_ * (kStateElems / 2)],
-                 ubStateB_, kStateElems / 2);
+        if (td_.writeH != 0) {
+            DataCopy(gmH_[OffsetStateTile(tile, loc_.hv, td_.valueHeads) + sub_ * (kStateElems / 2)],
+                     ubStateB_, kStateElems / 2);
+        }
         LoadInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
 
@@ -192,8 +193,6 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const int64_t token = window_.tokenStart + firstRow;
-        CopyUbToGm(gmVNew_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens),
-                   ubVNew_, rows * static_cast<uint32_t>(kDim));
         UploadNdToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kConsVn);
@@ -328,7 +327,7 @@ private:
     uint32_t sub_{0};
     bool hasInitial_{false};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmU_, gmVNew_, gmH_, gmO_, gmAPrime_;
+    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmU_, gmH_, gmO_, gmAPrime_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
     GlobalTensor<float> gmG_, gmInitF_, gmFinalF_;
 

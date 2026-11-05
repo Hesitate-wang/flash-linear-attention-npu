@@ -866,7 +866,9 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const aclTensor *gCumsumBht = executorPtr->AllocTensor(scalarHvShape, DataType::DT_FLOAT, Format::FORMAT_ND);
         const aclTensor *w = executorPtr->AllocTensor(wShape, dtype, Format::FORMAT_ND);
         const aclTensor *u = executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND);
-        const aclTensor *a = executorPtr->AllocTensor(aShape, dtype, Format::FORMAT_ND);
+        const aclTensor *a = params.aOutOptional == nullptr
+                                 ? executorPtr->AllocTensor(MakeShape({1}), dtype, Format::FORMAT_ND)
+                                 : executorPtr->AllocTensor(aShape, dtype, Format::FORMAT_ND);
         const aclTensor *qHat = params.useQkL2norm
                                     ? executorPtr->AllocTensor(qkShape, dtype, Format::FORMAT_ND)
                                     : nullptr;
@@ -883,8 +885,10 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
                                           ? nullptr
                                           : executorPtr->AllocTensor(scalarHvShape, DataType::DT_FLOAT,
                                                                      Format::FORMAT_ND);
-        const aclTensor *h = executorPtr->AllocTensor(hShape, dtype, Format::FORMAT_ND);
-        const aclTensor *vNew = executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND);
+        const aclTensor *h = params.hOutOptional == nullptr
+                                 ? executorPtr->AllocTensor(MakeShape({1}), dtype, Format::FORMAT_ND)
+                                 : executorPtr->AllocTensor(hShape, dtype, Format::FORMAT_ND);
+        const aclTensor *vNew = executorPtr->AllocTensor(MakeShape({1}), dtype, Format::FORMAT_ND);
         const aclTensor *finalState = params.finalStateOutOptional == nullptr
                                           ? executorPtr->AllocTensor(stateShape, stateDtype, Format::FORMAT_ND)
                                           : params.finalStateOutOptional;
@@ -916,7 +920,8 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const l0op::ChunkGatedDeltaRuleFwdPrepareArgs prepareArgs{
             params.aLogOptional, params.dtBiasOptional, qHat, kHat, qRstd, kRstd,
             betaEffBht, h, w, u, vNew, gCumsumBht, params.useQkL2norm,
-            params.useExp2, betaEffBht != nullptr, params.aOutOptional != nullptr};
+            params.useExp2, betaEffBht != nullptr, params.aOutOptional != nullptr,
+            params.hOutOptional != nullptr};
         const auto result = l0op::ChunkGatedDeltaRuleFwd(
             qHead, kHead, vHead, betaBht, a, gRaw, nullptr,
             params.initialStateOptional, params.cuSeqlensOptional, params.chunkIndicesOptional,

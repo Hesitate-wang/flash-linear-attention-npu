@@ -24,9 +24,11 @@ from pathlib import Path
 
 import torch
 
+TEST_DIR = Path(__file__).resolve().parent
+if str(TEST_DIR) not in sys.path:
+    sys.path.insert(0, str(TEST_DIR))
 from compare_contract import data_compare
 
-TEST_DIR = Path(__file__).resolve().parent
 OPERATOR_DIR = TEST_DIR.parent
 REPO_ROOT = OPERATOR_DIR.parents[5]
 DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16}
@@ -41,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--key-heads", type=int, default=1)
     parser.add_argument("--value-heads", type=int, default=1)
     parser.add_argument("--tokens", type=int, default=None)
+    parser.add_argument("--chunk-size", type=int, choices=(32, 64), default=64)
     parser.add_argument("--cu-seqlens", default=None,
                         help="Comma-separated offsets; overrides the selected varlen case")
     parser.add_argument("--seed", type=int, default=19)
@@ -88,7 +91,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("repeat must be positive and warmup must be nonnegative")
     if args.diff_thd <= 0 or args.max_diff_hd <= 0 or not 0 <= args.pct_thd <= 1:
         parser.error("diff-thd/max-diff-hd must be positive and pct-thd must be in [0,1]")
-    if args.allow_neg_eigval and not args.beta_sigmoid:
+    if args.allow_neg_eigval and not args.beta_sigmoid and args.chunk_size != 32:
         parser.error("allow-neg-eigval requires --beta-sigmoid")
     if args.dump_aprime and args.dump_ol:
         parser.error("--dump-aprime and --dump-ol are mutually exclusive")
@@ -98,6 +101,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dump-scalars cannot be combined with other dump modes")
     if args.cpu_only and args.compare_chain:
         parser.error("--cpu-only cannot be combined with --compare-chain")
+    if args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars:
+        parser.error("debug dump modes are disabled; only o/final_state are compared")
+    if args.chunk_size == 32:
+        if args.compare_chain:
+            parser.error("chunk_size=32 does not support the Prepare reference chain")
+        if args.use_exp2 or args.no_l2norm:
+            parser.error("chunk_size=32 requires use_exp2=false and kernel L2Norm")
+        if args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars:
+            parser.error("chunk64 debug dump modes are unavailable for chunk_size=32")
     return args
 
 
@@ -130,6 +142,8 @@ def case_config(args: argparse.Namespace, name: str) -> dict:
         config["compare_cpu"] = args.compare_cpu
         config["compare_chain"] = args.compare_chain
     config["l2norm"] = not args.no_l2norm
+    if config["chunk_size"] == 32:
+        config["beta_sigmoid"] = True
     config["initial_state"] = not args.no_initial_state
     config["final_state"] = not args.no_final_state
     return config
@@ -147,12 +161,12 @@ def parse_cu(config: dict) -> tuple[int, ...] | None:
     return values
 
 
-def canonical_chunk_indices(cu: tuple[int, ...] | None) -> list[int] | None:
+def canonical_chunk_indices(cu: tuple[int, ...] | None, chunk_size: int) -> list[int] | None:
     if cu is None:
         return None
     result = []
     for sequence, (begin, end) in enumerate(zip(cu, cu[1:])):
-        for local_chunk in range((end - begin + 63) // 64):
+        for local_chunk in range((end - begin + chunk_size - 1) // chunk_size):
             result.extend((sequence, local_chunk))
     return result
 
@@ -213,6 +227,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     g = effective["g"].double()
     g_scaled = effective["g_scaled"].double()
     b, hv, t = config["batch"], config["value_heads"], config["tokens"]
+    chunk = config["chunk_size"]
     ratio = hv // config["key_heads"]
     sequence_count = len(cu) - 1 if cu is not None else b
     o = torch.zeros((b, hv, t, 128), dtype=torch.float64)
@@ -221,19 +236,19 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     os_output = torch.zeros((b, hv, t, 128), dtype=torch.float64)
     final = torch.zeros((sequence_count, hv, 128, 128), dtype=torch.float64)
     g_cumsum = torch.zeros((b, t, hv), dtype=torch.float64)
-    a_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
-    attention_output = torch.zeros((b, hv, t, 64), dtype=torch.float64)
+    a_output = torch.zeros((b, hv, t, chunk), dtype=torch.float64)
+    attention_output = torch.zeros((b, hv, t, chunk), dtype=torch.float64)
     if cu is None:
-        total_chunks = b * ((t + 63) // 64)
-        h_output = torch.zeros((b, (t + 63) // 64, hv, 128, 128), dtype=torch.bfloat16)
+        total_chunks = b * ((t + chunk - 1) // chunk)
+        h_output = torch.zeros((b, (t + chunk - 1) // chunk, hv, 128, 128), dtype=torch.bfloat16)
     else:
-        total_chunks = sum((end - begin + 63) // 64 for begin, end in zip(cu, cu[1:]))
+        total_chunks = sum((end - begin + chunk - 1) // chunk for begin, end in zip(cu, cu[1:]))
         h_output = torch.zeros((1, total_chunks, hv, 128, 128), dtype=torch.bfloat16)
     initial = inputs["initial_state"]
 
     for batch, sequence, begin, end in sequence_ranges(config, cu):
         chunk_base = 0 if cu is None else sum(
-            (cu[index + 1] - cu[index] + 63) // 64 for index in range(sequence))
+            (cu[index + 1] - cu[index] + chunk - 1) // chunk for index in range(sequence))
         for head in range(hv):
             key_head = head // ratio
             if initial is None:
@@ -242,11 +257,11 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                 state = initial[sequence, head].double().clone()
                 if config["state_v_first"]:
                     state = state.transpose(0, 1).contiguous()
-            for local_chunk, chunk_begin in enumerate(range(begin, end, 64)):
+            for local_chunk, chunk_begin in enumerate(range(begin, end, chunk)):
                 tile = local_chunk if cu is None else chunk_base + local_chunk
                 state_image = state.transpose(0, 1) if config["state_v_first"] else state
                 h_output[batch, tile, head] = state_image.to(torch.bfloat16)
-                chunk_end = min(chunk_begin + 64, end)
+                chunk_end = min(chunk_begin + chunk, end)
                 os_output[batch, head, chunk_begin:chunk_end] = (
                     q[batch, key_head, chunk_begin:chunk_end] @ state)
                 for token in range(chunk_begin, chunk_end):
@@ -261,8 +276,8 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                 state = state.transpose(0, 1).contiguous()
             final[sequence, head] = state
 
-        for chunk_begin in range(begin, end, 64):
-            chunk_end = min(chunk_begin + 64, end)
+        for chunk_begin in range(begin, end, chunk):
+            chunk_end = min(chunk_begin + chunk, end)
             for head in range(hv):
                 key_head = head // ratio
                 gate = torch.cumsum(g_scaled[batch, chunk_begin:chunk_end, head], dim=0)
@@ -367,6 +382,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             expected = golden(inputs, config, cu)
             summary["golden_seconds"] = time.perf_counter() - golden_started
             logger.info("CPU golden finished seconds=%.6f", summary["golden_seconds"])
+            if config["chunk_size"] == 32:
+                for name in ("g_cumsum", "A", "h"):
+                    expected.pop(name, None)
+            expected = {name: tensor for name, tensor in expected.items()
+                        if name == "o" or (name == "final_state" and config["final_state"])}
         else:
             logger.info("CPU golden skipped (compare_cpu=false)")
         if config["cpu_only"]:
@@ -401,7 +421,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             npu_inputs["initial_state"] = npu_inputs["initial_state"].transpose(-1, -2).contiguous()
             torch.npu.synchronize()
             logger.info("initial-state transpose finished")
-        chunk_indices = canonical_chunk_indices(cu)
+        chunk_indices = canonical_chunk_indices(cu, config["chunk_size"])
         if config["dump_aprime"]:
             os.environ["GDN_SPARSE_DEBUG_APRIME"] = "1"
             logger.warning("A' debug export enabled: public A now contains A', not the inverse coefficient")
@@ -427,12 +447,13 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             return ascendc.chunk_gated_delta_rule_fwd(
                 npu_inputs["q"], npu_inputs["k"], npu_inputs["v"], npu_inputs["g"], npu_inputs["beta"],
                 initial_state=npu_inputs["initial_state"], output_final_state=config["final_state"],
-                chunk_size=64, cu_seqlens=None if cu is None else list(cu), chunk_indices=chunk_indices,
+                chunk_size=config["chunk_size"], cu_seqlens=None if cu is None else list(cu), chunk_indices=chunk_indices,
                 scale=config["scale"], use_exp2=config["use_exp2"],
                 use_qk_l2norm_in_kernel=config["l2norm"],
                 use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
                 allow_neg_eigval=config["allow_neg_eigval"], state_v_first=config["state_v_first"],
-                disable_recompute=True, return_intermediate_states=True, layout="BNSD")
+                disable_recompute=config["chunk_size"] == 64,
+                return_intermediate_states=False, layout="BNSD")
 
         for index in range(config["warmup"]):
             logger.info("warmup %d started", index)
@@ -466,7 +487,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             logger.info("scalar debug actual=%s expected=%s", scalar_values, expected_scalars)
         output_stats = {}
         for tensor_name, tensor in actual.items():
-            if tensor is not None:
+            if tensor is not None and (tensor_name == "o" or tensor_name == "final_state"):
                 output_stats[tensor_name] = tensor_stats(tensor)
                 logger.info("DUT output %s %s", tensor_name, json.dumps(output_stats[tensor_name]))
         summary["output_stats"] = output_stats
@@ -480,20 +501,6 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                                       logger, label=f"cpu.{tensor_name}")
                 metrics[tensor_name] = metric
                 logger.info("compare %s %s", tensor_name, json.dumps(metric))
-                if tensor_name == "h":
-                    chunk_metrics = []
-                    for batch_index in range(actual["h"].shape[0]):
-                        for tile_index in range(actual["h"].shape[1]):
-                            chunk_metric = data_compare(actual["h"][batch_index, tile_index],
-                                                        expected_tensor[batch_index, tile_index], config,
-                                                        logger, label=f"cpu.h.batch{batch_index}.tile{tile_index}")
-                            chunk_metrics.append({"batch": batch_index, "tile": tile_index,
-                                                  "max_abs": chunk_metric["max_abs"],
-                                                  "mismatch_count": chunk_metric["mismatch_count"],
-                                                  "passed": chunk_metric["passed"]})
-                            logger.info("compare h batch=%d tile=%d %s", batch_index, tile_index,
-                                        json.dumps(chunk_metrics[-1]))
-                    summary["h_chunk_metrics"] = chunk_metrics
         summary["metrics"] = metrics
 
         chain_metrics = {}
@@ -502,6 +509,8 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             from npu_chain_reference import run_npu_chain
             chain_outputs = run_npu_chain(ascendc, inputs, config, cu, chunk_indices, logger)
             chain_timings = chain_outputs.pop("_timings")
+            chain_outputs = {name: tensor for name, tensor in chain_outputs.items()
+                             if name == "o" or (name == "final_state" and config["final_state"])}
             summary["chain_timings"] = chain_timings
             chain_stats = {}
             for tensor_name, tensor in chain_outputs.items():

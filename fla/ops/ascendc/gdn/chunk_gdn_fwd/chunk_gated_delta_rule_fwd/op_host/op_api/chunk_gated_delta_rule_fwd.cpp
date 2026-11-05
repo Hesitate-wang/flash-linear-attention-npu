@@ -77,6 +77,7 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
     const bool useExp2 = fusedPrepare && prepare->useExp2;
     const bool useBetaSigmoid = fusedPrepare && prepare->useBetaSigmoid;
     const bool outputA = fusedPrepare && prepare->outputA;
+    const bool outputH = fusedPrepare && prepare->outputH;
     const aclTensor *aLog = fusedPrepare ? prepare->aLog : nullptr;
     const aclTensor *dtBias = fusedPrepare ? prepare->dtBias : nullptr;
     const aclTensor *qHat = fusedPrepare ? prepare->qHat : nullptr;
@@ -126,7 +127,7 @@ const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
                   qHat, kHat, qRstd, kRstd, betaEff, h, w, u, vNew, gCumsumBht),
         OP_ATTR(outputFinalState, chunkSize, scale, outputGCumsum, rawGLayout, qkvLayout, oLayout,
                 stateVFirst, allowNegEigval, fusedPrepare, useQkL2norm, useExp2,
-                useBetaSigmoid, outputA));
+                useBetaSigmoid, outputA, outputH));
     if (ret != ACLNN_SUCCESS) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkGatedDeltaRuleFwd failed.");
         return {nullptr, nullptr, nullptr, nullptr};

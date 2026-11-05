@@ -92,6 +92,7 @@ public:
         this->Attr("use_exp2").AttrType(OPTIONAL).Bool(false);
         this->Attr("use_beta_sigmoid").AttrType(OPTIONAL).Bool(false);
         this->Attr("output_a").AttrType(OPTIONAL).Bool(false);
+        this->Attr("output_h").AttrType(OPTIONAL).Bool(false);
 
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true)

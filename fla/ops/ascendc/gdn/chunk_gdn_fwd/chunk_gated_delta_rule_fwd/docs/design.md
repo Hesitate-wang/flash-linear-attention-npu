@@ -66,7 +66,15 @@ Both UB maps are below the 208 KiB regbase budget. `sparse_memory.h` contains co
 
 State is split into contiguous 64-row halves. For `[K,V]`, each AIV owns 64 K rows; for `[V,K]`, each owns 64 V rows. FP32 state remains resident across chunks, while the BF16 mirror is used for Cube and public H output. Initial/final state may be FP32 or BF16 according to the existing API contract.
 
-## 6. Numeric order
+## 6. Output and HBM traffic
+
+Only cross-role data is written to HBM unconditionally: W/U/A', gate cumsum, and normalized q/k when L2Norm is enabled. These are consumed by the consumer MIX group and cannot remain producer-local.
+
+Consumer-local `v_new` is uploaded directly from UB to L1 and is never written to GM. H is written only when `hOutOptional` is explicitly requested; A is written only when `aOutOptional` is explicitly requested. Otherwise their internal output slots contain rank-1 dummies and the corresponding stores are skipped. Public q_hat/k_hat/rstd and beta_eff retain the existing stable ABI behavior.
+
+This is distinct from the A' workspace: A' is required producer-to-consumer traffic and is not an unnecessary intermediate export.
+
+## 7. Numeric order
 
 - Gate softplus, beta sigmoid, L2 epsilon, exp/exp2 selection, scale and output casts follow the existing wrapper/reference semantics.
 - Prefix sum uses six register snapshot gather/add stages.

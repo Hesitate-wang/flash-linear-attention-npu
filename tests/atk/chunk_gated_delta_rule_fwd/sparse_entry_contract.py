@@ -13,7 +13,7 @@ OUTPUTS = ["o", "final_state", "g_cumsum_bth", "A", "q_hat", "k_hat", "q_rstd",
            "k_rstd", "beta_eff", "h", "w", "u", "v_new", "g_cumsum_bht"]
 ATTRS = ["output_final_state", "chunk_size", "scale", "output_g_cumsum", "raw_g_layout",
          "qkv_layout", "o_layout", "state_v_first", "allow_neg_eigval", "fused_prepare",
-         "use_qk_l2norm", "use_exp2", "use_beta_sigmoid", "output_a"]
+         "use_qk_l2norm", "use_exp2", "use_beta_sigmoid", "output_a", "output_h"]
 
 
 def main():

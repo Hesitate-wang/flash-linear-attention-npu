@@ -171,6 +171,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 return ge::GRAPH_FAILED);
     const bool norm = SparseBool(attrs, 10);
     const bool betaSigmoid = SparseBool(attrs, 12);
+    const bool writeH = SparseBool(attrs, 14);
     for (size_t index : {size_t(9), size_t(10), size_t(11), size_t(12), size_t(13)}) {
         OP_CHECK_IF(context->GetOutputShape(index) == nullptr,
                     OP_LOGE("ChunkGatedDeltaRuleFwd", "Missing fused output %zu.", index),
@@ -178,14 +179,13 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     }
     OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(10), {batch, hv, tokens, 128}) ||
                     !SparseShapeTolerant(context->GetOutputShape(11), {batch, hv, tokens, 128}) ||
-                    !SparseShapeTolerant(context->GetOutputShape(12), {batch, hv, tokens, 128}) ||
                     !SparseShapeTolerant(context->GetOutputShape(13), {batch, hv, tokens}) ||
                     (betaSigmoid && !SparseShapeTolerant(context->GetOutputShape(8), {batch, hv, tokens})),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused intermediate output shape mismatch."),
                 return ge::GRAPH_FAILED);
     const int64_t hChunks = varlen ? static_cast<int64_t>(chunkCount)
                                    : static_cast<int64_t>(chunkCount) / batch;
-    OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
+    OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid h output shape."),
                 return ge::GRAPH_FAILED);
     if (norm) {
@@ -230,6 +230,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.allowNegEigval = SparseBool(attrs, 8);
     td.useExp2 = SparseBool(attrs, 11);
     td.outputA = SparseBool(attrs, 13);
+    td.writeH = writeH;
     td.storeFinalState = SparseBool(attrs, 0);
     td.stateVFirst = SparseBool(attrs, 7);
     td.varlen = varlen;

@@ -27,6 +27,7 @@ struct ChunkGatedDeltaRuleFwdPrepareArgs {
     bool useExp2;
     bool useBetaSigmoid;
     bool outputA;
+    bool outputH;
 };
 
 const std::array<const aclTensor *, 4> ChunkGatedDeltaRuleFwd(
