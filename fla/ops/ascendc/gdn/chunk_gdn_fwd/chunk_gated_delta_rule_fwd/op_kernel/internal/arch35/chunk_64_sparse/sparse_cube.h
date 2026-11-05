@@ -44,8 +44,6 @@ __aicore__ inline void IssueMm(LocalTensor<bfloat16_t> l0A,
 {
     SetFlag<HardEvent::MTE1_M>(0);
     WaitFlag<HardEvent::MTE1_M>(0);
-    // Accumulation keeps the current L0C; there is no intervening Fixpipe
-    // to publish a new FIX_M event before the second MMAD.
     if (initC) {
         WaitFlag<HardEvent::FIX_M>(0);
     }
@@ -153,6 +151,32 @@ __aicore__ inline void FixB16Halves(LocalTensor<bfloat16_t> ub,
     p.srcStride = static_cast<uint16_t>(fullM);
     p.dstStride = n;
     p.quantPre = QuantMode_t::F322BF16;
+    p.dualDstCtl = 0;
+    p.isChannelSplit = false;
+    p.params.ndNum = 1;
+    p.subBlockId = false;
+    Fixpipe<bfloat16_t, float, kSparseFixUb>(ub, l0C, p);
+    p.subBlockId = true;
+    Fixpipe<bfloat16_t, float, kSparseFixUb>(ub, l0C[(fullM / 2) * 16], p);
+}
+
+__aicore__ inline void FixB16ScaledHalves(LocalTensor<bfloat16_t> ub,
+                                          LocalTensor<float> l0C,
+                                          uint32_t fullM, uint32_t n,
+                                          float scale)
+{
+    FixpipeParamsArch3510<CO2Layout::ROW_MAJOR> p{};
+    p.nSize = static_cast<uint16_t>(n);
+    p.mSize = static_cast<uint16_t>(fullM / 2);
+    p.srcStride = static_cast<uint16_t>(fullM);
+    p.dstStride = n;
+    p.quantPre = QuantMode_t::QF322BF16_PRE;
+    union {
+        float f;
+        uint32_t u;
+    } bits;
+    bits.f = scale;
+    p.deqScalar = static_cast<uint64_t>(bits.u);
     p.dualDstCtl = 0;
     p.isChannelSplit = false;
     p.params.ndNum = 1;

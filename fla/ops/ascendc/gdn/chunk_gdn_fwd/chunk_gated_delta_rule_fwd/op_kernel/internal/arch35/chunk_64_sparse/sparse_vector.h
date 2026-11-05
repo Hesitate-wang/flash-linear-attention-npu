@@ -213,7 +213,7 @@ __aicore__ inline void ScaleVbVF(LocalTensor<bfloat16_t> &v,
     }
 }
 
-// Store -beta*E(g)*K so the consumer can accumulate U@H + W@H in L0C.
+// Negative KBG lets the consumer accumulate U=A@Vb and (-W)@H in one L0C.
 __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
                                   LocalTensor<bfloat16_t> &out,
                                   LocalTensor<float> &beta,
@@ -410,6 +410,31 @@ __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
     }
 }
 
+__aicore__ inline void QExpVF(LocalTensor<bfloat16_t> &q,
+                              LocalTensor<bfloat16_t> &out,
+                              LocalTensor<float> &energy,
+                              uint32_t firstRow)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(q.GetPhyAddr());
+    __ubuf__ bfloat16_t *dst = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<float> x0, x1, scale;
+        for (uint16_t row = 0; row < 32; ++row) {
+            const uint32_t offset = static_cast<uint32_t>(row) * 128;
+            LoadBf16(x0, src + offset, all);
+            LoadBf16(x1, src + offset + 64, all);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
+            Mul(x0, x0, scale, all);
+            Mul(x1, x1, scale, all);
+            StoreBf16(dst + offset, x0, all);
+            StoreBf16(dst + offset + 64, x1, all);
+        }
+    }
+}
+
 template <bool UseExp2>
 __aicore__ inline void RightVF(LocalTensor<bfloat16_t> &vNew,
                                LocalTensor<bfloat16_t> &right,
@@ -439,33 +464,6 @@ __aicore__ inline void RightVF(LocalTensor<bfloat16_t> &vNew,
             StoreBf16(rAddr + offset, v0, all);
             StoreBf16(rAddr + offset + 64, v1, all);
         }
-    }
-}
-
-__simd_vf__ inline void OutputBandVF(__ubuf__ float *out,
-                                     __ubuf__ float *os,
-                                     __ubuf__ float *ol,
-                                     __ubuf__ float *energy,
-                                     float outputScale, uint32_t firstRow,
-                                     uint32_t rows)
-{
-    RegTensor<float> s0, s1, l0, l1, gate, out0, out1;
-    MaskReg all = CreateMask<float, MaskPattern::ALL>();
-    for (uint32_t row = 0; row < rows; ++row) {
-        const uint32_t offset = row * 128;
-        LoadAlign(s0, os + offset);
-        LoadAlign(s1, os + offset + 64);
-        LoadAlign(l0, ol + offset);
-        LoadAlign(l1, ol + offset + 64);
-        LoadAlign<float, LoadDist::DIST_BRC_B32>(gate, energy + firstRow + row);
-        Mul(out0, s0, gate, all);
-        Mul(out1, s1, gate, all);
-        Add(out0, out0, l0, all);
-        Add(out1, out1, l1, all);
-        Muls(out0, out0, outputScale, all);
-        Muls(out1, out1, outputScale, all);
-        StoreAlign(out + offset, out0, all);
-        StoreAlign(out + offset + 64, out1, all);
     }
 }
 
