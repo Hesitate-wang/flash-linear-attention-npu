@@ -451,20 +451,32 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             os.environ.pop("GDN_SPARSE_DEBUG_SCALARS", None)
 
         def invoke():
-            target = ascendc
+            common = dict(
+                initial_state=npu_inputs["initial_state"],
+                output_final_state=config["final_state"],
+                cu_seqlens=None if cu is None else list(cu),
+                chunk_indices=chunk_indices,
+                scale=config["scale"],
+                allow_neg_eigval=config["allow_neg_eigval"],
+                state_v_first=config["state_v_first"],
+                return_intermediate_states=False,
+                layout="BNSD",
+            )
             if config["chunk_size"] == 32:
-                from fla_npu.ops.ascendc import _aclnn_ctypes
-                target = _aclnn_ctypes
-            return target.npu_chunk_gated_delta_rule_fwd(
-                npu_inputs["q"], npu_inputs["k"], npu_inputs["v"], npu_inputs["g"], npu_inputs["beta"],
-                initial_state=npu_inputs["initial_state"], output_final_state=config["final_state"],
-                chunk_size=config["chunk_size"], cu_seqlens=None if cu is None else list(cu), chunk_indices=chunk_indices,
-                scale=config["scale"], use_exp2=config["use_exp2"],
+                return ascendc.chunk_gated_delta_rule_fwd(
+                    npu_inputs["q"], npu_inputs["k"], npu_inputs["v"],
+                    npu_inputs["g"], npu_inputs["beta"],
+                    chunk_size=32, use_exp2=False,
+                    use_qk_l2norm_in_kernel=True,
+                    use_beta_sigmoid_in_kernel=True,
+                    disable_recompute=False, **common)
+            return ascendc.chunk_gated_delta_rule_fwd(
+                npu_inputs["q"], npu_inputs["k"], npu_inputs["v"],
+                npu_inputs["g"], npu_inputs["beta"],
+                chunk_size=64, use_exp2=config["use_exp2"],
                 use_qk_l2norm_in_kernel=config["l2norm"],
                 use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
-                allow_neg_eigval=config["allow_neg_eigval"], state_v_first=config["state_v_first"],
-                disable_recompute=config["chunk_size"] == 64,
-                return_intermediate_states=False, layout="BNSD")
+                disable_recompute=True, **common)
 
         for index in range(config["warmup"]):
             logger.info("warmup %d started", index)
