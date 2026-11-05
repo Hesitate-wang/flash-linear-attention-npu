@@ -14,7 +14,7 @@
 namespace GdnChunk64Sparse {
 
 constexpr uint16_t kConsInputs = 0;
-constexpr uint16_t kConsP = 1;
+constexpr uint16_t kConsVNewReady = 1;
 constexpr uint16_t kConsVn = 2;
 constexpr uint16_t kConsOS = 3;
 constexpr uint16_t kConsD = 4;
@@ -123,6 +123,7 @@ private:
         l1W_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1W);
         l1Q_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1Q);
         l1K_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1K);
+        l1U_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1U);
         l1H_[0] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H0);
         l1H_[1] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H1);
         l1VNew_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1VNew);
@@ -179,16 +180,16 @@ private:
         LoadInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
 
-        AivWait(kConsP);
+        AivWait(kConsVNewReady);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         const int64_t lastIndex = window_.rows - 1;
         const float gLast = ubG_.GetValue(lastIndex);
         const float lastEnergy = ubEnergy_.GetValue(lastIndex);
         if (td_.useExp2 != 0) {
-            VNewRightVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, gLast, firstRow);
+            RightVF<true>(ubVNew_, ubRight_, ubG_, gLast, firstRow);
         } else {
-            VNewRightVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, gLast, firstRow);
+            RightVF<false>(ubVNew_, ubRight_, ubG_, gLast, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -284,6 +285,7 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         UploadNdToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
+        UploadNdToL1(l1U_, ubU_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1Q_, ubQ_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1K_, ubK_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
@@ -294,11 +296,13 @@ private:
     __aicore__ inline void RunCube(int64_t chunk)
     {
         AicWaitBoth(kConsInputs);
-        ComputeMm(l1W_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
-                  false, td_.stateVFirst == 0);
-        FixF32Halves(ubP_, l0C0_, 64, 128);
+        // KBG is stored negated, so two MMADs accumulate U@H-W@H directly.
+        ComputeMm(l1U_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
+                  false, td_.stateVFirst == 0, true);
+        ComputeMmReuseB(l1W_, l0A1_, l0B0_, l0C0_, 64, 128, 128, false, false);
+        FixB16Halves(ubVNew_, l0C0_, 64, 128);
         ReleaseL0C();
-        AicPublishToBoth(kConsP);
+        AicPublishToBoth(kConsVNewReady);
 
         ComputeMmReuseB(l1Q_, l0A1_, l0B0_, l0C1_, 64, 128, 128, false);
         FixF32Halves(ubOS_, l0C1_, 64, 128);
@@ -334,7 +338,7 @@ private:
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubOS_, ubOL_;
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubAPrime_, ubO_, ubInitB_, ubOLB_, ubOSB_;
     LocalTensor<float> ubG_, ubEnergy_;
-    LocalTensor<bfloat16_t> l1W_, l1Q_, l1K_, l1H_[2], l1VNew_, l1Right_, l1APrime_;
+    LocalTensor<bfloat16_t> l1W_, l1U_, l1Q_, l1K_, l1H_[2], l1VNew_, l1Right_, l1APrime_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
     LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
 };

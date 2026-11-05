@@ -213,6 +213,7 @@ __aicore__ inline void ScaleVbVF(LocalTensor<bfloat16_t> &v,
     }
 }
 
+// Store -beta*E(g)*K so the consumer can accumulate U@H + W@H in L0C.
 __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
                                   LocalTensor<bfloat16_t> &out,
                                   LocalTensor<float> &beta,
@@ -234,6 +235,7 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
             LoadAlign<float, LoadDist::DIST_BRC_B32>(be, b + firstRow + row);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
             Mul(scale, scale, be, all);
+            Muls(scale, scale, -1.0f, all);
             Mul(x0, x0, scale, all);
             Mul(x1, x1, scale, all);
             StoreBf16(dst + offset, x0, all);
@@ -409,43 +411,33 @@ __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
 }
 
 template <bool UseExp2>
-__aicore__ inline void VNewRightVF(LocalTensor<float> &p,
-                                   LocalTensor<bfloat16_t> &u,
-                                   LocalTensor<bfloat16_t> &vNew,
-                                   LocalTensor<bfloat16_t> &right,
-                                   LocalTensor<float> &g,
-                                   float gLast, uint32_t firstRow)
+__aicore__ inline void RightVF(LocalTensor<bfloat16_t> &vNew,
+                               LocalTensor<bfloat16_t> &right,
+                               LocalTensor<float> &g,
+                               float gLast, uint32_t firstRow)
 {
-    __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
-    __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
     __ubuf__ bfloat16_t *vAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(vNew.GetPhyAddr());
     __ubuf__ bfloat16_t *rAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(right.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> p0, p1, u0, u1, scale, last, diff;
+        RegTensor<float> v0, v1, scale, last, diff;
         Duplicate(last, gLast, all);
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadAlign(p0, pAddr + offset);
-            LoadAlign(p1, pAddr + offset + 64);
-            LoadBf16(u0, uAddr + offset, all);
-            LoadBf16(u1, uAddr + offset + 64, all);
-            Sub(u0, u0, p0, all);
-            Sub(u1, u1, p1, all);
-            StoreBf16(vAddr + offset, u0, all);
-            StoreBf16(vAddr + offset + 64, u1, all);
+            LoadBf16(v0, vAddr + offset, all);
+            LoadBf16(v1, vAddr + offset + 64, all);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, gAddr + firstRow + row);
             Sub(diff, last, scale, all);
             if constexpr (UseExp2) {
                 Muls(diff, diff, kSparseLn2, all);
             }
             Exp(scale, diff, all);
-            Mul(u0, u0, scale, all);
-            Mul(u1, u1, scale, all);
-            StoreBf16(rAddr + offset, u0, all);
-            StoreBf16(rAddr + offset + 64, u1, all);
+            Mul(v0, v0, scale, all);
+            Mul(v1, v1, scale, all);
+            StoreBf16(rAddr + offset, v0, all);
+            StoreBf16(rAddr + offset + 64, v1, all);
         }
     }
 }

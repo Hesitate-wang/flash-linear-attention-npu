@@ -40,16 +40,20 @@ __aicore__ inline void LoadB(LocalTensor<bfloat16_t> l0, LocalTensor<bfloat16_t>
 __aicore__ inline void IssueMm(LocalTensor<bfloat16_t> l0A,
                                LocalTensor<bfloat16_t> l0B,
                                LocalTensor<float> l0C,
-                               int32_t m, int32_t n, int32_t k)
+                               int32_t m, int32_t n, int32_t k, bool initC = true)
 {
     SetFlag<HardEvent::MTE1_M>(0);
     WaitFlag<HardEvent::MTE1_M>(0);
-    WaitFlag<HardEvent::FIX_M>(0);
+    // Accumulation keeps the current L0C; there is no intervening Fixpipe
+    // to publish a new FIX_M event before the second MMAD.
+    if (initC) {
+        WaitFlag<HardEvent::FIX_M>(0);
+    }
     MmadParams p{};
     p.m = m;
     p.n = n;
     p.k = k;
-    p.cmatrixInitVal = true;
+    p.cmatrixInitVal = initC;
     p.cmatrixSource = false;
     p.unitFlag = 0;
     Mmad(l0C, l0A, l0B, p);
@@ -66,12 +70,12 @@ __aicore__ inline void ComputeMm(LocalTensor<bfloat16_t> l1A,
                                  LocalTensor<bfloat16_t> l0B,
                                  LocalTensor<float> l0C,
                                  int32_t m, int32_t n, int32_t k,
-                                 bool transposeA, bool transposeB)
+                                 bool transposeA, bool transposeB, bool initC = true)
 {
     WaitFlag<HardEvent::M_MTE1>(0);
     LoadA(l0A, l1A, m, k, transposeA);
     LoadB(l0B, l1B, n, k, transposeB);
-    IssueMm(l0A, l0B, l0C, m, n, k);
+    IssueMm(l0A, l0B, l0C, m, n, k, initC);
 }
 
 // Reuse the B operand left in L0 by the immediately preceding GEMM.
@@ -80,11 +84,11 @@ __aicore__ inline void ComputeMmReuseB(LocalTensor<bfloat16_t> l1A,
                                        LocalTensor<bfloat16_t> l0B,
                                        LocalTensor<float> l0C,
                                        int32_t m, int32_t n, int32_t k,
-                                       bool transposeA)
+                                       bool transposeA, bool initC = true)
 {
     WaitFlag<HardEvent::M_MTE1>(0);
     LoadA(l0A, l1A, m, k, transposeA);
-    IssueMm(l0A, l0B, l0C, m, n, k);
+    IssueMm(l0A, l0B, l0C, m, n, k, initC);
 }
 
 // Reuse the A operand left in L0 by the immediately preceding GEMM.
@@ -93,11 +97,11 @@ __aicore__ inline void ComputeMmReuseA(LocalTensor<bfloat16_t> l1B,
                                        LocalTensor<bfloat16_t> l0B,
                                        LocalTensor<float> l0C,
                                        int32_t m, int32_t n, int32_t k,
-                                       bool transposeB)
+                                       bool transposeB, bool initC = true)
 {
     WaitFlag<HardEvent::M_MTE1>(0);
     LoadB(l0B, l1B, n, k, transposeB);
-    IssueMm(l0A, l0B, l0C, m, n, k);
+    IssueMm(l0A, l0B, l0C, m, n, k, initC);
 }
 
 __aicore__ inline void ReleaseL0C()
