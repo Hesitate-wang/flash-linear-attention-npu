@@ -463,7 +463,8 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 layout="BNSD",
             )
             if config["chunk_size"] == 32:
-                return ascendc.chunk_gated_delta_rule_fwd(
+                from fla_npu.ops.ascendc import _aclnn_ctypes
+                return _aclnn_ctypes.npu_chunk_gated_delta_rule_fwd(
                     npu_inputs["q"], npu_inputs["k"], npu_inputs["v"],
                     npu_inputs["g"], npu_inputs["beta"],
                     chunk_size=32, use_exp2=False,
