@@ -36,6 +36,10 @@ bash tests/run_lightweight.sh --compare-cpu --compare-chain --device 0
 # chunk32 DUT + CPU golden
 bash tests/run_lightweight.sh --chunk-size 32 --device 0
 
+# chunk32 仅性能：跳过所有比较，执行 warmup + repeat
+bash tests/run_lightweight.sh \
+  --chunk-size 32 --performance --warmup 5 --repeat 20 --device 0
+
 # varlen：0..17、17..80、80..129
 bash tests/run_lightweight.sh --case varlen --device 0
 
@@ -65,6 +69,7 @@ bash tests/run_lightweight.sh \
 - `--cu-seqlens 0,31,96,129`：覆盖自定义变长边界。
 - `--diff-thd/--pct-thd/--max-diff-hd`：混合容差，默认 `0.001/0.0001/0.1`，即绝对误差小于 `0.001` 直接通过、相对误差阈值为 `0.001`、至少 99.99% 元素通过、最大混合误差小于 0.1。
 - `--chunk-size 32`：测试 chunk32 DUT+CPU 路径；自动启用 L2Norm 和 beta sigmoid，设置 `disable_recompute=false`、`return_intermediate_states=false`，并跳过未导出的 `g_cumsum/A/h`。chunk32 不支持 `--compare-chain`、`--use-exp2`、`--no-l2norm` 和 chunk64 调试 dump 选项。
+- `--performance`：跳过 CPU golden 和所有比较，只记录 DUT 初始化、warmup/repeat、同步和耗时。
 - `--seed`：固定输入随机种子，默认 19。
 - `--gate-scale`：负 gate 的幅值，默认 0.05；设为 100 可覆盖累积极负时的 exp 下溢场景。
 

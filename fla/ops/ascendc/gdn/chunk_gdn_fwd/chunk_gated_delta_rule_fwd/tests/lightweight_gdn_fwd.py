@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
                         help="Compare DUT with the CPU FP64 golden")
     parser.add_argument("--compare-chain", action="store_true",
                         help="Compare DUT with the six-ACLNN NPU operator chain")
+    parser.add_argument("--performance", action="store_true",
+                        help="Skip all comparisons and only measure DUT execution")
     parser.add_argument("--dump-aprime", action="store_true",
                         help="Debug: export A' through the public A slot and compare it")
     parser.add_argument("--dump-ol", action="store_true",
@@ -101,6 +103,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dump-scalars cannot be combined with other dump modes")
     if args.cpu_only and args.compare_chain:
         parser.error("--cpu-only cannot be combined with --compare-chain")
+    if args.performance and (args.compare_cpu or args.compare_chain or args.cpu_only):
+        parser.error("--performance cannot be combined with comparison modes")
     if args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars:
         parser.error("debug dump modes are disabled; only o/final_state are compared")
     if args.chunk_size == 32:
@@ -132,7 +136,10 @@ def case_config(args: argparse.Namespace, name: str) -> dict:
         config["batch"] = 1
     config["scale"] = args.scale if args.scale is not None else 128.0 ** -0.5
     debug_compare = args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars
-    if args.cpu_only or debug_compare:
+    if args.performance:
+        config["compare_cpu"] = False
+        config["compare_chain"] = False
+    elif args.cpu_only or debug_compare:
         config["compare_cpu"] = True
         config["compare_chain"] = False
     elif not args.compare_cpu and not args.compare_chain:
@@ -444,7 +451,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             os.environ.pop("GDN_SPARSE_DEBUG_SCALARS", None)
 
         def invoke():
-            return ascendc.chunk_gated_delta_rule_fwd(
+            target = ascendc
+            if config["chunk_size"] == 32:
+                from fla_npu.ops.ascendc import _aclnn_ctypes
+                target = _aclnn_ctypes
+            return target.npu_chunk_gated_delta_rule_fwd(
                 npu_inputs["q"], npu_inputs["k"], npu_inputs["v"], npu_inputs["g"], npu_inputs["beta"],
                 initial_state=npu_inputs["initial_state"], output_final_state=config["final_state"],
                 chunk_size=config["chunk_size"], cu_seqlens=None if cu is None else list(cu), chunk_indices=chunk_indices,
