@@ -415,8 +415,8 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
 #undef SPARSE_SOLVE_LOCAL
 }
 
-// X10 = -X1 @ L10 @ X0. Each AIV evaluates sixteen rows in FP32:
-// first tmp = X1[rowBegin:rowBegin+16] @ L10, then -tmp @ X0.
+// X10 = X1 @ L10 @ X0. Each AIV evaluates sixteen rows in FP32:
+// first tmp = X1[rowBegin:rowBegin+16] @ L10, then tmp @ X0.
 // a[0:1024] holds the local diagonal inverse, a[1024:1536] tmp,
 // a[1536:2048] X10, and AIV1's a[2048:3072] holds its local L10.
 __aicore__ inline void InverseCoupling16VF(LocalTensor<float> &a,
@@ -459,7 +459,6 @@ __aicore__ inline void InverseCoupling16VF(LocalTensor<float> &a,
                 LoadAlign(row, x0 + static_cast<uint32_t>(t) * 32);
                 MulAddDst(acc, row, coefficient, half);
             }
-            Muls(acc, acc, -1.0f, half);
             StoreAlign(out + static_cast<uint32_t>(r) * 32, acc, half);
         }
     }

@@ -16,8 +16,9 @@ The development host is macOS without `ccec`, an Ascend toolkit, or a visible NP
 | Source whitespace | `git diff --check` | Passed |
 | Include boundary | Inspected all `chunk_64_sparse` includes | Only Ascend SDK headers and files inside this operator |
 | 64x64 inverse | NumPy forward substitution versus `inv(I+raw)` | Passed at FP64 tolerance |
-| Dual-AIV blocked inverse | 800 randomized FP64 matrices: `X0/X1` diagonal inverses plus `-(X1@L10)@X0` versus full inverse | Passed; max absolute error `4.441e-16`; does not validate Ascend instruction behavior |
+| Dual-AIV blocked inverse | 800 randomized FP64 matrices: `X0/X1` diagonal inverses plus `(X1@L10)@X0` versus full inverse | Passed; max absolute error `4.441e-16`; does not validate Ascend instruction behavior |
 | Regbase overload review | `UpdateMask<float>(32)` changed to `CreateMask<float, MaskPattern::VL32>()`; invalid `LoadAlign(..., mask)` third arguments removed | Source calls corrected against the Ascend 950 API declarations; Ascend rebuild remains pending |
+| Coupling sign regression | 800 randomized strict-lower FP64 matrices, comparing `X1@L10@X0` against `(I-L)^-1` | Passed; max absolute error `4.441e-16`. Removed the erroneous final negation. NPU `(1,1,640,128)` accuracy rerun remains pending |
 | 64-element scan | Six-stage snapshot scan versus `cumsum` | Passed at FP64 tolerance |
 | Full one-chunk dataflow | New W/U/A'/H/O equations versus token recurrence | Passed for H and O at FP64 tolerance |
 | Strongly negative gate regression | FP32 reciprocal path versus direct `E(g[i]-g[j])`; lightweight `--gate-scale 100` | Reciprocal path reproduced NaN; direct-difference path stayed finite |

@@ -14,7 +14,7 @@ Producer, per chunk:
 
 1. Two AIVs load independent 32-row Q/K/V bands. They compute gate/beta transforms, a 64-element Sklansky prefix sum, exp/exp2 energies, optional L2 normalization, `vb=v*beta`, and `kbg=k_hat*beta*E(g)`.
 2. AIC computes `KKT=K@K^T` and sends the upper/lower 32-row bands to AIV0/AIV1 respectively.
-3. The two AIVs compute the inverse in FP32. For `L=I-raw=[[L00,0],[L10,L11]]`, AIV0 computes `X0=L00^-1` and AIV1 computes `X1=L11^-1` independently. Each then computes sixteen rows of `X10=-X1@L10@X0`; all inverse arithmetic remains FP32 until the final BF16 cast.
+3. The two AIVs compute the inverse in FP32. For strictly-lower `L=-raw` and `M=I-L=[[M00,0],[-L10,M11]]`, AIV0 computes `X0=M00^-1` and AIV1 computes `X1=M11^-1` independently. Each then computes sixteen rows of `X10=X1@L10@X0`; all inverse arithmetic remains FP32 until the final BF16 cast.
 4. AIC computes `W=A@kbg` and `U=A@vb`. U reuses A already loaded in L0A by W.
 5. W/U and requested Prepare outputs are published through GM.
 
@@ -85,7 +85,7 @@ Consumer-local `v_new` is uploaded directly from UB to L1 and is never written t
 
 - Gate softplus, beta sigmoid, L2 epsilon, exp/exp2 selection, scale and output casts follow the existing wrapper/reference semantics.
 - Prefix sum uses six register snapshot gather/add stages.
-- Each diagonal inverse preserves the FP32 forward-substitution order of the 32-row solver. The coupling block evaluates `-X1@L10@X0` as `-(X1@L10)@X0`, which is algebraically equivalent to the former full 64-row substitution but has a different FP32 FMA association for X10. There is no BF16 quantization of X0/X1/L10 before the coupling computation.
+- Each diagonal inverse preserves the FP32 forward-substitution order of the 32-row solver. The coupling block evaluates `X1@L10@X0` as `(X1@L10)@X0`, which is algebraically equivalent to the former full 64-row substitution for `(I-L)^-1` but has a different FP32 FMA association for X10. There is no BF16 quantization of X0/X1/L10 before the coupling computation.
 - Lower/attention gates and `right` evaluate `E(g[i]-g[j])` directly when the reciprocal path is unsafe. They never form `1/E(g[j])` in that mode; this avoids `0*Inf` when a strongly negative cumulative gate underflows. A' includes the diagonal.
 - Recurrence state and vector epilogues remain FP32; A/W/U/A'/v_new/right/H cube inputs are BF16.
 
