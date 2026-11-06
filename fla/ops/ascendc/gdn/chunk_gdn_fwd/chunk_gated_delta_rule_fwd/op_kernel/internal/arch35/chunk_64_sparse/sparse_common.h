@@ -176,9 +176,15 @@ __aicore__ inline void CopyUbToGm(GlobalTensor<T> dst, int64_t offset,
     if (count == 0) {
         return;
     }
+    const uint32_t bytes = count * static_cast<uint32_t>(sizeof(T));
+    if (bytes >= 32 && (bytes & 31U) == 0 &&
+        ((static_cast<uint64_t>(offset) * sizeof(T)) & 31U) == 0) {
+        DataCopy(dst[offset], src, count);
+        return;
+    }
     DataCopyExtParams params{};
     params.blockCount = 1;
-    params.blockLen = count * static_cast<uint32_t>(sizeof(T));
+    params.blockLen = bytes;
     params.srcStride = 0;
     params.dstStride = 0;
     params.rsv = 0;

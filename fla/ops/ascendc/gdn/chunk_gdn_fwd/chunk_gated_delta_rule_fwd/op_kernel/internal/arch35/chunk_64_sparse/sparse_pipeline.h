@@ -19,11 +19,14 @@ __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData 
     role.Init(args, td);
     role.BeginChain(args, chain);
     const int64_t chunks = role.ChunkCount();
-    for (int64_t iteration = 0; iteration <= td.maxChunks; ++iteration) {
+    const int64_t lastIteration = td.maxChunks + 1;
+    for (int64_t iteration = 0; iteration <= lastIteration; ++iteration) {
         if (iteration < chunks) {
             role.RunChunk(iteration);
         }
-        PublishIteration();
+        if ((iteration & 1) != 0 || iteration == lastIteration) {
+            PublishIteration();
+        }
     }
 }
 
@@ -34,11 +37,14 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     role.Init(args, td);
     role.BeginChain(args, chain);
     const int64_t chunks = role.ChunkCount();
-    for (int64_t iteration = 0; iteration <= td.maxChunks; ++iteration) {
-        if (iteration > 0 && iteration - 1 < chunks) {
-            role.RunChunk(iteration - 1);
+    const int64_t lastIteration = td.maxChunks + 1;
+    for (int64_t iteration = 0; iteration <= lastIteration; ++iteration) {
+        if (iteration > 1 && iteration - 2 < chunks) {
+            role.RunChunk(iteration - 2);
         }
-        PublishIteration();
+        if ((iteration & 1) != 0 || iteration == lastIteration) {
+            PublishIteration();
+        }
     }
     role.EndChain();
 }
@@ -88,12 +94,12 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
         RunSerial(args, td, group);
     }
     if ASCEND_IS_AIV {
-        PipeBarrier<PIPE_ALL>();
+        SetFlag<HardEvent::MTE3_V>(0);
+        WaitFlag<HardEvent::MTE3_V>(0);
     }
     if ASCEND_IS_AIC {
         WaitFlag<HardEvent::M_MTE1>(0);
         WaitFlag<HardEvent::FIX_M>(0);
-        PipeBarrier<PIPE_ALL>();
     }
 }
 

@@ -32,10 +32,16 @@ public:
         gmGOut_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.gCumsum));
         gmBetaEff_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.betaEff));
         gmW_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.w));
+        gmW_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmAExchange_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
+        gmAExchange_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmGOut_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmBetaEff_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         if (td.useNorm != 0) {
             gmQHat_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.qHat));
+            gmQHat_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
             gmKHat_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.kHat));
+            gmKHat_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
             gmQRstd_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.qRstd));
             gmKRstd_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.kRstd));
         }
@@ -50,6 +56,7 @@ public:
         }
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
             GetUserWorkspace(args.workspace) + td.workspaceOffset));
+        gmAPrime_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         InitBuffers();
         if ASCEND_IS_AIV {
             GenerateScanIndices(ubShift_);

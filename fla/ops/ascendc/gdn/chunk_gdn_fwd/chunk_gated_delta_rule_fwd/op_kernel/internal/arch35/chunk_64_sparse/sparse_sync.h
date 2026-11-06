@@ -13,12 +13,12 @@ using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
 
-// The launch contains exactly 2*chainCount MIX groups. There are no idle
-// participants: every launched AIV reaches this barrier once per iteration.
+// Called after each two-chunk producer batch and after the final drain.
+// PIPE_MTE3 orders all published GM stores before the all-AIV flag; each
+// role has already ordered its vector work into MTE3 with local Set/Wait.
 __aicore__ inline void PublishIteration()
 {
     if ASCEND_IS_AIV {
-        PipeBarrier<PIPE_ALL>();
         CrossCoreSetFlag<0x0, PIPE_MTE3>(kSparseBarrierFlagId);
         CrossCoreWaitFlag<0x0, PIPE_MTE2>(kSparseBarrierFlagId);
     }
@@ -59,7 +59,6 @@ __aicore__ inline void AicWaitBoth(uint16_t id)
 __aicore__ inline void PublishChainInGroup()
 {
     if ASCEND_IS_AIV {
-        PipeBarrier<PIPE_ALL>();
         CrossCoreSetFlag<0x1, PIPE_MTE3>(15);
         CrossCoreWaitFlag<0x1, PIPE_MTE2>(15);
     }

@@ -33,16 +33,23 @@ public:
             gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
         }
         gmW_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.w));
+        gmW_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         // The producer uses the internal U allocation to exchange inverse A.
         gmA_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
+        gmA_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmV_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.v));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
             td.betaSigmoid != 0 ? args.betaEff : args.beta));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.gCumsum));
+        gmG_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmQ_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmK_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmBeta_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmH_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.h));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
             GetUserWorkspace(args.workspace) + td.workspaceOffset));
+        gmAPrime_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         if (args.initialState != nullptr) {
             hasInitial_ = true;
             if (td.stateFp32 != 0) {
