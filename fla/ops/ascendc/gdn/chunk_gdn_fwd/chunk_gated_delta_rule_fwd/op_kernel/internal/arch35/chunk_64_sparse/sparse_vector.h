@@ -16,6 +16,8 @@ constexpr CastTrait kSparseCastB16F32 = {
     RegLayout::ZERO, SatMode::UNKNOWN, MaskMergeMode::ZEROING, RoundMode::UNKNOWN};
 constexpr CastTrait kSparseCastF32B16 = {
     RegLayout::ZERO, SatMode::NO_SAT, MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
+constexpr CastTrait kSparseCastF32B16Hi = {
+    RegLayout::ONE, SatMode::NO_SAT, MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
 
 __aicore__ inline void LoadBf16(RegTensor<float> &dst, __ubuf__ bfloat16_t *src,
                                 MaskReg mask)
@@ -474,8 +476,8 @@ __aicore__ inline void StoreFlat128(__ubuf__ bfloat16_t *dst,
                                     MaskReg &m16, MaskReg &m128)
 {
     RegTensor<bfloat16_t> lo, hi;
-    Cast<bfloat16_t, float, kCastB322B16>(lo, even, m16);
-    Cast<bfloat16_t, float, kCastB322B16Hi>(hi, odd, m16);
+    Cast<bfloat16_t, float, kSparseCastF32B16>(lo, even, m16);
+    Cast<bfloat16_t, float, kSparseCastF32B16Hi>(hi, odd, m16);
     Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo,
        (RegTensor<uint16_t> &)hi, m16);
     StoreAlign(dst, lo, m128);
