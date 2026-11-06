@@ -8,7 +8,7 @@ The measured low-parallelism model case is `B=1,Hv=1,T=16384,K=V=128`; its curre
 
 ## 2. Dataflow
 
-For each `(sequence, value-head)` chain, two MIX groups execute a two-chunk skewed pipeline.
+For each `(sequence, value-head)` chain, two MIX groups execute a chunk-synchronous pre/post pipeline with the W/U rendezvous placed after consumer QK/A'.
 
 Producer, per chunk:
 
@@ -18,14 +18,15 @@ Producer, per chunk:
 4. AIC computes `W=A@kbg` and `U=A@vb`. U reuses A already loaded in L0A by W.
 5. W/U and requested Prepare outputs are published through GM.
 
-Consumer, two chunks behind:
+Consumer, on the same chunk before and after the W/U rendezvous:
 
-1. Load W/U/Q/K and raw gate; recompute gate cumsum, energies and optional L2 normalization. Upload the current BF16 state mirror and inputs to L1.
+1. Load Q/K and raw gate; recompute gate cumsum, energies and optional L2 normalization. Upload Q/K/QExp and the current BF16 state mirror to L1. W/U are not loaded in this phase.
 2. AIC computes `QK=Q@K^T`; both AIVs form their own `A'` row band from QK and gate energies.
-3. AIC computes `P=W@H` and `O_s=Q@H`. The second product reuses H already loaded in L0B by P.
-4. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, then publishes both to L1.
-5. AIC computes `D=K^T@right` (or `right^T@K` for stateVFirst) and `O_l=A'@v_new`.
-6. AIV writes `o=(E(g)*O_s+O_l)*scale`, updates the FP32 state with `H=E(g_last)*H+D`, and refreshes its BF16 cube mirror.
+3. Enter the per-chunk mode-0 rendezvous. The producer has completed the current chunk's W/U, so the consumer delays its W/U dependency until after QK/A'.
+4. Load W/U, upload W to L1 and publish it to AIC. U remains in UB for the vector epilogue; it is not copied to L1.
+5. AIC computes `P=W@H` and `O_s=Q@H`. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, then publishes both to L1.
+6. AIC computes `D=K^T@right` (or `right^T@K` for stateVFirst) and `O_l=A'@v_new`.
+7. AIV writes `o=(E(g)*O_s+O_l)*scale`, updates the FP32 state with `H=E(g_last)*H+D`, and refreshes its BF16 cube mirror.
 
 Per chain, the current main Cube MAC count is approximately 1.57M in producer and 4.19M in consumer. Consumer-side QK/A' is concurrent with producer work; only W/U cross the role boundary. The inverse merge adds two logical 32x32 matrix products, implemented by the two AIVs in FP32 rather than by extra BF16 Cube operations.
 
@@ -35,11 +36,12 @@ Pipeline mode launches exactly `2*chainCount` MIX groups, so there are no idle g
 
 Iteration `i`:
 
-- producer builds chunk `i` when it exists;
-- consumer builds chunk `i-2` when it exists;
-- every launched AIV executes one mode-0 barrier after each odd iteration and the final drain, including short varlen chains.
+- producer builds W/U for chunk `i` when it exists;
+- in parallel, consumer loads Q/K/g and builds QK/A' for the same chunk `i`;
+- every launched AIV executes one mode-0 barrier, including short varlen chains;
+- after the barrier, the consumer loads W/U and runs H/O for chunk `i`, while the producer may start chunk `i+1`.
 
-The mode-0 Set uses PIPE_MTE3 and Wait blocks PIPE_MTE2. This publishes producer GM writes before consumer GM reads. AIC does not enter mode 0; its next chunk cannot start until its own AIVs publish that chunk's L1 inputs through mode 4.
+The mode-0 Set uses PIPE_MTE3 and Wait blocks PIPE_MTE2. This publishes producer W/U before the consumer's post-QK W/U loads. AIC does not enter mode 0; its QK phase waits for the Q/K inputs through mode 4, and its W@H phase waits for a separate W-ready mode-4 flag after the barrier.
 
 Mode-4 flags are directional. AIV0/AIV1 use raw IDs 0..15. AIC waits IDs `id` and `id+16` for a two-AIV input and publishes to either AIV0 only or both AIVs as required.
 

@@ -19,14 +19,11 @@ __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData 
     role.Init(args, td);
     role.BeginChain(args, chain);
     const int64_t chunks = role.ChunkCount();
-    const int64_t lastIteration = td.maxChunks + 1;
-    for (int64_t iteration = 0; iteration <= lastIteration; ++iteration) {
+    for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
         if (iteration < chunks) {
             role.RunChunk(iteration);
         }
-        if ((iteration & 1) != 0 || iteration == lastIteration) {
-            PublishIteration();
-        }
+        PublishIteration();
     }
 }
 
@@ -37,13 +34,15 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     role.Init(args, td);
     role.BeginChain(args, chain);
     const int64_t chunks = role.ChunkCount();
-    const int64_t lastIteration = td.maxChunks + 1;
-    for (int64_t iteration = 0; iteration <= lastIteration; ++iteration) {
-        if (iteration > 1 && iteration - 2 < chunks) {
-            role.RunChunk(iteration - 2);
+    for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
+        if (iteration < chunks) {
+            role.RunPrepare(iteration);
         }
-        if ((iteration & 1) != 0 || iteration == lastIteration) {
-            PublishIteration();
+        // The producer has published this iteration's W/U. Delay the consumer's
+        // W/U dependency until after its independent QK/A' work.
+        PublishIteration();
+        if (iteration < chunks) {
+            role.RunAfterWu(iteration);
         }
     }
     role.EndChain();

@@ -13,9 +13,9 @@ using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
 
-// Called after each two-chunk producer batch and after the final drain.
-// PIPE_MTE3 orders all published GM stores before the all-AIV flag; each
-// role has already ordered its vector work into MTE3 with local Set/Wait.
+// Called once per chunk after the producer drains W/U and the consumer
+// finishes its independent QK/A' phase. PIPE_MTE3 publishes the producer GM
+// stores; PIPE_MTE2 blocks the consumer's subsequent W/U loads until ready.
 __aicore__ inline void PublishIteration()
 {
     if ASCEND_IS_AIV {

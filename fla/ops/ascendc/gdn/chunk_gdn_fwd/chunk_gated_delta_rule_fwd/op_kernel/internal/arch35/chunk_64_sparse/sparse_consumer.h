@@ -19,6 +19,7 @@ constexpr uint16_t kConsVn = 2;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsQk = 6;
+constexpr uint16_t kConsW = 3;
 
 class ConsumerRole {
 public:
@@ -75,15 +76,32 @@ public:
         return loc_.chunks;
     }
 
-    __aicore__ inline void RunChunk(int64_t chunk)
+    __aicore__ inline void RunPrepare(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
         if ASCEND_IS_AIV {
-            RunAiv(chunk);
+            RunAivPrepare(chunk);
         }
         if ASCEND_IS_AIC {
-            RunCube(chunk);
+            RunCubePrepare(chunk);
         }
+    }
+
+    __aicore__ inline void RunAfterWu(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        if ASCEND_IS_AIV {
+            RunAivAfterWu(chunk);
+        }
+        if ASCEND_IS_AIC {
+            RunCubeAfterWu(chunk);
+        }
+    }
+
+    __aicore__ inline void RunChunk(int64_t chunk)
+    {
+        RunPrepare(chunk);
+        RunAfterWu(chunk);
     }
 
     __aicore__ inline void EndChain()
@@ -134,7 +152,6 @@ private:
         ubBetaDummy_ = ubG_[128];
 
         l1W_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1W);
-        l1U_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1U);
         l1QHat_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QHat);
         l1QExp_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QExp);
         l1K_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1K);
@@ -179,7 +196,7 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
     }
 
-    __aicore__ inline void RunAiv(int64_t chunk)
+    __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
@@ -190,7 +207,7 @@ private:
             DataCopy(gmH_[OffsetStateTile(tile, loc_.hv, td_.valueHeads) + sub_ * (kStateElems / 2)],
                      ubStateB_, kStateElems / 2);
         }
-        LoadInputs(chunk, firstRow, rows);
+        LoadQkInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
 
         AivWait(kConsQk);
@@ -202,6 +219,15 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         UploadNdToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
+    }
+
+    __aicore__ inline void RunAivAfterWu(int64_t)
+    {
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        LoadWu(firstRow, rows);
 
         AivWait(kConsP);
         SetFlag<HardEvent::V_S>(1);
@@ -254,11 +280,9 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
     }
 
-    __aicore__ inline void LoadInputs(int64_t chunk, uint32_t firstRow, uint32_t rows)
+    __aicore__ inline void LoadQkInputs(int64_t chunk, uint32_t firstRow, uint32_t rows)
     {
         if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubW_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubU_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
@@ -269,8 +293,6 @@ private:
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubW_, gmW_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        CopyGmToUb(ubU_, gmU_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
@@ -303,8 +325,6 @@ private:
         QExpVF(ubQHat_, ubOSB_, ubEnergy_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1U_, ubU_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1QExp_, ubOSB_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
@@ -312,14 +332,38 @@ private:
                      sub_ * static_cast<uint32_t>(kHalfDim));
     }
 
-    __aicore__ inline void RunCube(int64_t chunk)
+    __aicore__ inline void LoadWu(uint32_t firstRow, uint32_t rows)
+    {
+        if (rows < static_cast<uint32_t>(kHalfRows)) {
+            Duplicate(ubW_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            Duplicate(ubU_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+        }
+        SetFlag<HardEvent::V_MTE2>(0);
+        WaitFlag<HardEvent::V_MTE2>(0);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+        CopyGmToUb(ubW_, gmW_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        CopyGmToUb(ubU_, gmU_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(0);
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        UploadNdToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
+        AivPublish(kConsW);
+    }
+
+    __aicore__ inline void RunCubePrepare(int64_t)
     {
         AicWaitBoth(kConsInputs);
         ComputeMm(l1QHat_, l1K_, l0A0_, l0B1_, l0C1_, 64, 64, 128, false, false);
         FixF32Halves(ubQk_, l0C1_, 64, 64);
         ReleaseL0C();
         AicPublishToBoth(kConsQk);
+    }
 
+    __aicore__ inline void RunCubeAfterWu(int64_t chunk)
+    {
+        AicWaitBoth(kConsW);
         ComputeMm(l1W_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
                   false, td_.stateVFirst == 0);
         FixF32Halves(ubP_, l0C0_, 64, 128);
@@ -361,7 +405,7 @@ private:
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubAPrime_, ubO_, ubInitB_, ubOSB_;
     LocalTensor<float> ubG_, ubEnergy_, ubBetaDummy_;
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1W_, l1U_, l1QHat_, l1QExp_, l1K_, l1H_[2];
+    LocalTensor<bfloat16_t> l1W_, l1QHat_, l1QExp_, l1K_, l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
     LocalTensor<float> l0C0_, l0C1_, l0C3_;

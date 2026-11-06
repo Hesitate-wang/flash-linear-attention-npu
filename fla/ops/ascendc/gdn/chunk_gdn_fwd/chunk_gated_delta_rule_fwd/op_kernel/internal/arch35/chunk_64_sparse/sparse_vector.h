@@ -281,7 +281,7 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        MaskReg half = UpdateMask<float>(32);
+        MaskReg half = CreateMask<float, MaskPattern::VL32>();
         RegTensor<float> gJ, gI, bi, diff, gate, score, zero, clipLo, clipHi, expLo, expHi;
         Duplicate(zero, 0.0f, all);
         Duplicate(clipLo, -50.0f, all);
@@ -336,7 +336,7 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
         const uint32_t base = static_cast<uint32_t>(group) * 8;
         __VEC_SCOPE__
         {
-            MaskReg all = UpdateMask<float>(32);
+            MaskReg all = CreateMask<float, MaskPattern::VL32>();
             RegTensor<float> y0, y1, y2, y3, y4, y5, y6, y7;
             RegTensor<float> previous, coefficient, zero, one;
             RegTensor<int32_t> lanes;
@@ -361,7 +361,7 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
             CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 7), all);
             Select(y7, one, zero, diagonal);
             for (uint16_t col = 0; col < base; ++col) {
-                LoadAlign(previous, x + static_cast<uint32_t>(col) * 32, all);
+                LoadAlign(previous, x + static_cast<uint32_t>(col) * 32);
                 SPARSE_SOLVE_PREV(y0, 0)
                 SPARSE_SOLVE_PREV(y1, 1)
                 SPARSE_SOLVE_PREV(y2, 2)
@@ -432,14 +432,14 @@ __aicore__ inline void InverseCoupling16VF(LocalTensor<float> &a,
     const uint32_t rowBegin = sub * 16;
     __VEC_SCOPE__
     {
-        MaskReg half = UpdateMask<float>(32);
+        MaskReg half = CreateMask<float, MaskPattern::VL32>();
         RegTensor<float> acc, row, coefficient;
         for (uint16_t r = 0; r < 16; ++r) {
             Duplicate(acc, 0.0f, half);
             for (uint16_t t = 0; t < 32; ++t) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(
                     coefficient, x1 + (rowBegin + r) * 32 + t);
-                LoadAlign(row, l10 + static_cast<uint32_t>(t) * 32, half);
+                LoadAlign(row, l10 + static_cast<uint32_t>(t) * 32);
                 MulAddDst(acc, row, coefficient, half);
             }
             StoreAlign(tmp + static_cast<uint32_t>(r) * 32, acc, half);
@@ -448,14 +448,14 @@ __aicore__ inline void InverseCoupling16VF(LocalTensor<float> &a,
     PipeBarrier<PIPE_V>();
     __VEC_SCOPE__
     {
-        MaskReg half = UpdateMask<float>(32);
+        MaskReg half = CreateMask<float, MaskPattern::VL32>();
         RegTensor<float> acc, row, coefficient;
         for (uint16_t r = 0; r < 16; ++r) {
             Duplicate(acc, 0.0f, half);
             for (uint16_t t = 0; t < 32; ++t) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(
                     coefficient, tmp + static_cast<uint32_t>(r) * 32 + t);
-                LoadAlign(row, x0 + static_cast<uint32_t>(t) * 32, half);
+                LoadAlign(row, x0 + static_cast<uint32_t>(t) * 32);
                 MulAddDst(acc, row, coefficient, half);
             }
             Muls(acc, acc, -1.0f, half);
