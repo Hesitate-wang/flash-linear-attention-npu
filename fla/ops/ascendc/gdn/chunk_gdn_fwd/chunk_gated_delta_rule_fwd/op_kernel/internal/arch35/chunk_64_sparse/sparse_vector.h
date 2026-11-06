@@ -153,6 +153,21 @@ __aicore__ inline void EnergyVF(LocalTensor<float> &g,
     }
 }
 
+// Both the energies and every possible pairwise ratio must stay in the
+// normal FP32 range. NaN fails all comparisons and selects the safe path.
+__aicore__ inline bool GateRatioSafe(LocalTensor<float> &g, uint32_t rows)
+{
+    float lo = g.GetValue(0);
+    float hi = lo;
+    for (uint32_t row = 1; row < rows; ++row) {
+        const float value = g.GetValue(row);
+        lo = value < lo ? value : lo;
+        hi = value > hi ? value : hi;
+    }
+    return lo >= -kSparseExpSafeLimit && hi <= kSparseExpSafeLimit &&
+           hi - lo <= kSparseExpSafeLimit;
+}
+
 // Normalize a 32-row band. The whole band is handled in one vector scope;
 // padded rows are zeros and their reciprocal norms are never exported.
 __aicore__ inline void NormalizeRowsVF(LocalTensor<bfloat16_t> &input,
@@ -215,7 +230,6 @@ __aicore__ inline void ScaleVbVF(LocalTensor<bfloat16_t> &v,
     }
 }
 
-// Negative KBG lets the consumer accumulate U=A@Vb and (-W)@H in one L0C.
 __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
                                   LocalTensor<bfloat16_t> &out,
                                   LocalTensor<float> &beta,
@@ -237,7 +251,6 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
             LoadAlign<float, LoadDist::DIST_BRC_B32>(be, b + firstRow + row);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
             Mul(scale, scale, be, all);
-            Muls(scale, scale, -1.0f, all);
             Mul(x0, x0, scale, all);
             Mul(x1, x1, scale, all);
             StoreBf16(dst + offset, x0, all);
@@ -254,6 +267,8 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
                                    LocalTensor<float> &a,
                                    LocalTensor<float> &g,
                                    LocalTensor<float> &beta,
+                                   LocalTensor<float> &energy,
+                                   bool useEnergyRatio,
                                    uint32_t firstRow)
 {
     __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
@@ -261,24 +276,38 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
     __ubuf__ float *x = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> gJ, gI, bi, diff, gate, score, zero, clipLo, clipHi;
+        RegTensor<float> gJ, gI, bi, diff, gate, score, zero, clipLo, clipHi, expLo, expHi;
         Duplicate(zero, 0.0f, all);
         Duplicate(clipLo, -50.0f, all);
         Duplicate(clipHi, 50.0f, all);
-        LoadAlign(gJ, gAddr);
+        Duplicate(expLo, 1.92874985e-22f, all);
+        Duplicate(expHi, 5.18470553e21f, all);
+        if (useEnergyRatio) {
+            LoadAlign(gJ, eAddr);
+        } else {
+            LoadAlign(gJ, gAddr);
+        }
         for (uint16_t row = firstRow; row < firstRow + 32; ++row) {
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + row);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + row);
-            Sub(diff, gI, gJ, all);
-            Max(diff, diff, clipLo, all);
-            Min(diff, diff, clipHi, all);
-            if constexpr (UseExp2) {
-                Muls(diff, diff, kSparseLn2, all);
+            if (useEnergyRatio) {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + row);
+                Div(gate, gI, gJ, all);
+                Max(gate, gate, expLo, all);
+                Min(gate, gate, expHi, all);
+            } else {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + row);
+                Sub(diff, gI, gJ, all);
+                Max(diff, diff, clipLo, all);
+                Min(diff, diff, clipHi, all);
+                if constexpr (UseExp2) {
+                    Muls(diff, diff, kSparseLn2, all);
+                }
+                Exp(gate, diff, all);
             }
-            Exp(gate, diff, all);
             Mul(gate, gate, bi, all);
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row - firstRow) * 64);
@@ -384,25 +413,37 @@ template <bool UseExp2>
 __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
                                     LocalTensor<bfloat16_t> &out,
                                     LocalTensor<float> &g,
+                                    LocalTensor<float> &energy,
+                                    bool useEnergyRatio,
                                     uint32_t firstRow)
 {
     __ubuf__ float *score = reinterpret_cast<__ubuf__ float *>(qk.GetPhyAddr());
     __ubuf__ bfloat16_t *dst = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
         RegTensor<float> gJ, gI, diff, gate, raw, zero;
         Duplicate(zero, 0.0f, all);
-        LoadAlign(gJ, gAddr);
+        if (useEnergyRatio) {
+            LoadAlign(gJ, eAddr);
+        } else {
+            LoadAlign(gJ, gAddr);
+        }
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t globalRow = firstRow + row;
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
-            Sub(diff, gI, gJ, all);
-            if constexpr (UseExp2) {
-                Muls(diff, diff, kSparseLn2, all);
+            if (useEnergyRatio) {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + globalRow);
+                Div(gate, gI, gJ, all);
+            } else {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
+                Sub(diff, gI, gJ, all);
+                if constexpr (UseExp2) {
+                    Muls(diff, diff, kSparseLn2, all);
+                }
+                Exp(gate, diff, all);
             }
-            Exp(gate, diff, all);
             LoadAlign(raw, score + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, raw, all);
             uint32_t lowerCount = globalRow + 1U;
@@ -439,33 +480,51 @@ __aicore__ inline void QExpVF(LocalTensor<bfloat16_t> &q,
 }
 
 template <bool UseExp2>
-__aicore__ inline void RightVF(LocalTensor<bfloat16_t> &vNew,
-                               LocalTensor<bfloat16_t> &right,
-                               LocalTensor<float> &g,
-                               float gLast, uint32_t firstRow)
+__aicore__ inline void VNewRightVF(LocalTensor<float> &p,
+                                   LocalTensor<bfloat16_t> &u,
+                                   LocalTensor<bfloat16_t> &vNew,
+                                   LocalTensor<bfloat16_t> &right,
+                                   LocalTensor<float> &g,
+                                   LocalTensor<float> &energy,
+                                   float gLast, float lastEnergy,
+                                   bool useEnergyRatio, uint32_t firstRow)
 {
+    __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
+    __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
     __ubuf__ bfloat16_t *vAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(vNew.GetPhyAddr());
     __ubuf__ bfloat16_t *rAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(right.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> v0, v1, scale, last, diff;
-        Duplicate(last, gLast, all);
+        RegTensor<float> p0, p1, u0, u1, scale, last, diff;
+        Duplicate(last, useEnergyRatio ? lastEnergy : gLast, all);
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadBf16(v0, vAddr + offset, all);
-            LoadBf16(v1, vAddr + offset + 64, all);
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, gAddr + firstRow + row);
-            Sub(diff, last, scale, all);
-            if constexpr (UseExp2) {
-                Muls(diff, diff, kSparseLn2, all);
+            LoadAlign(p0, pAddr + offset);
+            LoadAlign(p1, pAddr + offset + 64);
+            LoadBf16(u0, uAddr + offset, all);
+            LoadBf16(u1, uAddr + offset + 64, all);
+            Sub(u0, u0, p0, all);
+            Sub(u1, u1, p1, all);
+            StoreBf16(vAddr + offset, u0, all);
+            StoreBf16(vAddr + offset + 64, u1, all);
+            if (useEnergyRatio) {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, eAddr + firstRow + row);
+                Div(scale, last, scale, all);
+            } else {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, gAddr + firstRow + row);
+                Sub(diff, last, scale, all);
+                if constexpr (UseExp2) {
+                    Muls(diff, diff, kSparseLn2, all);
+                }
+                Exp(scale, diff, all);
             }
-            Exp(scale, diff, all);
-            Mul(v0, v0, scale, all);
-            Mul(v1, v1, scale, all);
-            StoreBf16(rAddr + offset, v0, all);
-            StoreBf16(rAddr + offset + 64, v1, all);
+            Mul(u0, u0, scale, all);
+            Mul(u1, u1, scale, all);
+            StoreBf16(rAddr + offset, u0, all);
+            StoreBf16(rAddr + offset + 64, u1, all);
         }
     }
 }

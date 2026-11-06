@@ -22,6 +22,7 @@ constexpr int64_t kStateElems = kDim * kDim;
 constexpr float kSparseEps = 1e-6f;
 constexpr float kSparseLn2 = 0.6931471805599453f;
 constexpr float kSparseRcpLn2 = 1.4426950408889634f;
+constexpr float kSparseExpSafeLimit = 80.0f;
 
 struct PhaseArgs {
     GM_ADDR q;

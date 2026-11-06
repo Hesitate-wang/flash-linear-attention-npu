@@ -18,6 +18,7 @@ constexpr uint16_t kConsP = 1;
 constexpr uint16_t kConsVn = 2;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
+constexpr uint16_t kConsQk = 6;
 
 class ConsumerRole {
 public:
@@ -25,31 +26,21 @@ public:
     {
         td_ = td;
         sub_ = GetSubBlockIdx();
-        if (td.useNorm != 0) {
-            gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.qHat));
-            gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.kHat));
-        } else {
-            gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.q));
-            gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
-        }
+        gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.q));
+        gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
         gmW_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.w));
         gmW_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        // The producer uses the internal U allocation to exchange inverse A.
-        gmA_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
-        gmA_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        gmV_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.v));
-        gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-            td.betaSigmoid != 0 ? args.betaEff : args.beta));
-        gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.gCumsum));
-        gmG_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        gmQ_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        gmK_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        gmBeta_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmU_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
+        gmU_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmH_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.h));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
-        gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-            GetUserWorkspace(args.workspace) + td.workspaceOffset));
-        gmAPrime_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        if (td.hasALog != 0) {
+            gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
+        }
+        if (td.hasDtBias != 0) {
+            gmDtBias_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.dtBias));
+        }
         if (args.initialState != nullptr) {
             hasInitial_ = true;
             if (td.stateFp32 != 0) {
@@ -66,6 +57,9 @@ public:
             }
         }
         InitBuffers();
+        if ASCEND_IS_AIV {
+            GenerateScanIndices(ubShift_);
+        }
     }
 
     __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain)
@@ -121,22 +115,34 @@ private:
         ubD_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbD);
         ubInitB_ = ubD_.ReinterpretCast<bfloat16_t>();
         ubP_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbP);
+        ubQRstd_ = ubP_;
+        ubKRstd_ = ubP_[32];
         ubOSB_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbOS);
-        ubV_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbV);
-        ubVb_ = ubP_.ReinterpretCast<bfloat16_t>();
-        ubA_ = ubVb_[kHalfRows * kDim];
+        ubU_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbU);
         ubVNew_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbVNew);
         ubRight_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbRight);
         ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbW);
         ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQ);
         ubK_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbK);
+        if (td_.useNorm != 0) {
+            ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
+            ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
+        } else {
+            ubQHat_ = ubQ_;
+            ubKHat_ = ubK_;
+        }
+        // QK overwrites QHat only after QHat has been uploaded to L1.
+        ubQk_ = ubQHat_.ReinterpretCast<float>();
         ubAPrime_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbAPrime);
         ubO_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbO);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
         ubEnergy_ = ubG_[64];
-        ubBeta_ = ubG_[128];
+        ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
+        ubBetaDummy_ = ubG_[128];
 
         l1W_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1W);
+        l1U_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1U);
+        l1QHat_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QHat);
         l1QExp_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QExp);
         l1K_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1K);
         l1H_[0] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H0);
@@ -144,13 +150,12 @@ private:
         l1VNew_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1VNew);
         l1Right_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1Right);
         l1APrime_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1APrime);
-        l1A_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1A);
-        l1Vb_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1Vb);
         l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
         l0A1_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank1);
         l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
         l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
+        l0C1_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C1);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
     }
 
@@ -200,6 +205,16 @@ private:
         LoadInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
 
+        AivWait(kConsQk);
+        if (td_.useExp2 != 0) {
+            APrimeBandVF<true>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
+        } else {
+            APrimeBandVF<false>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
+        }
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        UploadNdToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
+
         AivWait(kConsP);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
@@ -207,9 +222,11 @@ private:
         const float gLast = ubG_.GetValue(lastIndex);
         const float lastEnergy = ubEnergy_.GetValue(lastIndex);
         if (td_.useExp2 != 0) {
-            RightVF<true>(ubVNew_, ubRight_, ubG_, gLast, firstRow);
+            VNewRightVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
+                              gLast, lastEnergy, gateRatioSafe_, firstRow);
         } else {
-            RightVF<false>(ubVNew_, ubRight_, ubG_, gLast, firstRow);
+            VNewRightVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
+                               gLast, lastEnergy, gateRatioSafe_, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -253,54 +270,56 @@ private:
     {
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubW_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            Duplicate(ubU_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubA_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
         }
         if (window_.rows < kChunk) {
             Duplicate(ubG_, 0.0f, kChunk);
-            Duplicate(ubBeta_, 0.0f, kChunk);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         CopyGmToUb(ubW_, gmW_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        CopyGmToUb(ubA_, gmA_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
-                                          td_.valueHeads, td_.tokens, kDim) +
-                                      kMatrixElems + firstRow * kChunk,
-                   rows * static_cast<uint32_t>(kChunk));
+        CopyGmToUb(ubU_, gmU_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window_.rows));
-        CopyGmToUb(ubBeta_, gmBeta_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
-                                                td_.valueHeads, td_.tokens),
-                   static_cast<uint32_t>(window_.rows));
-        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        CopyGmToUb(ubAPrime_, gmAPrime_,
-                   (tile * td_.valueHeads + loc_.hv) * kMatrixElems + firstRow * kChunk,
-                   kHalfRows * kChunk);
         SetFlag<HardEvent::MTE2_V>(0);
         WaitFlag<HardEvent::MTE2_V>(0);
-        if (td_.useExp2 != 0) {
-            EnergyVF<true>(ubG_, ubEnergy_);
-        } else {
-            EnergyVF<false>(ubG_, ubEnergy_);
+
+        float aLog = 0.0f;
+        float dtBias = 0.0f;
+        if (td_.hasALog != 0) {
+            aLog = gmALog_.GetValue(loc_.hv);
         }
-        QExpVF(ubQ_, ubOSB_, ubEnergy_, firstRow);
-        ScaleVbVF(ubV_, ubVb_, ubBeta_, firstRow);
+        if (td_.hasDtBias != 0) {
+            dtBias = gmDtBias_.GetValue(loc_.hv);
+        }
+        PrepareGateBetaVF(ubG_, ubBetaDummy_, aLog, dtBias, td_.gateSoftplus != 0, false, 1.0f);
+        if (td_.useExp2 != 0) {
+            CumsumEnergyVF<true>(ubG_, ubEnergy_, ubShift_);
+        } else {
+            CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
+        }
+        SetFlag<HardEvent::V_S>(1);
+        WaitFlag<HardEvent::V_S>(1);
+        gateRatioSafe_ = GateRatioSafe(ubG_, static_cast<uint32_t>(window_.rows));
+        if (td_.useNorm != 0) {
+            NormalizeRowsVF(ubQ_, ubQHat_, ubQRstd_);
+            NormalizeRowsVF(ubK_, ubKHat_, ubKRstd_);
+        }
+        QExpVF(ubQHat_, ubOSB_, ubEnergy_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         UploadNdToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
+        UploadNdToL1(l1U_, ubU_, kHalfRows, kDim, kChunk, firstRow);
+        UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1QExp_, ubOSB_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1K_, ubK_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
-        UploadNdToL1(l1A_, ubA_, kHalfRows, kChunk, kChunk, firstRow);
-        UploadNdToL1(l1Vb_, ubVb_, kHalfRows, kDim, kChunk, firstRow);
+        UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
         UploadNzStateToL1(l1H_[chunk & 1], ubStateB_,
                           sub_ * static_cast<uint32_t>(kHalfDim));
     }
@@ -308,13 +327,14 @@ private:
     __aicore__ inline void RunCube(int64_t chunk)
     {
         AicWaitBoth(kConsInputs);
-        // Keep U=A@Vb in L0C, then accumulate the negated W@H. This is the
-        // same contraction order as chunk32; U is not multiplied by H.
-        ComputeMm(l1A_, l1Vb_, l0A0_, l0B1_, l0C0_, 64, 128, 64,
-                  false, true, true);
-        ComputeMm(l1W_, l1H_[chunk & 1], l0A1_, l0B0_, l0C0_, 64, 128, 128,
-                  false, td_.stateVFirst == 0, false);
-        FixB16Halves(ubVNew_, l0C0_, 64, 128);
+        ComputeMm(l1QHat_, l1K_, l0A0_, l0B1_, l0C1_, 64, 64, 128, false, false);
+        FixF32Halves(ubQk_, l0C1_, 64, 64);
+        ReleaseL0C();
+        AicPublishToBoth(kConsQk);
+
+        ComputeMm(l1W_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
+                  false, td_.stateVFirst == 0);
+        FixF32Halves(ubP_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
@@ -342,17 +362,21 @@ private:
     ChunkWindow window_{};
     uint32_t sub_{0};
     bool hasInitial_{false};
+    bool gateRatioSafe_{false};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmA_, gmV_, gmH_, gmO_, gmAPrime_;
+    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmU_, gmH_, gmO_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
-    GlobalTensor<float> gmG_, gmBeta_, gmInitF_, gmFinalF_;
+    GlobalTensor<float> gmG_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
 
-    LocalTensor<float> ubStateF_, ubD_, ubP_;
-    LocalTensor<bfloat16_t> ubStateB_, ubV_, ubVb_, ubA_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubAPrime_, ubO_, ubInitB_, ubOSB_;
-    LocalTensor<float> ubG_, ubEnergy_, ubBeta_;
-    LocalTensor<bfloat16_t> l1W_, l1QExp_, l1K_, l1H_[2], l1VNew_, l1Right_, l1APrime_, l1A_, l1Vb_;
+    LocalTensor<float> ubStateF_, ubD_, ubP_, ubQk_, ubQRstd_, ubKRstd_;
+    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_;
+    LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubAPrime_, ubO_, ubInitB_, ubOSB_;
+    LocalTensor<float> ubG_, ubEnergy_, ubBetaDummy_;
+    LocalTensor<uint32_t> ubShift_;
+    LocalTensor<bfloat16_t> l1W_, l1U_, l1QHat_, l1QExp_, l1K_, l1H_[2];
+    LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
-    LocalTensor<float> l0C0_, l0C3_;
+    LocalTensor<float> l0C0_, l0C1_, l0C3_;
 };
 
 } // namespace GdnChunk64Sparse
