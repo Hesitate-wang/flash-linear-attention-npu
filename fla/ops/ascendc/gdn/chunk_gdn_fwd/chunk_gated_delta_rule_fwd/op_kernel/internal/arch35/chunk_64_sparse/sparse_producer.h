@@ -17,7 +17,6 @@ constexpr uint16_t kProdInputs = 0;
 constexpr uint16_t kProdKkt = 1;
 constexpr uint16_t kProdA = 3;
 constexpr uint16_t kProdW = 4;
-constexpr uint16_t kProdATop = 5;
 
 class ProducerRole {
 public:
@@ -55,9 +54,6 @@ public:
         if (td.hasDtBias != 0) {
             gmDtBias_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.dtBias));
         }
-        gmATopF_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-            GetUserWorkspace(args.workspace) + td.workspaceOffset));
-        gmATopF_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         InitBuffers();
         if ASCEND_IS_AIV {
             GenerateScanIndices(ubShift_);
@@ -79,8 +75,10 @@ public:
         window_ = ResolveWindow(loc_, chunk);
         if ASCEND_IS_AIV {
             Prepare(chunk);
-            AivWait(kProdKkt);
-            BuildA(chunk);
+            if (sub_ == 0) {
+                AivWait(kProdKkt);
+                BuildA(chunk);
+            }
             AivPublish(kProdA);
             AivWaitMte3(kProdW);
             DrainWu();
@@ -207,41 +205,22 @@ private:
 
     __aicore__ inline void BuildA(int64_t chunk)
     {
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        const int64_t topOffset = tile * kHalfRows * kChunk;
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         const bool useEnergyRatio = GateRatioSafe(ubG_, static_cast<uint32_t>(window_.rows));
-        if (sub_ == 1) {
-            AivWaitMte2(kProdATop + kAiv1FlagOffset);
-            CopyGmToUb(ubA_, gmATopF_, topOffset, kHalfRows * kChunk);
-            SetFlag<HardEvent::MTE2_V>(0);
-            WaitFlag<HardEvent::MTE2_V>(0);
-        }
         if (td_.useExp2 != 0) {
-            Inverse64VF<true>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_, ubEnergy_, useEnergyRatio, firstRow);
+            Inverse64VF<true>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_, ubEnergy_, useEnergyRatio);
         } else {
-            Inverse64VF<false>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_, ubEnergy_, useEnergyRatio, firstRow);
+            Inverse64VF<false>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_, ubEnergy_, useEnergyRatio);
         }
-        if (sub_ == 0) {
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
-            CopyUbToGm(gmATopF_, topOffset, ubA_, kHalfRows * kChunk);
-            AivPublish(kProdATop);
-        }
-        LocalTensor<float> aBand = ubA_[firstRow * kChunk];
-        Cast(ubABf_, aBand, RoundMode::CAST_RINT, kHalfRows * kChunk);
+        Cast(ubABf_, ubA_, RoundMode::CAST_RINT, kMatrixElems);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1A_, ubABf_, kHalfRows, kChunk, kChunk, firstRow);
+        UploadNdToL1(l1A_, ubABf_, kChunk, kChunk, kChunk, 0);
         if (td_.outputA != 0) {
-            const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
-            const uint32_t rows = remaining <= 0 ? 0U
-                : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-            CopyUbToGm(gmA_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart + firstRow,
+            CopyUbToGm(gmA_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
                                         td_.valueHeads, td_.tokens, kChunk),
-                       ubABf_, rows * static_cast<uint32_t>(kChunk));
+                       ubABf_, static_cast<uint32_t>(window_.rows * kChunk));
         }
     }
 
@@ -261,11 +240,10 @@ private:
     {
         AicWaitBoth(kProdInputs);
         ComputeMm(l1K_, l1K_, l0A0_, l0B0_, l0C0_, 64, 64, 128, false, false);
-        FixF32Halves(ubKkt_, l0C0_, 64, 64);
+        FixF32(ubKkt_, l0C0_, 64, 64);
         ReleaseL0C();
-        AicPublishToBoth(kProdKkt);
+        AicPublishToAiv0(kProdKkt);
 
-        AicRelayAiv0ToAiv1(kProdATop);
         AicWaitBoth(kProdA);
         ComputeMm(l1A_, l1Kbg_, l0A0_, l0B0_, l0C2_, 64, 128, 64, false, true);
         FixB16Halves(ubW_, l0C2_, 64, 128);
@@ -284,7 +262,7 @@ private:
 
     GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmQHat_, gmKHat_, gmW_, gmU_, gmA_;
     GlobalTensor<float> gmG_, gmBeta_, gmGOut_, gmBetaEff_, gmQRstd_, gmKRstd_;
-    GlobalTensor<float> gmALog_, gmDtBias_, gmATopF_;
+    GlobalTensor<float> gmALog_, gmDtBias_;
 
     LocalTensor<bfloat16_t> ubQ_, ubK_, ubV_, ubQHat_, ubKHat_, ubVb_, ubKbg_, ubW_, ubU_;
     LocalTensor<bfloat16_t> ubABf_;

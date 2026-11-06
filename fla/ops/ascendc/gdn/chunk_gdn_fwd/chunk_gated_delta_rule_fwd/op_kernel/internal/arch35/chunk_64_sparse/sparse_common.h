@@ -205,27 +205,12 @@ __aicore__ inline void UploadNdToL1(LocalTensor<bfloat16_t> l1,
                                     uint32_t rows, uint32_t cols,
                                     uint32_t totalRows, uint32_t rowOffset)
 {
-    if (rows == kHalfDim && totalRows == kDim) {
-        // The full H conversion would need a 30KB temporary UB image. Keep
-        // its panel path; all 32/64-row operands use the single-call ND2NZ.
-        const uint32_t panels = cols / 16;
-        const uint16_t srcGap = static_cast<uint16_t>(panels - 1);
-        for (uint32_t panel = 0; panel < panels; ++panel) {
-            DataCopy(l1[panel * totalRows * 16 + rowOffset * 16], ub[panel * 16],
-                     DataCopyParams(static_cast<uint16_t>(rows), 1, srcGap, 0));
-        }
-        return;
+    const uint32_t panels = cols / 16;
+    const uint16_t srcGap = static_cast<uint16_t>(panels - 1);
+    for (uint32_t panel = 0; panel < panels; ++panel) {
+        DataCopy(l1[panel * totalRows * 16 + rowOffset * 16], ub[panel * 16],
+                 DataCopyParams(static_cast<uint16_t>(rows), 1, srcGap, 0));
     }
-    Nd2NzParams params{};
-    params.ndNum = 1;
-    params.nValue = rows;
-    params.dValue = cols;
-    params.srcNdMatrixStride = 0;
-    params.srcDValue = cols;
-    params.dstNzC0Stride = totalRows;
-    params.dstNzNStride = 1;
-    params.dstNzMatrixStride = 0;
-    DataCopy(l1[rowOffset * 16], ub, params);
 }
 
 } // namespace GdnChunk64Sparse

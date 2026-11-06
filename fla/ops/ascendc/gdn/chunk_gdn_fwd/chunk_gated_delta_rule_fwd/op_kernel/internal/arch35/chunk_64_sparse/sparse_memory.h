@@ -60,7 +60,8 @@ constexpr uint32_t kCUbAPrime = 176 * kKiB;
 constexpr uint32_t kCUbO = 180 * kKiB;
 constexpr uint32_t kCUbGates = 188 * kKiB;
 constexpr uint32_t kCUbShift = 190 * kKiB;
-constexpr uint32_t kCUbEnd = 192 * kKiB;
+constexpr uint32_t kCUbQk = 192 * kKiB;
+constexpr uint32_t kCUbEnd = 200 * kKiB;
 static_assert(kCUbEnd <= kUbBudget);
 
 constexpr uint32_t kCL1W = 0;

@@ -92,15 +92,9 @@ public:
             if (td_.storeFinalState != 0) {
                 const int64_t offset = StateOffset();
                 if (td_.stateFp32 != 0) {
-                    F32PanelsToNd(ubD_, ubStateF_);
-                    SetFlag<HardEvent::V_MTE3>(0);
-                    WaitFlag<HardEvent::V_MTE3>(0);
-                    DataCopy(gmFinalF_[offset], ubD_, kStateElems / 2);
+                    DataCopy(gmFinalF_[offset], ubStateF_, kStateElems / 2);
                 } else {
-                    Bf16PanelsToNd(ubInitB_, ubStateB_);
-                    SetFlag<HardEvent::V_MTE3>(0);
-                    WaitFlag<HardEvent::V_MTE3>(0);
-                    DataCopy(gmFinalB_[offset], ubInitB_, kStateElems / 2);
+                    DataCopy(gmFinalB_[offset], ubStateB_, kStateElems / 2);
                 }
             }
         }
@@ -131,8 +125,7 @@ private:
             ubQHat_ = ubQ_;
             ubKHat_ = ubK_;
         }
-        // QK overwrites QHat only after QHat has been uploaded to L1.
-        ubQk_ = ubQHat_.ReinterpretCast<float>();
+        ubQk_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbQk);
         ubAPrime_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbAPrime);
         ubO_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbO);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
@@ -168,17 +161,15 @@ private:
     {
         if (hasInitial_) {
             if (td_.stateFp32 != 0) {
-                DataCopy(ubD_, gmInitF_[StateOffset()], kStateElems / 2);
+                DataCopy(ubStateF_, gmInitF_[StateOffset()], kStateElems / 2);
                 SetFlag<HardEvent::MTE2_V>(0);
                 WaitFlag<HardEvent::MTE2_V>(0);
-                F32NdToPanels(ubStateF_, ubD_);
                 StateMirrorVF(ubStateF_, ubStateB_);
             } else {
                 DataCopy(ubInitB_, gmInitB_[StateOffset()], kStateElems / 2);
                 SetFlag<HardEvent::MTE2_V>(0);
                 WaitFlag<HardEvent::MTE2_V>(0);
-                Bf16NdToPanels(ubStateB_, ubInitB_);
-                Cast(ubStateF_, ubStateB_, RoundMode::CAST_NONE, kStateElems / 2);
+                StateWidenVF(ubInitB_, ubStateF_, ubStateB_);
             }
         } else {
             Duplicate(ubStateF_, 0.0f, kStateElems / 2);
@@ -196,11 +187,8 @@ private:
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         if (td_.writeH != 0) {
-            Bf16PanelsToNd(ubInitB_, ubStateB_);
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
             DataCopy(gmH_[OffsetStateTile(tile, loc_.hv, td_.valueHeads) + sub_ * (kStateElems / 2)],
-                     ubInitB_, kStateElems / 2);
+                     ubStateB_, kStateElems / 2);
         }
         LoadInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
@@ -320,8 +308,8 @@ private:
         UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1QExp_, ubOSB_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNzStateToL1(l1H_[chunk & 1], ubStateB_,
-                          sub_ * static_cast<uint32_t>(kHalfDim));
+        UploadNdToL1(l1H_[chunk & 1], ubStateB_, kHalfDim, kDim, kDim,
+                     sub_ * static_cast<uint32_t>(kHalfDim));
     }
 
     __aicore__ inline void RunCube(int64_t chunk)
@@ -352,7 +340,7 @@ private:
         } else {
             ComputeMm(l1K_, l1Right_, l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
         }
-        FixF32NzHalves(ubD_, l0C3_, 128, 128);
+        FixF32Halves(ubD_, l0C3_, 128, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsD);
     }

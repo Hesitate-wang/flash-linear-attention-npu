@@ -268,8 +268,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
                                    LocalTensor<float> &g,
                                    LocalTensor<float> &beta,
                                    LocalTensor<float> &energy,
-                                   bool useEnergyRatio,
-                                   uint32_t firstRow)
+                                   bool useEnergyRatio)
 {
     __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
     __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
@@ -291,7 +290,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
         } else {
             LoadAlign(gJ, gAddr);
         }
-        for (uint16_t row = firstRow; row < firstRow + 32; ++row) {
+        for (uint16_t row = 0; row < 64; ++row) {
             LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + row);
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + row);
@@ -310,7 +309,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             }
             Mul(gate, gate, bi, all);
             Muls(gate, gate, -1.0f, all);
-            LoadAlign(score, kk + static_cast<uint32_t>(row - firstRow) * 64);
+            LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, score, all);
             uint32_t lowerCount = static_cast<uint32_t>(row);
             MaskReg lowerMask = UpdateMask<float>(lowerCount);
@@ -327,7 +326,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
     LoadAlign<float, LoadDist::DIST_BRC_B32>(coefficient,                                                             \
         l + (base + (rr)) * 64 + base + (cc));                                                                         \
     MulAddDst(dst, src, coefficient, all);
-    for (uint16_t group = firstRow / 8; group < firstRow / 8 + 4; ++group) {
+    for (uint16_t group = 0; group < 8; ++group) {
         const uint32_t base = static_cast<uint32_t>(group) * 8;
         __VEC_SCOPE__
         {
@@ -552,7 +551,6 @@ __aicore__ inline void StoreState128(__ubuf__ float *fp32,
     StoreFlat128(bf16, even, odd, m16, m128);
 }
 
-// FP32 state, BF16 H mirror and D all use tight NZ panels in UB.
 __aicore__ inline void StateUpdateVF(LocalTensor<float> &state,
                                      LocalTensor<bfloat16_t> &stateBf,
                                      LocalTensor<float> &d, float decay)
@@ -563,42 +561,22 @@ __aicore__ inline void StateUpdateVF(LocalTensor<float> &state,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
-        uint32_t n128 = 128;
-        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
-        RegTensor<float> alpha;
+        RegTensor<float> s0, s1, d0, d1, alpha;
         Duplicate(alpha, decay, all);
-        for (uint16_t group = 0; group < 16; ++group) {
-            const uint32_t offset = static_cast<uint32_t>(group) * 512;
-            RegTensor<float> s0, s1, s2, s3, s4, s5, s6, s7, f, g;
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s0, s1, s + offset);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s2, s3, s + offset + 128);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s4, s5, s + offset + 256);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s6, s7, s + offset + 384);
+        for (uint16_t row = 0; row < 64; ++row) {
+            const uint32_t offset = static_cast<uint32_t>(row) * 128;
+            LoadAlign(s0, s + offset);
+            LoadAlign(s1, s + offset + 64);
+            LoadAlign(d0, dd + offset);
+            LoadAlign(d1, dd + offset + 64);
             Mul(s0, s0, alpha, all);
             Mul(s1, s1, alpha, all);
-            Mul(s2, s2, alpha, all);
-            Mul(s3, s3, alpha, all);
-            Mul(s4, s4, alpha, all);
-            Mul(s5, s5, alpha, all);
-            Mul(s6, s6, alpha, all);
-            Mul(s7, s7, alpha, all);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset);
-            Add(s0, s0, f, all);
-            Add(s1, s1, g, all);
-            StoreState128(s + offset, b + offset, s0, s1, all, m16, m128);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset + 128);
-            Add(s2, s2, f, all);
-            Add(s3, s3, g, all);
-            StoreState128(s + offset + 128, b + offset + 128, s2, s3, all, m16, m128);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset + 256);
-            Add(s4, s4, f, all);
-            Add(s5, s5, g, all);
-            StoreState128(s + offset + 256, b + offset + 256, s4, s5, all, m16, m128);
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset + 384);
-            Add(s6, s6, f, all);
-            Add(s7, s7, g, all);
-            StoreState128(s + offset + 384, b + offset + 384, s6, s7, all, m16, m128);
+            Add(s0, s0, d0, all);
+            Add(s1, s1, d1, all);
+            StoreAlign(s + offset, s0, all);
+            StoreAlign(s + offset + 64, s1, all);
+            StoreBf16(b + offset, s0, all);
+            StoreBf16(b + offset + 64, s1, all);
         }
     }
 }
@@ -678,6 +656,29 @@ __aicore__ inline void F32PanelsToNd(LocalTensor<float> nd,
                 LoadAlign(value, zAddr + src);
                 StoreAlign(nAddr + dst, value, m16);
             }
+        }
+    }
+}
+
+__aicore__ inline void StateWidenVF(LocalTensor<bfloat16_t> &input,
+                                    LocalTensor<float> &state,
+                                    LocalTensor<bfloat16_t> &stateBf)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(input.GetPhyAddr());
+    __ubuf__ float *s = reinterpret_cast<__ubuf__ float *>(state.GetPhyAddr());
+    __ubuf__ bfloat16_t *b = reinterpret_cast<__ubuf__ bfloat16_t *>(stateBf.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<float> v0, v1;
+        for (uint16_t row = 0; row < 64; ++row) {
+            const uint32_t offset = static_cast<uint32_t>(row) * 128;
+            LoadBf16(v0, src + offset, all);
+            LoadBf16(v1, src + offset + 64, all);
+            StoreAlign(s + offset, v0, all);
+            StoreAlign(s + offset + 64, v1, all);
+            StoreBf16(b + offset, v0, all);
+            StoreBf16(b + offset + 64, v1, all);
         }
     }
 }
