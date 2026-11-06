@@ -18,6 +18,7 @@ constexpr uint16_t kProdKkt = 1;
 constexpr uint16_t kProdQk = 2;
 constexpr uint16_t kProdA = 3;
 constexpr uint16_t kProdW = 4;
+constexpr uint16_t kProdATop = 5;
 
 class ProducerRole {
 public:
@@ -35,6 +36,8 @@ public:
         gmW_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmAExchange_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
         gmAExchange_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmATopF_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.u));
+        gmATopF_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmGOut_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmBetaEff_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         if (td.useNorm != 0) {
@@ -78,10 +81,8 @@ public:
         window_ = ResolveWindow(loc_, chunk);
         if ASCEND_IS_AIV {
             Prepare(chunk);
-            if (sub_ == 0) {
-                AivWait(kProdKkt);
-                BuildA(chunk);
-            }
+            AivWait(kProdKkt);
+            BuildA(chunk);
             AivPublish(kProdA);
             AivWait(kProdQk);
             PublishAPrime(chunk);
@@ -207,24 +208,40 @@ private:
 
     __aicore__ inline void BuildA(int64_t chunk)
     {
-        if (td_.useExp2 != 0) {
-            Inverse64VF<true>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_);
-        } else {
-            Inverse64VF<false>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t exchange = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+                                            td_.valueHeads, td_.tokens, kDim);
+        if (sub_ == 1) {
+            AivWaitMte2(kProdATop + kAiv1FlagOffset);
+            CopyGmToUb(ubA_, gmATopF_, exchange / 2, kHalfRows * kChunk);
+            SetFlag<HardEvent::MTE2_V>(0);
+            WaitFlag<HardEvent::MTE2_V>(0);
         }
-        Cast(ubABf_, ubA_, RoundMode::CAST_RINT, kMatrixElems);
+        if (td_.useExp2 != 0) {
+            Inverse64VF<true>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_, firstRow);
+        } else {
+            Inverse64VF<false>(ubKkt_, ubL_, ubA_, ubG_, ubBeta_, firstRow);
+        }
+        if (sub_ == 0) {
+            SetFlag<HardEvent::V_MTE3>(0);
+            WaitFlag<HardEvent::V_MTE3>(0);
+            CopyUbToGm(gmATopF_, exchange / 2, ubA_, kHalfRows * kChunk);
+            AivPublish(kProdATop);
+        }
+        LocalTensor<float> aBand = ubA_[firstRow * kChunk];
+        Cast(ubABf_, aBand, RoundMode::CAST_RINT, kHalfRows * kChunk);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1A_, ubABf_, kChunk, kChunk, kChunk, 0);
-        // The internal U allocation carries A to the consumer; U itself is
-        // recomputed there so its FP32 result can stay in L0C.
-        CopyUbToGm(gmAExchange_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
-                                    td_.valueHeads, td_.tokens, kChunk),
-                   ubABf_, static_cast<uint32_t>(window_.rows * kChunk));
+        UploadNdToL1(l1A_, ubABf_, kHalfRows, kChunk, kChunk, firstRow);
+        CopyUbToGm(gmAExchange_, exchange + kMatrixElems + firstRow * kChunk,
+                   ubABf_, kHalfRows * kChunk);
         if (td_.outputA != 0) {
-            CopyUbToGm(gmA_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+            const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+            const uint32_t rows = remaining <= 0 ? 0U
+                : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+            CopyUbToGm(gmA_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart + firstRow,
                                         td_.valueHeads, td_.tokens, kChunk),
-                       ubABf_, static_cast<uint32_t>(window_.rows * kChunk));
+                       ubABf_, rows * static_cast<uint32_t>(kChunk));
         }
     }
 
@@ -266,15 +283,16 @@ private:
     {
         AicWaitBoth(kProdInputs);
         ComputeMm(l1K_, l1K_, l0A0_, l0B0_, l0C0_, 64, 64, 128, false, false);
-        FixF32(ubKkt_, l0C0_, 64, 64);
+        FixF32Halves(ubKkt_, l0C0_, 64, 64);
         ReleaseL0C();
-        AicPublishToAiv0(kProdKkt);
+        AicPublishToBoth(kProdKkt);
 
         ComputeMm(l1Q_, l1K_, l0A1_, l0B1_, l0C1_, 64, 64, 128, false, false);
         FixF32Halves(ubQk_, l0C1_, 64, 64);
         ReleaseL0C();
         AicPublishToBoth(kProdQk);
 
+        AicRelayAiv0ToAiv1(kProdATop);
         AicWaitBoth(kProdA);
         ComputeMm(l1A_, l1Kbg_, l0A0_, l0B0_, l0C2_, 64, 128, 64, false, true);
         FixB16Halves(ubW_, l0C2_, 64, 128);
@@ -288,7 +306,7 @@ private:
     uint32_t sub_{0};
 
     GlobalTensor<bfloat16_t> gmQ_, gmK_, gmQHat_, gmKHat_, gmW_, gmAExchange_, gmA_, gmAPrime_;
-    GlobalTensor<float> gmG_, gmBeta_, gmGOut_, gmBetaEff_, gmQRstd_, gmKRstd_, gmALog_, gmDtBias_;
+    GlobalTensor<float> gmG_, gmBeta_, gmGOut_, gmBetaEff_, gmQRstd_, gmKRstd_, gmALog_, gmDtBias_, gmATopF_;
 
     LocalTensor<bfloat16_t> ubQ_, ubK_, ubQHat_, ubKHat_, ubKbg_, ubW_;
     LocalTensor<bfloat16_t> ubABf_, ubAPrime_;

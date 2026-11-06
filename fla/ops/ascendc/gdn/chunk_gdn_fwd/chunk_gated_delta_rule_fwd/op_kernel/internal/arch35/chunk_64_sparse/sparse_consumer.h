@@ -98,9 +98,15 @@ public:
             if (td_.storeFinalState != 0) {
                 const int64_t offset = StateOffset();
                 if (td_.stateFp32 != 0) {
-                    DataCopy(gmFinalF_[offset], ubStateF_, kStateElems / 2);
+                    F32PanelsToNd(ubD_, ubStateF_);
+                    SetFlag<HardEvent::V_MTE3>(0);
+                    WaitFlag<HardEvent::V_MTE3>(0);
+                    DataCopy(gmFinalF_[offset], ubD_, kStateElems / 2);
                 } else {
-                    DataCopy(gmFinalB_[offset], ubStateB_, kStateElems / 2);
+                    Bf16PanelsToNd(ubInitB_, ubStateB_);
+                    SetFlag<HardEvent::V_MTE3>(0);
+                    WaitFlag<HardEvent::V_MTE3>(0);
+                    DataCopy(gmFinalB_[offset], ubInitB_, kStateElems / 2);
                 }
             }
         }
@@ -157,15 +163,17 @@ private:
     {
         if (hasInitial_) {
             if (td_.stateFp32 != 0) {
-                DataCopy(ubStateF_, gmInitF_[StateOffset()], kStateElems / 2);
+                DataCopy(ubD_, gmInitF_[StateOffset()], kStateElems / 2);
                 SetFlag<HardEvent::MTE2_V>(0);
                 WaitFlag<HardEvent::MTE2_V>(0);
+                F32NdToPanels(ubStateF_, ubD_);
                 StateMirrorVF(ubStateF_, ubStateB_);
             } else {
                 DataCopy(ubInitB_, gmInitB_[StateOffset()], kStateElems / 2);
                 SetFlag<HardEvent::MTE2_V>(0);
                 WaitFlag<HardEvent::MTE2_V>(0);
-                StateWidenVF(ubInitB_, ubStateF_, ubStateB_);
+                Bf16NdToPanels(ubStateB_, ubInitB_);
+                Cast(ubStateF_, ubStateB_, RoundMode::CAST_NONE, kStateElems / 2);
             }
         } else {
             Duplicate(ubStateF_, 0.0f, kStateElems / 2);
@@ -183,8 +191,11 @@ private:
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         if (td_.writeH != 0) {
+            Bf16PanelsToNd(ubInitB_, ubStateB_);
+            SetFlag<HardEvent::V_MTE3>(0);
+            WaitFlag<HardEvent::V_MTE3>(0);
             DataCopy(gmH_[OffsetStateTile(tile, loc_.hv, td_.valueHeads) + sub_ * (kStateElems / 2)],
-                     ubStateB_, kStateElems / 2);
+                     ubInitB_, kStateElems / 2);
         }
         LoadInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
@@ -257,8 +268,10 @@ private:
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         CopyGmToUb(ubW_, gmW_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        CopyGmToUb(ubA_, gmA_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads,
-                                          td_.tokens, kChunk), rows * static_cast<uint32_t>(kChunk));
+        CopyGmToUb(ubA_, gmA_, OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+                                          td_.valueHeads, td_.tokens, kDim) +
+                                      kMatrixElems + firstRow * kChunk,
+                   rows * static_cast<uint32_t>(kChunk));
         CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
@@ -288,8 +301,8 @@ private:
         UploadNdToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
         UploadNdToL1(l1A_, ubA_, kHalfRows, kChunk, kChunk, firstRow);
         UploadNdToL1(l1Vb_, ubVb_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1H_[chunk & 1], ubStateB_, kHalfDim, kDim, kDim,
-                     sub_ * static_cast<uint32_t>(kHalfDim));
+        UploadNzStateToL1(l1H_[chunk & 1], ubStateB_,
+                          sub_ * static_cast<uint32_t>(kHalfDim));
     }
 
     __aicore__ inline void RunCube(int64_t chunk)
@@ -319,7 +332,7 @@ private:
         } else {
             ComputeMm(l1K_, l1Right_, l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
         }
-        FixF32Halves(ubD_, l0C3_, 128, 128);
+        FixF32NzHalves(ubD_, l0C3_, 128, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsD);
     }

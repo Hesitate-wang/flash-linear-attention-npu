@@ -34,9 +34,20 @@ __aicore__ inline void AivWait(uint16_t id)
     CrossCoreWaitFlag<0x4, PIPE_V>(id);
 }
 
+__aicore__ inline void AivWaitMte2(uint16_t id)
+{
+    CrossCoreWaitFlag<0x4, PIPE_MTE2>(id);
+}
+
 __aicore__ inline void AivWaitMte3(uint16_t id)
 {
     CrossCoreWaitFlag<0x4, PIPE_MTE3>(id);
+}
+
+__aicore__ inline void AicRelayAiv0ToAiv1(uint16_t id)
+{
+    CrossCoreWaitFlag<0x4, PIPE_MTE2>(id);
+    CrossCoreSetFlag<0x4, PIPE_FIX>(static_cast<uint16_t>(id + kAiv1FlagOffset));
 }
 
 __aicore__ inline void AicPublishToAiv0(uint16_t id)

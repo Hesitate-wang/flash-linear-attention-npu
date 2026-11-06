@@ -251,7 +251,8 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
                                    LocalTensor<float> &lower,
                                    LocalTensor<float> &a,
                                    LocalTensor<float> &g,
-                                   LocalTensor<float> &beta)
+                                   LocalTensor<float> &beta,
+                                   uint32_t firstRow)
 {
     __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
     __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
@@ -266,7 +267,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
         Duplicate(clipLo, -50.0f, all);
         Duplicate(clipHi, 50.0f, all);
         LoadAlign(gJ, gAddr);
-        for (uint16_t row = 0; row < 64; ++row) {
+        for (uint16_t row = firstRow; row < firstRow + 32; ++row) {
             LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + row);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + row);
             Sub(diff, gI, gJ, all);
@@ -278,7 +279,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             Exp(gate, diff, all);
             Mul(gate, gate, bi, all);
             Muls(gate, gate, -1.0f, all);
-            LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
+            LoadAlign(score, kk + static_cast<uint32_t>(row - firstRow) * 64);
             Mul(gate, gate, score, all);
             uint32_t lowerCount = static_cast<uint32_t>(row);
             MaskReg lowerMask = UpdateMask<float>(lowerCount);
@@ -295,7 +296,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
     LoadAlign<float, LoadDist::DIST_BRC_B32>(coefficient,                                                             \
         l + (base + (rr)) * 64 + base + (cc));                                                                         \
     MulAddDst(dst, src, coefficient, all);
-    for (uint16_t group = 0; group < 8; ++group) {
+    for (uint16_t group = firstRow / 8; group < firstRow / 8 + 4; ++group) {
         const uint32_t base = static_cast<uint32_t>(group) * 8;
         __VEC_SCOPE__
         {
@@ -467,6 +468,30 @@ __aicore__ inline void RightVF(LocalTensor<bfloat16_t> &vNew,
     }
 }
 
+__aicore__ inline void StoreFlat128(__ubuf__ bfloat16_t *dst,
+                                    RegTensor<float> &even,
+                                    RegTensor<float> &odd,
+                                    MaskReg &m16, MaskReg &m128)
+{
+    RegTensor<bfloat16_t> lo, hi;
+    Cast<bfloat16_t, float, kCastB322B16>(lo, even, m16);
+    Cast<bfloat16_t, float, kCastB322B16Hi>(hi, odd, m16);
+    Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo,
+       (RegTensor<uint16_t> &)hi, m16);
+    StoreAlign(dst, lo, m128);
+}
+
+__aicore__ inline void StoreState128(__ubuf__ float *fp32,
+                                     __ubuf__ bfloat16_t *bf16,
+                                     RegTensor<float> &even,
+                                     RegTensor<float> &odd,
+                                     MaskReg &all, MaskReg &m16, MaskReg &m128)
+{
+    StoreAlign<float, StoreDist::DIST_INTLV_B32>(fp32, even, odd, all);
+    StoreFlat128(bf16, even, odd, m16, m128);
+}
+
+// FP32 state, BF16 H mirror and D all use tight NZ panels in UB.
 __aicore__ inline void StateUpdateVF(LocalTensor<float> &state,
                                      LocalTensor<bfloat16_t> &stateBf,
                                      LocalTensor<float> &d, float decay)
@@ -477,22 +502,121 @@ __aicore__ inline void StateUpdateVF(LocalTensor<float> &state,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> s0, s1, d0, d1, alpha;
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> alpha;
         Duplicate(alpha, decay, all);
-        for (uint16_t row = 0; row < 64; ++row) {
-            const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadAlign(s0, s + offset);
-            LoadAlign(s1, s + offset + 64);
-            LoadAlign(d0, dd + offset);
-            LoadAlign(d1, dd + offset + 64);
+        for (uint16_t group = 0; group < 16; ++group) {
+            const uint32_t offset = static_cast<uint32_t>(group) * 512;
+            RegTensor<float> s0, s1, s2, s3, s4, s5, s6, s7, f, g;
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s0, s1, s + offset);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s2, s3, s + offset + 128);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s4, s5, s + offset + 256);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(s6, s7, s + offset + 384);
             Mul(s0, s0, alpha, all);
             Mul(s1, s1, alpha, all);
-            Add(s0, s0, d0, all);
-            Add(s1, s1, d1, all);
-            StoreAlign(s + offset, s0, all);
-            StoreAlign(s + offset + 64, s1, all);
-            StoreBf16(b + offset, s0, all);
-            StoreBf16(b + offset + 64, s1, all);
+            Mul(s2, s2, alpha, all);
+            Mul(s3, s3, alpha, all);
+            Mul(s4, s4, alpha, all);
+            Mul(s5, s5, alpha, all);
+            Mul(s6, s6, alpha, all);
+            Mul(s7, s7, alpha, all);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset);
+            Add(s0, s0, f, all);
+            Add(s1, s1, g, all);
+            StoreState128(s + offset, b + offset, s0, s1, all, m16, m128);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset + 128);
+            Add(s2, s2, f, all);
+            Add(s3, s3, g, all);
+            StoreState128(s + offset + 128, b + offset + 128, s2, s3, all, m16, m128);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset + 256);
+            Add(s4, s4, f, all);
+            Add(s5, s5, g, all);
+            StoreState128(s + offset + 256, b + offset + 256, s4, s5, all, m16, m128);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(f, g, dd + offset + 384);
+            Add(s6, s6, f, all);
+            Add(s7, s7, g, all);
+            StoreState128(s + offset + 384, b + offset + 384, s6, s7, all, m16, m128);
+        }
+    }
+}
+
+// Public state is ND. Convert only at chain boundaries; each chunk keeps NZ.
+__aicore__ inline void Bf16NdToPanels(LocalTensor<bfloat16_t> nz,
+                                      LocalTensor<bfloat16_t> nd)
+{
+    __ubuf__ bfloat16_t *nAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nd.GetPhyAddr());
+    __ubuf__ bfloat16_t *zAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nz.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        for (uint16_t row = 0; row < 64; ++row) {
+            RegTensor<bfloat16_t> value;
+            LoadAlign(value, nAddr + static_cast<uint32_t>(row) * kDim);
+            StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
+                zAddr + static_cast<uint32_t>(row) * 16, value, 64, m128);
+        }
+    }
+}
+
+__aicore__ inline void Bf16PanelsToNd(LocalTensor<bfloat16_t> nd,
+                                      LocalTensor<bfloat16_t> nz)
+{
+    __ubuf__ bfloat16_t *nAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nd.GetPhyAddr());
+    __ubuf__ bfloat16_t *zAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nz.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        for (uint16_t row = 0; row < 64; ++row) {
+            RegTensor<bfloat16_t> value;
+            LoadAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
+                value, zAddr + static_cast<uint32_t>(row) * 16, 64, m128);
+            StoreAlign(nAddr + static_cast<uint32_t>(row) * kDim, value, m128);
+        }
+    }
+}
+
+__aicore__ inline void F32NdToPanels(LocalTensor<float> nz,
+                                     LocalTensor<float> nd)
+{
+    __ubuf__ float *nAddr = reinterpret_cast<__ubuf__ float *>(nd.GetPhyAddr());
+    __ubuf__ float *zAddr = reinterpret_cast<__ubuf__ float *>(nz.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        uint32_t n16 = 16;
+        MaskReg m16 = UpdateMask<float>(n16);
+        for (uint16_t row = 0; row < 64; ++row) {
+            for (uint16_t panel = 0; panel < 8; ++panel) {
+                RegTensor<float> value;
+                const uint32_t src = static_cast<uint32_t>(row) * kDim + panel * 16;
+                const uint32_t dst = panel * (64 * 16) + static_cast<uint32_t>(row) * 16;
+                LoadAlign(value, nAddr + src);
+                StoreAlign(zAddr + dst, value, m16);
+            }
+        }
+    }
+}
+
+__aicore__ inline void F32PanelsToNd(LocalTensor<float> nd,
+                                     LocalTensor<float> nz)
+{
+    __ubuf__ float *nAddr = reinterpret_cast<__ubuf__ float *>(nd.GetPhyAddr());
+    __ubuf__ float *zAddr = reinterpret_cast<__ubuf__ float *>(nz.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        uint32_t n16 = 16;
+        MaskReg m16 = UpdateMask<float>(n16);
+        for (uint16_t row = 0; row < 64; ++row) {
+            for (uint16_t panel = 0; panel < 8; ++panel) {
+                RegTensor<float> value;
+                const uint32_t src = panel * (64 * 16) + static_cast<uint32_t>(row) * 16;
+                const uint32_t dst = static_cast<uint32_t>(row) * kDim + panel * 16;
+                LoadAlign(value, zAddr + src);
+                StoreAlign(nAddr + dst, value, m16);
+            }
         }
     }
 }
@@ -510,29 +634,6 @@ __aicore__ inline void StateMirrorVF(LocalTensor<float> &state,
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
             LoadAlign(v0, s + offset);
             LoadAlign(v1, s + offset + 64);
-            StoreBf16(b + offset, v0, all);
-            StoreBf16(b + offset + 64, v1, all);
-        }
-    }
-}
-
-__aicore__ inline void StateWidenVF(LocalTensor<bfloat16_t> &input,
-                                    LocalTensor<float> &state,
-                                    LocalTensor<bfloat16_t> &stateBf)
-{
-    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(input.GetPhyAddr());
-    __ubuf__ float *s = reinterpret_cast<__ubuf__ float *>(state.GetPhyAddr());
-    __ubuf__ bfloat16_t *b = reinterpret_cast<__ubuf__ bfloat16_t *>(stateBf.GetPhyAddr());
-    __VEC_SCOPE__
-    {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> v0, v1;
-        for (uint16_t row = 0; row < 64; ++row) {
-            const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadBf16(v0, src + offset, all);
-            LoadBf16(v1, src + offset + 64, all);
-            StoreAlign(s + offset, v0, all);
-            StoreAlign(s + offset + 64, v1, all);
             StoreBf16(b + offset, v0, all);
             StoreBf16(b + offset + 64, v1, all);
         }

@@ -10,6 +10,7 @@
 namespace GdnChunk64Sparse {
 
 constexpr FixpipeConfig kSparseFixUb = {CO2Layout::ROW_MAJOR, true};
+constexpr FixpipeConfig kSparseFixUbNz = {CO2Layout::NZ, true};
 
 __aicore__ inline void LoadA(LocalTensor<bfloat16_t> l0, LocalTensor<bfloat16_t> l1,
                              int32_t m, int32_t k, bool transpose)
@@ -139,6 +140,23 @@ __aicore__ inline void FixF32Halves(LocalTensor<float> ub, LocalTensor<float> l0
     Fixpipe<float, float, kSparseFixUb>(ub, l0C, p);
     p.subBlockId = true;
     Fixpipe<float, float, kSparseFixUb>(ub, l0C[(fullM / 2) * 16], p);
+}
+
+__aicore__ inline void FixF32NzHalves(LocalTensor<float> ub, LocalTensor<float> l0C,
+                                      uint32_t fullM, uint32_t n)
+{
+    FixpipeParamsArch3510<CO2Layout::NZ> p{};
+    p.nSize = static_cast<uint16_t>(n);
+    p.mSize = static_cast<uint16_t>(fullM / 2);
+    p.srcStride = static_cast<uint16_t>(fullM);
+    p.dstStride = (fullM / 2) * 16;
+    p.quantPre = QuantMode_t::NoQuant;
+    p.dualDstCtl = 0;
+    p.isChannelSplit = false;
+    p.subBlockId = false;
+    Fixpipe<float, float, kSparseFixUbNz>(ub, l0C, p);
+    p.subBlockId = true;
+    Fixpipe<float, float, kSparseFixUbNz>(ub, l0C[(fullM / 2) * 16], p);
 }
 
 __aicore__ inline void FixB16Halves(LocalTensor<bfloat16_t> ub,
