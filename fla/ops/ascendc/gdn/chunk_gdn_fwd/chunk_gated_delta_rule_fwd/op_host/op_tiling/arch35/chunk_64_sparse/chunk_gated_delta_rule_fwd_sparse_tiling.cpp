@@ -265,17 +265,17 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         }
     }
 
-    // A' is the only cross-role tensor not present in the public schema.
-    uint64_t aPrimeBytes = 0;
+    // FP32 X0/X1/L10 exchange between the two producer AIVs.
+    uint64_t inverseBytes = 0;
     uint64_t cursor = 0;
     uint64_t workspaceOffset = 0;
     OP_CHECK_IF(!CheckedMulU64(tileCount,
-                               static_cast<uint64_t>(GdnChunk64Sparse::kSparseAPrimeBytesPerTile),
-                               &aPrimeBytes) ||
-                    !PlaceSparseWorkspaceRegion(aPrimeBytes, 512, &cursor, &workspaceOffset) ||
+                               static_cast<uint64_t>(GdnChunk64Sparse::kSparseInverseBytesPerTile),
+                               &inverseBytes) ||
+                    !PlaceSparseWorkspaceRegion(inverseBytes, 512, &cursor, &workspaceOffset) ||
                     workspaceOffset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
                     cursor > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "A' workspace sizing overflows."),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Inverse workspace sizing overflows."),
                 return ge::GRAPH_FAILED);
     td.workspaceOffset = static_cast<int64_t>(workspaceOffset);
     td.workspaceBytes = static_cast<int64_t>(cursor);
@@ -297,9 +297,9 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     context->SetBlockDim(td.launchGroups);
     context->SetScheduleMode(1);
     OP_LOGD("ChunkGatedDeltaRuleFwd",
-            "Sparse key64: B=%ld Hk=%ld Hv=%ld T=%ld chains=%u maxChunks=%u groups=%u A'=%llu.",
+            "Sparse key64: B=%ld Hk=%ld Hv=%ld T=%ld chains=%u maxChunks=%u groups=%u inverse=%llu.",
             batch, hk, hv, tokens, td.chainCount, td.maxChunks, td.launchGroups,
-            static_cast<unsigned long long>(aPrimeBytes));
+            static_cast<unsigned long long>(inverseBytes));
     return ge::GRAPH_SUCCESS;
 }
 } // namespace optiling

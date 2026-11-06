@@ -2,7 +2,7 @@
 
 ## Status
 
-Source-level two-group producer/consumer implementation. The public ACLNN ABI, stable Python signature and ten-element return tuple are unchanged. The internal OpDef adds Prepare inputs, intermediate outputs and attributes; host/device integration uses key 64. For eligible low-parallelism calls (`B*Hv <= AIC/2`), exactly `2*chainCount` MIX groups are launched. Producer groups compute coefficients, W/U and A'; consumer groups run H -> O one chunk behind, joined by one mode-0 all-AIV barrier per iteration. Calls above the bound use the same self-contained roles in group-serial mode. Neither path has Ascend build or device validation evidence yet, so the overlap must not be treated as proven.
+Source-level two-group producer/consumer implementation. The public ACLNN ABI, stable Python signature and ten-element return tuple are unchanged. The internal OpDef adds Prepare inputs, intermediate outputs and attributes; host/device integration uses key 64. For eligible low-parallelism calls (`B*Hv <= AIC/2`), exactly `2*chainCount` MIX groups are launched. Producer groups compute coefficients and W/U; consumer groups compute QK/A' and H/O two chunks behind. One mode-0 all-AIV barrier publishes each two-chunk batch. The producer inverse uses two FP32 diagonal solves on AIV0/AIV1 and one mode-1 exchange per chunk. Calls above the bound use the same self-contained roles in group-serial mode. The dual-AIV inverse change has no Ascend build, accuracy, synchronization or performance validation yet, so its benefit must not be treated as proven.
 
 ## Entry and selector
 

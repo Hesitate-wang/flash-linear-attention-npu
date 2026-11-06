@@ -11,9 +11,9 @@ namespace GdnChunk64Sparse {
 constexpr uint32_t kKiB = 1024;
 constexpr uint32_t kUbBudget = 208 * kKiB;
 
-// Producer UB, per AIV. Row-shaped tensors contain a 32-row band. KKT/L/A are
-// used by AIV0; reserving the same static map on both AIVs keeps addressing
-// trivial and stays well below the regbase budget.
+// Producer UB, per AIV. Row-shaped tensors contain a 32-row band. KKT/L/A hold
+// that AIV's diagonal inverse inputs and FP32 temporaries; the old QK region is
+// reused for peer X0/X1/L10 exchange.
 constexpr uint32_t kPUbQ = 0;
 constexpr uint32_t kPUbK = 8 * kKiB;
 constexpr uint32_t kPUbV = 16 * kKiB;

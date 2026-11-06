@@ -259,16 +259,17 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
     }
 }
 
-// A = (I + raw)^-1. L stores -raw, so forward substitution is simply
-// x[i] = e[i] + sum(t<i, L[i,t] * x[t]). No FP32 Cube/NZ conversion is needed.
+// Each AIV owns one 32x32 diagonal inverse. The lower band still has 64
+// columns; AIV1 additionally keeps a compact L10 copy at a[2048].
 template <bool UseExp2>
-__aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
-                                   LocalTensor<float> &lower,
-                                   LocalTensor<float> &a,
-                                   LocalTensor<float> &g,
-                                   LocalTensor<float> &beta,
-                                   LocalTensor<float> &energy,
-                                   bool useEnergyRatio)
+__aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
+                                           LocalTensor<float> &lower,
+                                           LocalTensor<float> &a,
+                                           LocalTensor<float> &g,
+                                           LocalTensor<float> &beta,
+                                           LocalTensor<float> &energy,
+                                           bool useEnergyRatio,
+                                           uint32_t firstRow)
 {
     __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
     __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
@@ -276,9 +277,11 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    const uint32_t diagonalCol = firstRow;
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg half = UpdateMask<float>(32);
         RegTensor<float> gJ, gI, bi, diff, gate, score, zero, clipLo, clipHi, expLo, expHi;
         Duplicate(zero, 0.0f, all);
         Duplicate(clipLo, -50.0f, all);
@@ -290,15 +293,16 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
         } else {
             LoadAlign(gJ, gAddr);
         }
-        for (uint16_t row = 0; row < 64; ++row) {
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + row);
+        for (uint16_t row = 0; row < 32; ++row) {
+            const uint32_t globalRow = firstRow + row;
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + globalRow);
             if (useEnergyRatio) {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + row);
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + globalRow);
                 Div(gate, gI, gJ, all);
                 Max(gate, gate, expLo, all);
                 Min(gate, gate, expHi, all);
             } else {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + row);
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
                 Sub(diff, gI, gJ, all);
                 Max(diff, diff, clipLo, all);
                 Min(diff, diff, clipHi, all);
@@ -311,26 +315,28 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, score, all);
-            uint32_t lowerCount = static_cast<uint32_t>(row);
-            MaskReg lowerMask = UpdateMask<float>(lowerCount);
+            MaskReg lowerMask = UpdateMask<float>(globalRow);
             Select(gate, gate, zero, lowerMask);
             StoreAlign(l + static_cast<uint32_t>(row) * 64, gate, all);
+            if (firstRow != 0) {
+                StoreAlign(x + 2048 + static_cast<uint32_t>(row) * 32, gate, half);
+            }
         }
     }
     PipeBarrier<PIPE_V>();
 #define SPARSE_SOLVE_PREV(dst, rr)                                                                                     \
     LoadAlign<float, LoadDist::DIST_BRC_B32>(coefficient,                                                             \
-        l + (base + (rr)) * 64 + col);                                                                                 \
+        l + (base + (rr)) * 64 + diagonalCol + col);                                                                    \
     MulAddDst(dst, previous, coefficient, all);
 #define SPARSE_SOLVE_LOCAL(dst, src, rr, cc)                                                                           \
     LoadAlign<float, LoadDist::DIST_BRC_B32>(coefficient,                                                             \
-        l + (base + (rr)) * 64 + base + (cc));                                                                         \
+        l + (base + (rr)) * 64 + diagonalCol + base + (cc));                                                            \
     MulAddDst(dst, src, coefficient, all);
-    for (uint16_t group = 0; group < 8; ++group) {
+    for (uint16_t group = 0; group < 4; ++group) {
         const uint32_t base = static_cast<uint32_t>(group) * 8;
         __VEC_SCOPE__
         {
-            MaskReg all = CreateMask<float, MaskPattern::ALL>();
+            MaskReg all = UpdateMask<float>(32);
             RegTensor<float> y0, y1, y2, y3, y4, y5, y6, y7;
             RegTensor<float> previous, coefficient, zero, one;
             RegTensor<int32_t> lanes;
@@ -355,7 +361,7 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 7), all);
             Select(y7, one, zero, diagonal);
             for (uint16_t col = 0; col < base; ++col) {
-                LoadAlign(previous, x + static_cast<uint32_t>(col) * 64);
+                LoadAlign(previous, x + static_cast<uint32_t>(col) * 32, all);
                 SPARSE_SOLVE_PREV(y0, 0)
                 SPARSE_SOLVE_PREV(y1, 1)
                 SPARSE_SOLVE_PREV(y2, 2)
@@ -393,19 +399,70 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             SPARSE_SOLVE_LOCAL(y7, y4, 7, 4)
             SPARSE_SOLVE_LOCAL(y7, y5, 7, 5)
             SPARSE_SOLVE_LOCAL(y7, y6, 7, 6)
-            StoreAlign(x + (base + 0) * 64, y0, all);
-            StoreAlign(x + (base + 1) * 64, y1, all);
-            StoreAlign(x + (base + 2) * 64, y2, all);
-            StoreAlign(x + (base + 3) * 64, y3, all);
-            StoreAlign(x + (base + 4) * 64, y4, all);
-            StoreAlign(x + (base + 5) * 64, y5, all);
-            StoreAlign(x + (base + 6) * 64, y6, all);
-            StoreAlign(x + (base + 7) * 64, y7, all);
+            StoreAlign(x + (base + 0) * 32, y0, all);
+            StoreAlign(x + (base + 1) * 32, y1, all);
+            StoreAlign(x + (base + 2) * 32, y2, all);
+            StoreAlign(x + (base + 3) * 32, y3, all);
+            StoreAlign(x + (base + 4) * 32, y4, all);
+            StoreAlign(x + (base + 5) * 32, y5, all);
+            StoreAlign(x + (base + 6) * 32, y6, all);
+            StoreAlign(x + (base + 7) * 32, y7, all);
         }
         PipeBarrier<PIPE_V>();
     }
 #undef SPARSE_SOLVE_PREV
 #undef SPARSE_SOLVE_LOCAL
+}
+
+// X10 = -X1 @ L10 @ X0. Each AIV evaluates sixteen rows in FP32:
+// first tmp = X1[rowBegin:rowBegin+16] @ L10, then -tmp @ X0.
+// a[0:1024] holds the local diagonal inverse, a[1024:1536] tmp,
+// a[1536:2048] X10, and AIV1's a[2048:3072] holds its local L10.
+__aicore__ inline void InverseCoupling16VF(LocalTensor<float> &a,
+                                           LocalTensor<float> &exchange,
+                                           uint32_t sub)
+{
+    __ubuf__ float *aAddr = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
+    __ubuf__ float *peer = reinterpret_cast<__ubuf__ float *>(exchange.GetPhyAddr());
+    __ubuf__ float *x0 = sub == 0 ? aAddr : peer;
+    __ubuf__ float *x1 = sub == 1 ? aAddr : peer;
+    __ubuf__ float *l10 = sub == 1 ? aAddr + 2048 : peer + 1024;
+    __ubuf__ float *tmp = aAddr + 1024;
+    __ubuf__ float *out = aAddr + 1536;
+    const uint32_t rowBegin = sub * 16;
+    __VEC_SCOPE__
+    {
+        MaskReg half = UpdateMask<float>(32);
+        RegTensor<float> acc, row, coefficient;
+        for (uint16_t r = 0; r < 16; ++r) {
+            Duplicate(acc, 0.0f, half);
+            for (uint16_t t = 0; t < 32; ++t) {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(
+                    coefficient, x1 + (rowBegin + r) * 32 + t);
+                LoadAlign(row, l10 + static_cast<uint32_t>(t) * 32, half);
+                MulAddDst(acc, row, coefficient, half);
+            }
+            StoreAlign(tmp + static_cast<uint32_t>(r) * 32, acc, half);
+        }
+    }
+    PipeBarrier<PIPE_V>();
+    __VEC_SCOPE__
+    {
+        MaskReg half = UpdateMask<float>(32);
+        RegTensor<float> acc, row, coefficient;
+        for (uint16_t r = 0; r < 16; ++r) {
+            Duplicate(acc, 0.0f, half);
+            for (uint16_t t = 0; t < 32; ++t) {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(
+                    coefficient, tmp + static_cast<uint32_t>(r) * 32 + t);
+                LoadAlign(row, x0 + static_cast<uint32_t>(t) * 32, half);
+                MulAddDst(acc, row, coefficient, half);
+            }
+            Muls(acc, acc, -1.0f, half);
+            StoreAlign(out + static_cast<uint32_t>(r) * 32, acc, half);
+        }
+    }
+    PipeBarrier<PIPE_V>();
 }
 
 template <bool UseExp2>

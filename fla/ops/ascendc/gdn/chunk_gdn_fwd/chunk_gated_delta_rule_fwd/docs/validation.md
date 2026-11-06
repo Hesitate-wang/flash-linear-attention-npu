@@ -2,9 +2,9 @@
 
 ## Current status
 
-The chunk64 directory was redesigned and implemented from scratch. It uses a two-group producer/consumer pipeline, an FP32 register triangular solve, producer-side A', four consumer GEMMs, and a dedicated A' workspace. It does not reuse the former sparse implementation or its FP32 Cube solve.
+The chunk64 directory uses a two-group producer/consumer pipeline, consumer-side QK/A', and producer-side W/U. The current performance candidate replaces the single-AIV0 full 64x64 inverse with two independent FP32 32x32 diagonal solves on AIV0/AIV1, followed by two FP32 sixteen-row coupling tasks and a 12 KiB per-tile exchange workspace. The public ABI and BF16 Cube contraction path are unchanged.
 
-The development host is macOS without `ccec`, an Ascend toolkit, or a visible NPU. Ascend compilation, device numerical correctness, synchronization stress, MSS and performance therefore remain unverified. No performance improvement is claimed without device measurements.
+The development host is macOS without `ccec`, an Ascend toolkit, or a visible NPU. Ascend compilation, device numerical correctness, synchronization stress, MSS and performance therefore remain unverified. The dual-AIV inverse is not yet claimed to improve performance.
 
 ## Checks run in this session
 
@@ -16,6 +16,7 @@ The development host is macOS without `ccec`, an Ascend toolkit, or a visible NP
 | Source whitespace | `git diff --check` | Passed |
 | Include boundary | Inspected all `chunk_64_sparse` includes | Only Ascend SDK headers and files inside this operator |
 | 64x64 inverse | NumPy forward substitution versus `inv(I+raw)` | Passed at FP64 tolerance |
+| Dual-AIV blocked inverse | 800 randomized FP64 matrices: `X0/X1` diagonal inverses plus `-(X1@L10)@X0` versus full inverse | Passed; max absolute error `4.441e-16`; does not validate Ascend instruction behavior |
 | 64-element scan | Six-stage snapshot scan versus `cumsum` | Passed at FP64 tolerance |
 | Full one-chunk dataflow | New W/U/A'/H/O equations versus token recurrence | Passed for H and O at FP64 tolerance |
 | Strongly negative gate regression | FP32 reciprocal path versus direct `E(g[i]-g[j])`; lightweight `--gate-scale 100` | Reciprocal path reproduced NaN; direct-difference path stayed finite |
@@ -27,10 +28,18 @@ The numerical checks validate the redesigned equations, not Ascend instruction b
 ## Resource checks
 
 - Producer UB map: 144 KiB per AIV; L1 map: 72 KiB.
-- Consumer UB map: 190 KiB per AIV; L1 map: 152 KiB.
+- Consumer UB map: 200 KiB per AIV; L1 map: 184 KiB.
 - Both UB maps have static assertions against the 208 KiB regbase budget.
-- A' workspace is exactly `totalChunks * Hv * 8192` bytes before system workspace, with checked host arithmetic.
-- Every ComputeMm has one Fixpipe and one ReleaseL0C. The launch primes and drains M_MTE1/FIX_M once.
+- Inverse exchange workspace is `totalChunks * Hv * 12288` bytes before system workspace, with checked host arithmetic. Each chunk writes 12 KiB and reads 12 KiB of FP32 X0/X1/L10 blocks.
+- Every independent ComputeMm has one Fixpipe and one ReleaseL0C. The launch primes and drains M_MTE1/FIX_M once.
+
+## Performance tracking
+
+| Model case | Round / status | Trigger or expected critical path | Candidate and single main variable | Accuracy | Performance before/after | Bottleneck change | Evidence or conclusion |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `(1,1,16384,128)`, BF16, chunk64, Ascend 950 | Baseline | Single AIV0 executes the full FP32 64x64 inverse | Current implementation | Device result supplied by user is not an accuracy report | 2400 us `Task Duration` / pending | Pending | Baseline value supplied by user; warm-up/sample protocol still needs to be frozen |
+| Same case | Dual-AIV inverse, pending measurement | Parallel X0/X1 solves; FP32 coupling and GM exchange may trade vector time against MTE/sync time | Only the inverse task mapping and its private workspace change | Pending | 2400 us / pending | Pending | Adopt only after existing accuracy gates pass and the same-case median improves beyond repeated-run variation |
+| `(1,14,16384,128)`, BF16, chunk32 | Reference only | Fourteen independent chains on fourteen MIX groups | Different kernel and workload | Not supplied | 850 us / not applicable | Not applicable | Not an equal-work baseline; use same-shape A/B for the chunk64 candidate |
 
 ## Required Ascend 950 validation
 
@@ -50,4 +59,4 @@ The numerical checks validate the redesigned equations, not Ascend instruction b
 - `sparse_sync.h`: mode-0 pipeline and mode-4 directional handshakes.
 - `sparse_memory.h`: UB/L1/L0 maps.
 - `sparse_fused_tiling.h`: minimal shared POD.
-- `op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp`: selector, exact launch width and A' workspace.
+- `op_host/op_tiling/arch35/chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.cpp`: selector, exact launch width and inverse exchange workspace.
