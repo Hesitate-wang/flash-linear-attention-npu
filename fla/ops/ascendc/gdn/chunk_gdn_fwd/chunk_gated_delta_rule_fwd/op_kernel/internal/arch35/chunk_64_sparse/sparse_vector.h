@@ -315,7 +315,8 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, score, all);
-            MaskReg lowerMask = UpdateMask<float>(globalRow);
+            uint32_t lowerCount = globalRow;
+            MaskReg lowerMask = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lowerMask);
             StoreAlign(l + static_cast<uint32_t>(row) * 64, gate, all);
             if (firstRow != 0) {
