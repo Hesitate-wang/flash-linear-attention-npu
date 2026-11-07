@@ -265,7 +265,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         }
     }
 
-    // FP32 X0/X1/L10 exchange between the two producer AIVs.
+    // FP32 X0/X1/L10 exchange plus the T Channel Split record.
     uint64_t inverseBytes = 0;
     uint64_t cursor = 0;
     uint64_t workspaceOffset = 0;

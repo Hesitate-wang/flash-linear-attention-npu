@@ -221,13 +221,13 @@ private:
 
         AivWait(kConsQk);
         if (td_.useExp2 != 0) {
-            APrimeBandVF<true>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
+            APrimeBandNzVF<true>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
         } else {
-            APrimeBandVF<false>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
+            APrimeBandNzVF<false>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
+        CopyNzToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
     }
 
     __aicore__ inline void RunAivAfterWu(int64_t)
@@ -245,17 +245,17 @@ private:
         const float gLast = ubG_.GetValue(lastIndex);
         const float lastEnergy = ubEnergy_.GetValue(lastIndex);
         if (td_.useExp2 != 0) {
-            VNewRightVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                              gLast, lastEnergy, gateRatioSafe_, firstRow);
+            VNewRightNzVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
+                                gLast, lastEnergy, gateRatioSafe_, firstRow);
         } else {
-            VNewRightVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                               gLast, lastEnergy, gateRatioSafe_, firstRow);
+            VNewRightNzVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
+                                 gLast, lastEnergy, gateRatioSafe_, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const int64_t token = window_.tokenStart + firstRow;
-        UploadNdToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kConsVn);
 
         if (td_.reserved == 4) {
@@ -320,12 +320,14 @@ private:
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(0);
+        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(1);
+        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
         WaitFlag<HardEvent::MTE2_V>(0);
 
         float aLog = 0.0f;
@@ -345,15 +347,23 @@ private:
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         gateRatioSafe_ = GateRatioSafe(ubG_, static_cast<uint32_t>(window_.rows));
+
+        WaitFlag<HardEvent::MTE2_V>(1);
         if (td_.useNorm != 0) {
             NormalizeRowsVF(ubQ_, ubQHat_, ubQRstd_);
-            NormalizeRowsVF(ubK_, ubKHat_, ubKRstd_);
         }
-        QExpVF(ubQHat_, ubOSB_, ubEnergy_, firstRow);
+        QExpNzVF(ubQHat_, ubOSB_, ubEnergy_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1QExp_, ubOSB_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1QExp_, ubOSB_, kHalfRows, kDim, kChunk, firstRow);
+
+        WaitFlag<HardEvent::MTE2_V>(2);
+        if (td_.useNorm != 0) {
+            NormalizeRowsVF(ubK_, ubKHat_, ubKRstd_);
+        }
+        SetFlag<HardEvent::V_MTE3>(1);
+        WaitFlag<HardEvent::V_MTE3>(1);
         UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1H_[chunk & 1], ubStateB_, kHalfDim, kDim, kDim,
                      sub_ * static_cast<uint32_t>(kHalfDim));
@@ -370,13 +380,16 @@ private:
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         CopyGmToUb(ubW_, gmW_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        CopyGmToUb(ubU_, gmU_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(0);
+        CopyGmToUb(ubU_, gmU_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(1);
         WaitFlag<HardEvent::MTE2_V>(0);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         UploadNdToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kConsW);
+        // W@H only needs W. Let AIC start while the independent U load retires.
+        WaitFlag<HardEvent::MTE2_V>(1);
     }
 
     __aicore__ inline void RunCubePrepare(int64_t)

@@ -36,6 +36,19 @@ __aicore__ inline void StoreBf16(__ubuf__ bfloat16_t *dst, RegTensor<float> &src
     StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(dst, packed, mask);
 }
 
+// Cast ZERO leaves each BF16 in the low half of a 32-bit lane. DeInterleave
+// packs those 64 values before the strided block store; DATA_BLOCK_COPY alone
+// does not perform DIST_PACK_B32 packing.
+__aicore__ inline void StoreBf16Nz64(__ubuf__ bfloat16_t *nz, uint32_t row,
+                                     RegTensor<float> &src, MaskReg all, MaskReg m64)
+{
+    RegTensor<bfloat16_t> packed, values, unused;
+    Cast<bfloat16_t, float, kSparseCastF32B16>(packed, src, all);
+    DeInterleave(values, unused, packed, packed);
+    StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
+        nz + row * 16, values, static_cast<uint32_t>(kHalfRows), m64);
+}
+
 __aicore__ inline void GenerateScanIndices(LocalTensor<uint32_t> &shift)
 {
     __ubuf__ uint32_t *dst = reinterpret_cast<__ubuf__ uint32_t *>(shift.GetPhyAddr());
@@ -525,20 +538,22 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
 }
 
 template <bool UseExp2>
-__aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
-                                    LocalTensor<bfloat16_t> &out,
-                                    LocalTensor<float> &g,
-                                    LocalTensor<float> &energy,
-                                    bool useEnergyRatio,
-                                    uint32_t firstRow)
+__aicore__ inline void APrimeBandNzVF(LocalTensor<float> &qk,
+                                      LocalTensor<bfloat16_t> &out,
+                                      LocalTensor<float> &g,
+                                      LocalTensor<float> &energy,
+                                      bool useEnergyRatio,
+                                      uint32_t firstRow)
 {
     __ubuf__ float *score = reinterpret_cast<__ubuf__ float *>(qk.GetPhyAddr());
-    __ubuf__ bfloat16_t *dst = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t n64 = 64;
+        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
         RegTensor<float> gJ, gI, diff, gate, raw, zero;
         Duplicate(zero, 0.0f, all);
         if (useEnergyRatio) {
@@ -564,45 +579,45 @@ __aicore__ inline void APrimeBandVF(LocalTensor<float> &qk,
             uint32_t lowerCount = globalRow + 1U;
             MaskReg lower = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lower);
-            StoreBf16(dst + static_cast<uint32_t>(row) * 64, gate, all);
+            StoreBf16Nz64(nz, row, gate, all, m64);
         }
     }
 }
 
-__aicore__ inline void QExpVF(LocalTensor<bfloat16_t> &q,
-                              LocalTensor<bfloat16_t> &out,
-                              LocalTensor<float> &energy,
-                              uint32_t firstRow)
+__aicore__ inline void QExpNzVF(LocalTensor<bfloat16_t> &q,
+                                LocalTensor<bfloat16_t> &out,
+                                LocalTensor<float> &energy,
+                                uint32_t firstRow)
 {
     __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(q.GetPhyAddr());
-    __ubuf__ bfloat16_t *dst = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
     __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> x0, x1, scale;
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> even, odd, scale;
         for (uint16_t row = 0; row < 32; ++row) {
-            const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadBf16(x0, src + offset, all);
-            LoadBf16(x1, src + offset + 64, all);
+            GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
-            Mul(x0, x0, scale, all);
-            Mul(x1, x1, scale, all);
-            StoreBf16(dst + offset, x0, all);
-            StoreBf16(dst + offset + 64, x1, all);
+            Mul(even, even, scale, all);
+            Mul(odd, odd, scale, all);
+            GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
         }
     }
 }
 
 template <bool UseExp2>
-__aicore__ inline void VNewRightVF(LocalTensor<float> &p,
-                                   LocalTensor<bfloat16_t> &u,
-                                   LocalTensor<bfloat16_t> &vNew,
-                                   LocalTensor<bfloat16_t> &right,
-                                   LocalTensor<float> &g,
-                                   LocalTensor<float> &energy,
-                                   float gLast, float lastEnergy,
-                                   bool useEnergyRatio, uint32_t firstRow)
+__aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
+                                     LocalTensor<bfloat16_t> &u,
+                                     LocalTensor<bfloat16_t> &vNew,
+                                     LocalTensor<bfloat16_t> &right,
+                                     LocalTensor<float> &g,
+                                     LocalTensor<float> &energy,
+                                     float gLast, float lastEnergy,
+                                     bool useEnergyRatio, uint32_t firstRow)
 {
     __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
     __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
@@ -613,18 +628,18 @@ __aicore__ inline void VNewRightVF(LocalTensor<float> &p,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
         RegTensor<float> p0, p1, u0, u1, scale, last, diff;
         Duplicate(last, useEnergyRatio ? lastEnergy : gLast, all);
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadAlign(p0, pAddr + offset);
-            LoadAlign(p1, pAddr + offset + 64);
-            LoadBf16(u0, uAddr + offset, all);
-            LoadBf16(u1, uAddr + offset + 64, all);
+            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(p0, p1, pAddr + offset);
+            GdnFwd32::LoadEvenOdd(uAddr + offset, u0, u1, m16);
             Sub(u0, u0, p0, all);
             Sub(u1, u1, p1, all);
-            StoreBf16(vAddr + offset, u0, all);
-            StoreBf16(vAddr + offset + 64, u1, all);
+            GdnFwd32::StoreNzEvenOdd(vAddr, row, u0, u1, m16, m128);
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, eAddr + firstRow + row);
                 Div(scale, last, scale, all);
@@ -638,8 +653,7 @@ __aicore__ inline void VNewRightVF(LocalTensor<float> &p,
             }
             Mul(u0, u0, scale, all);
             Mul(u1, u1, scale, all);
-            StoreBf16(rAddr + offset, u0, all);
-            StoreBf16(rAddr + offset + 64, u1, all);
+            GdnFwd32::StoreNzEvenOdd(rAddr, row, u0, u1, m16, m128);
         }
     }
 }

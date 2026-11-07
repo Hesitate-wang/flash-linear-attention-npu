@@ -323,15 +323,16 @@ private:
     {
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t record = tile * td_.valueHeads + loc_.hv;
-        const int64_t base = record * 3 * 1024;
+        const int64_t base = record * 4 * 1024;
         CopyGmNdToL1NzF32(l1InvX1_, gmInverse_[base + 1024]);
         CopyGmNdToL1NzF32(l1InvL10_, gmInverse_[base + 2048]);
         ComputeMmF32(l1InvX1_, l1InvL10_, l0Af_, l0Bf_, l0C0_);
-        FixF32L1(l1InvT_, l0C0_);
-        SetFlag<HardEvent::FIX_MTE1>(0);
-        WaitFlag<HardEvent::FIX_MTE1>(0);
+        FixF32GmNzCs(gmInverse_[base + 3072], l0C0_);
+        SetFlag<HardEvent::FIX_MTE2>(0);
+        WaitFlag<HardEvent::FIX_MTE2>(0);
         ReleaseL0C();
 
+        CopyGmNzToL1Fp32(l1InvT_, gmInverse_[base + 3072]);
         CopyGmNdToL1NzF32(l1InvX0_, gmInverse_[base]);
         ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
         FixB16L1(l1A_[32 * 16], l0C0_);

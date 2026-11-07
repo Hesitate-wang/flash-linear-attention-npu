@@ -165,8 +165,9 @@ __aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l
     WaitFlag<HardEvent::M_FIX>(0);
 }
 
-// Native FP32 32x32 NZ block: adjacent Z panels are 32*8 elements apart.
-__aicore__ inline void FixF32L1(LocalTensor<float> l1, LocalTensor<float> l0C)
+// F32 Channel Split converts L0C's 16x16 fractals into the C0=8 NZ
+// representation required by the next native FP32 GEMM. This path is GM-only.
+__aicore__ inline void FixF32GmNzCs(GlobalTensor<float> gm, LocalTensor<float> l0C)
 {
     FixpipeParamsArch3510<CO2Layout::NZ> p{};
     p.nSize = 32;
@@ -174,9 +175,16 @@ __aicore__ inline void FixF32L1(LocalTensor<float> l1, LocalTensor<float> l0C)
     p.srcStride = 32;
     p.dstStride = 32 * 8;
     p.quantPre = QuantMode_t::NoQuant;
-    p.isChannelSplit = false;
+    p.isChannelSplit = true;
     p.unitFlag = 0;
-    Fixpipe<float, float, kSparseFixL1>(l1, l0C, p);
+    Fixpipe<float, float, kSparseFixL1>(gm, l0C, p);
+}
+
+__aicore__ inline void CopyGmNzToL1Fp32(LocalTensor<float> l1, GlobalTensor<float> gm)
+{
+    DataCopy(l1, gm, DataCopyParams(1, 32 * 32 / 8, 0, 0));
+    SetFlag<HardEvent::MTE2_MTE1>(0);
+    WaitFlag<HardEvent::MTE2_MTE1>(0);
 }
 
 // The inverse A block is BF16 NZ inside a full 64-row L1 matrix.

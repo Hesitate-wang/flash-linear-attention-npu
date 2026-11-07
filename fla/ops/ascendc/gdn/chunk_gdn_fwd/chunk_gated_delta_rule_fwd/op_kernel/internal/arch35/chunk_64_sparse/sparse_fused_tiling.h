@@ -14,7 +14,7 @@ namespace GdnChunk64Sparse {
 constexpr uint32_t kSparseScheduleSerial = 0;
 constexpr uint32_t kSparseSchedulePipeline = 1;
 constexpr uint32_t kSparseBarrierFlagId = 7;
-constexpr uint32_t kSparseInverseBytesPerTile = 3 * 32 * 32 * sizeof(float);
+constexpr uint32_t kSparseInverseBytesPerTile = 4 * 32 * 32 * sizeof(float);
 
 struct FusedTilingData {
     int64_t batch;

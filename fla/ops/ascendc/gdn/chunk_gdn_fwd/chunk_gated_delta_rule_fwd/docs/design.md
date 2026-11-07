@@ -20,11 +20,11 @@ Producer, per chunk:
 
 Consumer, on the same chunk before and after the W/U rendezvous:
 
-1. Load Q/K and raw gate; recompute gate cumsum, energies and optional L2 normalization. Upload Q/K/QExp and the current BF16 state mirror to L1. W/U are not loaded in this phase.
-2. AIC computes `QK=Q@K^T`; both AIVs form their own `A'` row band from QK and gate energies.
+1. Load gate first, then issue the independent Q and K loads with separate MTE2-to-Vector flags. Gate transform/cumsum overlaps the Q/K transfers; Q normalization, QExp and Q/QExp L1 copies start after Q alone is ready, while K has its own later wait. QExp is stored directly in tight NZ. Q/K normalization and public q_hat/q_rstd retain their existing arithmetic and ND layout. The current BF16 state mirror is also uploaded to L1; W/U are not loaded in this phase.
+2. AIC computes `QK=Q@K^T`; both AIVs form their own `A'` row band from QK and gate energies and store it directly in tight NZ. The 64-lane FP32 result is cast with `RegLayout::ZERO`, packed in registers by `DeInterleave`, then written with `DATA_BLOCK_COPY` and a 32-DataBlock panel stride; `DATA_BLOCK_COPY` is not assumed to perform pack-store itself.
 3. Enter the per-chunk mode-0 rendezvous. The producer has completed the current chunk's W/U, so the consumer delays its W/U dependency until after QK/A'.
-4. Load W/U, upload W to L1 and publish it to AIC. U remains in UB for the vector epilogue; it is not copied to L1.
-5. AIC computes `P=W@H` and `O_s=Q@H`. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, then publishes both to L1.
+4. Issue W and U loads independently. Once W alone is ready, upload it to L1 and publish `kConsW`; AIC may start W@H while the AIV waits for U. U remains in UB for the vector epilogue and is not copied to L1.
+5. AIC computes `P=W@H` and `O_s=Q@H`. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, stores both directly in tight NZ, then publishes them to L1 with contiguous per-panel copies.
 6. AIC computes `D=K^T@right` (or `right^T@K` for stateVFirst) and `O_l=A'@v_new`.
 7. AIV writes `o=(E(g)*O_s+O_l)*scale`, updates the FP32 state with `H=E(g_last)*H+D`, and refreshes its BF16 cube mirror.
 8. After the current chunk's H/O work, the consumer asynchronously writes public q_hat/q_rstd in ND form. No wait is inserted before QK, W/U, the mode-0 barrier, or H/O. The following chunk's Prepare waits only for the previous GM reads to retire before reusing q_hat/q_rstd buffers, and the kernel drains the final writes at exit.
@@ -38,26 +38,26 @@ Pipeline mode launches exactly `2*chainCount` MIX groups, so there are no idle g
 Iteration `i`:
 
 - producer builds W/U for chunk `i` when it exists;
-- in parallel, consumer loads Q/K/g and builds QK/A' for the same chunk `i`;
+- in parallel, consumer loads gate/Q/K and builds QK/A' for the same chunk `i`; gate processing overlaps Q/K MTE2, and QExp/A' use direct NZ stores;
 - every launched AIV executes one mode-0 barrier, including short varlen chains;
-- after the barrier, the consumer loads W/U and runs H/O for chunk `i`, while the producer may start chunk `i+1`.
+- after the barrier, the consumer publishes W as soon as its own load and L1 copy complete, overlaps the independent U load with W@H, and runs H/O for chunk `i`, while the producer may start chunk `i+1`.
 
 The mode-0 Set uses PIPE_MTE3 and Wait blocks PIPE_MTE2. This publishes producer W/U before the consumer's post-QK W/U loads. AIC does not enter mode 0; its QK phase waits for the Q/K inputs through mode 4, and its W@H phase waits for a separate W-ready mode-4 flag after the barrier.
 
 Mode-4 flags are directional. AIV0/AIV1 use raw IDs 0..15. AIC waits IDs `id` and `id+16` for a two-AIV input and publishes to either AIV0 only or both AIVs as required.
 
-The inverse uses per-chunk mode-4 handshakes. AIV0 writes X0; AIV1 writes X1 and L10. After the PIPE_MTE3 publication, AIC reads all three FP32 blocks from GM to L1 and computes the first coupling GEMM. T is written directly from L0C to its L1 C0=8 NZ slot through `FixpipeL0CToL1`, followed by an explicit FIX_MTE1 barrier before the second GEMM's MTE1 LoadData. AIC then computes the second GEMM and publishes X10 through FIX. No UB staging, AIV format-conversion task, peer-AIV GM read, or mode-1 inverse rendezvous is used. MTE2_MTE1 covers the GM-to-L1 input path before the native FP32 GEMMs, FIX_MTE1 covers T between the two GEMMs, and the coupled flag closes the L1 lifetime.
+The inverse uses per-chunk mode-4 handshakes. AIV0 writes X0; AIV1 writes X1 and L10. After the PIPE_MTE3 publication, AIC reads all three FP32 blocks from GM to L1 and computes the first coupling GEMM. T is written to its per-tile GM slot with F32 Channel Split, which produces the C0=8 NZ representation required by the second native FP32 GEMM. FIX_MTE2 covers the GM write, the following contiguous GM-to-L1 copy is covered by MTE2_MTE1, and AIC then computes the second GEMM and publishes X10 through FIX. Direct L0C-to-L1 NZ2NZ and UB staging are not used: the former has the wrong fractal layout for this GEMM, while the latter is unnecessary overhead. No peer-AIV GM read or mode-1 inverse rendezvous is used.
 
 Above the low-parallelism bound, each group runs producer then consumer for whole chains. A mode-1 AIV rendezvous publishes the chain inside that group; no mode-0 barrier is used.
 
 ## 4. Inverse exchange workspace
 
-Host reserves `totalChunks * Hv * 3 * 32 * 32 * sizeof(float)` bytes, 512-byte aligned, in user workspace. Its tile index is:
+Host reserves `totalChunks * Hv * 4 * 32 * 32 * sizeof(float)` bytes, 512-byte aligned, in user workspace. Its tile index is:
 
 - dense: `(batch*chunksPerBatch + chunk)*Hv + hv`;
 - varlen: `(sequenceChunkPrefix + chunk)*Hv + hv`.
 
-Each tile contains three aligned 4 KiB FP32 blocks: X0, X1 and L10. AIC reads all 12 KiB from GM to L1 per chunk; there are no peer-AIV reads. T occupies a separate FP32 L1 slot and X10 is fixed directly into the BF16 A L1 block and, when requested, the public A output. The workspace is not an output and is not part of the public ABI.
+Each tile contains four aligned 4 KiB FP32 blocks: X0, X1, L10 and T. AIC reads X0/X1/L10 (12 KiB) and writes/reads T (4+4 KiB) per chunk; there are no peer-AIV reads. T uses GM Channel Split to produce the required C0=8 NZ layout. The workspace is not an output and is not part of the public ABI.
 
 The previous A' workspace is no longer reserved: QK/A' are recomputed in the consumer and never cross the role boundary.
 
@@ -78,7 +78,7 @@ State is split into contiguous 64-row halves. For `[K,V]`, each AIV owns 64 K ro
 
 ## 6. Output and HBM traffic
 
-Only cross-role data is written to HBM unconditionally: W/U, gate cumsum, and normalized q/k when L2Norm is enabled. These are public or consumer inputs and cannot remain producer-local. The inverse exchange writes 12 KiB and reads 12 KiB per chunk; T and the AIV peer traffic have been eliminated.
+Only cross-role data is written to HBM unconditionally: W/U, gate cumsum, and normalized q/k when L2Norm is enabled. These are public or consumer inputs and cannot remain producer-local. The inverse exchange writes 12 KiB and reads 12 KiB per chunk; GM Channel Split adds 8 KiB of T write/read traffic.
 
 Consumer-local `v_new` is uploaded directly from UB to L1 and is never written to GM. H is written only when `hOutOptional` is explicitly requested; A is written only when `aOutOptional` is explicitly requested. Otherwise their internal output slots contain rank-1 dummies and the corresponding stores are skipped. Public q_hat/k_hat/rstd and beta_eff retain the existing stable ABI behavior.
 
