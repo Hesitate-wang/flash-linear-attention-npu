@@ -11,38 +11,33 @@ namespace GdnChunk64Sparse {
 constexpr uint32_t kKiB = 1024;
 constexpr uint32_t kUbBudget = 208 * kKiB;
 
-// Producer UB, per AIV. Row-shaped tensors contain a 32-row band. KKT/L/A hold
-// that AIV's diagonal inverse inputs and FP32 temporaries. Q and its public
-// output are no longer produced here; kPUbQHat is reused only for public KHat ND.
-constexpr uint32_t kPUbQ = 0; // Unused after removing producer Q.
-constexpr uint32_t kPUbK = 8 * kKiB;
-constexpr uint32_t kPUbV = 16 * kKiB;
-constexpr uint32_t kPUbQHat = 24 * kKiB; // Independent 8 KiB public KHat ND buffer.
-constexpr uint32_t kPUbKHat = 32 * kKiB;
-constexpr uint32_t kPUbVb = 40 * kKiB;
-constexpr uint32_t kPUbKbg = 48 * kKiB;
-constexpr uint32_t kPUbW = 56 * kKiB;
-constexpr uint32_t kPUbU = 64 * kKiB;
-constexpr uint32_t kPUbQk = 72 * kKiB; // Unused after moving T to GM Channel Split.
-constexpr uint32_t kPUbKkt = 80 * kKiB;
-constexpr uint32_t kPUbL = 96 * kKiB;
-constexpr uint32_t kPUbA = 112 * kKiB;
-constexpr uint32_t kPUbABf = 128 * kKiB;
-constexpr uint32_t kPUbAPrime = 136 * kKiB; // Unused 4 KiB slot; not large enough for KHat ND.
-constexpr uint32_t kPUbGates = 140 * kKiB;
-constexpr uint32_t kPUbShift = 142 * kKiB;
-constexpr uint32_t kPUbEnd = 144 * kKiB;
+// Producer double-buffer layout, per AIV. Each slot owns all Vector inputs and
+// the KKT/Neumann input band. W/U no longer consume UB: AIC writes them to GM.
+constexpr uint32_t kPUbSlotBytes = 68 * kKiB;
+constexpr uint32_t kPUbK = 0;
+constexpr uint32_t kPUbV = 8 * kKiB;
+constexpr uint32_t kPUbKHat = 16 * kKiB;
+constexpr uint32_t kPUbPublic = 24 * kKiB;
+constexpr uint32_t kPUbVb = 32 * kKiB;
+constexpr uint32_t kPUbKbg = 40 * kKiB;
+constexpr uint32_t kPUbKkt = 48 * kKiB;
+constexpr uint32_t kPUbP = 56 * kKiB;
+constexpr uint32_t kPUbS = 60 * kKiB;
+constexpr uint32_t kPUbGates = 64 * kKiB;
+constexpr uint32_t kPUbShift = 2 * kPUbSlotBytes;
+constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;
 static_assert(kPUbEnd <= kUbBudget);
 
+// Two full producer slots. P/S are complete 64x64 BF16 matrices in L1; each
+// AIV writes one 32-row band. Neumann reuses the current slot throughout.
+constexpr uint32_t kPL1SlotBytes = 64 * kKiB;
 constexpr uint32_t kPL1K = 0;
-constexpr uint32_t kPL1InvX0 = 16 * kKiB;
-constexpr uint32_t kPL1InvX1 = 20 * kKiB;
-constexpr uint32_t kPL1InvL10 = 24 * kKiB;
-constexpr uint32_t kPL1InvT = 28 * kKiB;
-constexpr uint32_t kPL1Vb = 32 * kKiB;
-constexpr uint32_t kPL1Kbg = 48 * kKiB;
-constexpr uint32_t kPL1A = 64 * kKiB;
-constexpr uint32_t kPL1End = 72 * kKiB;
+constexpr uint32_t kPL1Vb = 16 * kKiB;
+constexpr uint32_t kPL1Kbg = 32 * kKiB;
+constexpr uint32_t kPL1P = 48 * kKiB;
+constexpr uint32_t kPL1S = 56 * kKiB;
+constexpr uint32_t kPL1Identity = 2 * kPL1SlotBytes;
+constexpr uint32_t kPL1End = kPL1Identity + 8 * kKiB;
 static_assert(kPL1End <= 512 * kKiB);
 
 // Consumer UB, per AIV.

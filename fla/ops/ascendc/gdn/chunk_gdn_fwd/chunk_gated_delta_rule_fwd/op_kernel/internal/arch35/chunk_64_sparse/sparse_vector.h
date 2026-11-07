@@ -537,6 +537,67 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
 #undef SPARSE_SOLVE_LOCAL
 }
 
+// Build the two full-chunk Neumann inputs for one AIV's 32-row band.
+// P is the strict-lower L in (I-L)^-1; S starts at I+L. The inverse itself is
+// evaluated entirely by full 64x64 Cube GEMMs in the producer.
+template <bool UseExp2>
+__aicore__ inline void BuildNeumannInputVF(LocalTensor<float> &kkt,
+                                           LocalTensor<bfloat16_t> &p,
+                                           LocalTensor<bfloat16_t> &s,
+                                           LocalTensor<float> &g,
+                                           LocalTensor<float> &beta,
+                                           LocalTensor<float> &energy,
+                                           bool useEnergyRatio,
+                                           uint32_t firstRow)
+{
+    __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
+    __ubuf__ bfloat16_t *pAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(p.GetPhyAddr());
+    __ubuf__ bfloat16_t *sAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(s.GetPhyAddr());
+    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
+    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<float> gJ, gI, bi, diff, gate, score, sum, zero, one;
+        RegTensor<int32_t> lanes;
+        Duplicate(zero, 0.0f, all);
+        Duplicate(one, 1.0f, all);
+        Arange<int32_t, IndexOrder::INCREASE_ORDER>(lanes, 0);
+        if (useEnergyRatio) {
+            LoadAlign(gJ, eAddr);
+        } else {
+            LoadAlign(gJ, gAddr);
+        }
+        for (uint16_t row = 0; row < 32; ++row) {
+            const uint32_t globalRow = firstRow + row;
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + globalRow);
+            if (useEnergyRatio) {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + globalRow);
+                Div(gate, gI, gJ, all);
+            } else {
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
+                Sub(diff, gI, gJ, all);
+                if constexpr (UseExp2) {
+                    Muls(diff, diff, kSparseLn2, all);
+                }
+                Exp(gate, diff, all);
+            }
+            Mul(gate, gate, bi, all);
+            Muls(gate, gate, -1.0f, all);
+            LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
+            Mul(gate, gate, score, all);
+            MaskReg lower = UpdateMask<float>(globalRow);
+            Select(gate, gate, zero, lower);
+            StoreBf16(pAddr + static_cast<uint32_t>(row) * 64, gate, all);
+            MaskReg diagonal;
+            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(globalRow), all);
+            Select(sum, one, gate, diagonal);
+            StoreBf16(sAddr + static_cast<uint32_t>(row) * 64, sum, all);
+        }
+    }
+}
+
 template <bool UseExp2>
 __aicore__ inline void APrimeBandNzVF(LocalTensor<float> &qk,
                                       LocalTensor<bfloat16_t> &out,

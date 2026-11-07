@@ -14,7 +14,6 @@ int main()
     static_assert(std::is_trivially_copyable<GdnChunk64Sparse::FusedTilingData>::value);
     static_assert(sizeof(GdnChunk64Sparse::FusedTilingData) % sizeof(uint64_t) == 0);
     static_assert(offsetof(GdnChunk64Sparse::FusedTilingData, batch) == 0);
-    static_assert(GdnChunk64Sparse::kSparseInverseBytesPerTile == 4 * 32 * 32 * sizeof(float));
     assert(IsChunkGatedDeltaRuleFwdSparseLowParallelism(1, 8, 16));
     assert(!IsChunkGatedDeltaRuleFwdSparseLowParallelism(1, 9, 16));
     assert(!IsChunkGatedDeltaRuleFwdSparseLowParallelism(0, 1, 16));

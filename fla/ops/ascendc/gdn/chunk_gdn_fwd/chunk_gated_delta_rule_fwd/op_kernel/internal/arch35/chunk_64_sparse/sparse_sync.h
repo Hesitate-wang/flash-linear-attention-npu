@@ -13,14 +13,14 @@ using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
 
-// Called once per chunk after the producer drains W/U and the consumer
-// finishes its independent QK/A' phase. PIPE_MTE3 publishes the producer GM
-// stores; PIPE_MTE2 blocks the consumer's subsequent W/U loads until ready.
-__aicore__ inline void PublishIteration()
+// AIC publishes W/U after the final L0C->GM Fixpipe. Mode 0 synchronizes the
+// AIC dimension; Consumer AIC uses the same barrier before releasing its AIVs.
+template <pipe_t WaitPipe>
+__aicore__ inline void PublishIterationAic()
 {
-    if ASCEND_IS_AIV {
-        CrossCoreSetFlag<0x0, PIPE_MTE3>(kSparseBarrierFlagId);
-        CrossCoreWaitFlag<0x0, PIPE_MTE2>(kSparseBarrierFlagId);
+    if ASCEND_IS_AIC {
+        CrossCoreSetFlag<0x0, PIPE_FIX>(kSparseBarrierFlagId);
+        CrossCoreWaitFlag<0x0, WaitPipe>(kSparseBarrierFlagId);
     }
 }
 

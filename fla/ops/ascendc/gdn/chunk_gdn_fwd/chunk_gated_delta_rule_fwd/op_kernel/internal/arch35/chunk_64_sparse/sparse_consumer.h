@@ -20,6 +20,7 @@ constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsQk = 6;
 constexpr uint16_t kConsW = 3;
+constexpr uint16_t kConsWuGmReady = 7;
 
 class ConsumerRole {
 public:
@@ -377,6 +378,9 @@ private:
 
     __aicore__ inline void LoadWu(uint32_t firstRow, uint32_t rows)
     {
+        if (td_.schedule == kSparseSchedulePipeline) {
+            AivWaitMte2(kConsWuGmReady);
+        }
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubW_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubU_, static_cast<bfloat16_t>(0), kHalfRows * kDim);

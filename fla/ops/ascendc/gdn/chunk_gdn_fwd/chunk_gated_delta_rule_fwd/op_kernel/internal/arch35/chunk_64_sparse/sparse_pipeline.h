@@ -18,13 +18,7 @@ __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData 
     ProducerRole role;
     role.Init(args, td);
     role.BeginChain(args, chain);
-    const int64_t chunks = role.ChunkCount();
-    for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-        if (iteration < chunks) {
-            role.RunChunk(iteration);
-        }
-        PublishIteration();
-    }
+    role.Run();
 }
 
 __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData &td,
@@ -34,15 +28,23 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     role.Init(args, td);
     role.BeginChain(args, chain);
     const int64_t chunks = role.ChunkCount();
-    for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-        if (iteration < chunks) {
-            role.RunPrepare(iteration);
+    if ASCEND_IS_AIV {
+        for (int64_t chunk = 0; chunk < chunks; ++chunk) {
+            role.RunChunk(chunk);
         }
-        // The producer has published this iteration's W/U. Delay the consumer's
-        // W/U dependency until after its independent QK/A' work.
-        PublishIteration();
-        if (iteration < chunks) {
-            role.RunAfterWu(iteration);
+    }
+    if ASCEND_IS_AIC {
+        for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
+            if (iteration < chunks) {
+                role.RunPrepare(iteration);
+            }
+            // Producer arrives after T@Kb/T@Vb and their GM Fixpipe. Once all
+            // AICs arrive, release this group's AIVs to load W/U from GM.
+            PublishIterationAic<PIPE_FIX>();
+            if (iteration < chunks) {
+                AicPublishToBoth(kConsWuGmReady);
+                role.RunAfterWu(iteration);
+            }
         }
     }
     role.EndChain();
@@ -58,13 +60,11 @@ __aicore__ inline void RunSerial(const PhaseArgs &args, const FusedTilingData &t
     for (uint32_t chain = group; chain < td.chainCount; chain += td.launchGroups) {
         producer.BeginChain(args, chain);
         const int64_t chunks = producer.ChunkCount();
+        producer.Run();
         if (chunks == 0) {
             consumer.BeginChain(args, chain);
             consumer.EndChain();
             continue;
-        }
-        for (int64_t chunk = 0; chunk < chunks; ++chunk) {
-            producer.RunChunk(chunk);
         }
         PublishChainInGroup();
         consumer.BeginChain(args, chain);
