@@ -54,6 +54,8 @@ Producer-specific mode-4 flags are:
 - `kProdInputs`: both Kbg/Vb halves are ready for W/U.
 - `kProdA`: the owner's diagonal A blocks are ready in L1.
 
+Ready flags are published before public g_cumsum/beta_eff/KHat/KRstd/A writes, so the MTE3 publication only covers data required by KKT/coupling/WU. Public writes retire on slot reuse or at kernel exit. K, V, gate and beta GM loads are issued back-to-back with independent MTE2 events and consumed in gate, K, V order. X1/L10 share one MTE2-to-MTE1 wait, and T/X0 share another.
+
 Serial mode does not use mode-0. AIC publishes `kProdW` only after the final chunk, and AIV waits it before the existing mode-1 whole-chain hand-off.
 
 ## 5. Memory and workspace

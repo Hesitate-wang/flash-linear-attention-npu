@@ -181,14 +181,31 @@ private:
             WaitFlag<HardEvent::MTE3_V>(0);
             outputLive_[slot] = false;
         }
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        if (rows < static_cast<uint32_t>(kHalfRows)) {
+            Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            Duplicate(ubV_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
+        }
         if (window_.rows < kChunk) {
             Duplicate(ubG_[slot], 0.0f, kChunk);
             Duplicate(ubBeta_[slot], 0.0f, kChunk);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                              td_.valueHeads, td_.tokens);
+        // Issue all independent GM loads once. Each consumer waits only its own input.
+        CopyGmToUb(ubK_[slot], gmK_,
+                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(1);
+        CopyGmToUb(ubV_[slot], gmV_,
+                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
         CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
         CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(0);
@@ -208,35 +225,13 @@ private:
         } else {
             CumsumEnergyVF<false>(ubG_[slot], ubEnergy_[slot], ubShift_);
         }
-        if (sub_ == 0) {
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
-            CopyUbToGm(gmGOut_, gateOffset, ubG_[slot], static_cast<uint32_t>(window_.rows));
-            if (td_.betaSigmoid != 0 && hasBetaEffOut_) {
-                CopyUbToGm(gmBetaEff_, gateOffset, ubBeta_[slot], static_cast<uint32_t>(window_.rows));
-            }
-            outputLive_[slot] = true;
-        }
     }
 
     __aicore__ inline void PrepareK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
-        const uint32_t rows = remaining <= 0 ? 0U
-            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubK_[slot], gmK_,
-                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(0);
-        WaitFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(1);
         if (td_.useNorm != 0) {
             NormalizeRowsNzVF<true, true>(ubK_[slot], ubKHat_[slot], ubPublicB16_[slot], ubKRstd_[slot]);
         } else {
@@ -246,6 +241,27 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1K_[slot], ubKHat_[slot], kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kProdK);
+    }
+
+    __aicore__ inline void PublishPublicInputs(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                                             td_.valueHeads, td_.tokens);
+        // All ready flags have been published. These writes no longer hold up KKT/WU.
+        if (sub_ == 0) {
+            CopyUbToGm(gmGOut_, gateOffset, ubG_[slot], static_cast<uint32_t>(window_.rows));
+            if (td_.betaSigmoid != 0 && hasBetaEffOut_) {
+                CopyUbToGm(gmBetaEff_, gateOffset, ubBeta_[slot], static_cast<uint32_t>(window_.rows));
+            }
+            outputLive_[slot] = true;
+        }
         if (td_.useNorm != 0) {
             const int64_t qkOut = OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
             const int64_t rstdOut = OffsetBht(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
@@ -259,20 +275,7 @@ private:
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
-        const uint32_t rows = remaining <= 0 ? 0U
-            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubV_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubV_[slot], gmV_,
-                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(0);
-        WaitFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(2);
         ScaleKbgNzVF(ubPublicB16_[slot], ubKbg_[slot], ubBeta_[slot], ubEnergy_[slot], firstRow);
         ScaleVbNzVF(ubV_[slot], ubVb_[slot], ubBeta_[slot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
@@ -280,6 +283,7 @@ private:
         CopyNzToL1(l1Vb_[slot], ubVb_[slot], kHalfRows, kDim, kChunk, firstRow);
         CopyNzToL1(l1Kbg_[slot], ubKbg_[slot], kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kProdInputs);
+        PublishPublicInputs(chunk);
     }
 
     __aicore__ inline void CopyInverseRows(GlobalTensor<float> dst, int64_t offset,
@@ -355,6 +359,7 @@ private:
         UploadNdToL1(l1A_, ubABf_[0], 32, 32, kChunk, 0, 0);
         UploadNdToL1(l1A_, ubZeroBf_, 32, 32, kChunk, 0, 32);
         UploadNdToL1(l1A_, ubABf_[1], 32, 32, kChunk, 32, 32);
+        AivPublish(kProdA);
         if (td_.outputA != 0) {
             const uint32_t topRows = static_cast<uint32_t>(
                 window_.rows < kHalfRows ? window_.rows : kHalfRows);
@@ -367,7 +372,6 @@ private:
             aLive_ = true;
             outputLive_[slot] = true;
         }
-        AivPublish(kProdA);
     }
 
     __aicore__ inline void ComputeCoupling(int64_t chunk)
@@ -375,16 +379,18 @@ private:
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t record = tile * td_.valueHeads + loc_.hv;
         const int64_t base = record * 4 * 1024;
-        CopyGmNdToL1NzF32(l1InvX1_, gmInverse_[base + 1024]);
-        CopyGmNdToL1NzF32(l1InvL10_, gmInverse_[base + 2048]);
+        CopyGmNdToL1NzF32NoWait(l1InvX1_, gmInverse_[base + 1024]);
+        CopyGmNdToL1NzF32NoWait(l1InvL10_, gmInverse_[base + 2048]);
+        WaitGmToL1Fp32();
         ComputeMmF32(l1InvX1_, l1InvL10_, l0Af_, l0Bf_, l0C0_);
         FixF32GmNzCs(gmInverse_[base + 3072], l0C0_);
         SetFlag<HardEvent::FIX_MTE2>(0);
         WaitFlag<HardEvent::FIX_MTE2>(0);
         ReleaseL0C();
 
-        CopyGmNzToL1Fp32(l1InvT_, gmInverse_[base + 3072]);
-        CopyGmNdToL1NzF32(l1InvX0_, gmInverse_[base]);
+        CopyGmNzToL1Fp32NoWait(l1InvT_, gmInverse_[base + 3072]);
+        CopyGmNdToL1NzF32NoWait(l1InvX0_, gmInverse_[base]);
+        WaitGmToL1Fp32();
         ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
         FixB16L1(l1A_[32 * 16], l0C0_);
         if (td_.outputA != 0) {

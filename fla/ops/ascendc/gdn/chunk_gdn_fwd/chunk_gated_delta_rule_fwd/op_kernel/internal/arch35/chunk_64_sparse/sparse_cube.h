@@ -111,7 +111,7 @@ __aicore__ inline void ReleaseL0C()
 }
 
 // Native FP32 32x32 blocks use C0=8 and two fractals per side.
-__aicore__ inline void CopyGmNdToL1NzF32(LocalTensor<float> l1, GlobalTensor<float> gm)
+__aicore__ inline void CopyGmNdToL1NzF32NoWait(LocalTensor<float> l1, GlobalTensor<float> gm)
 {
     Nd2NzParams p{};
     p.ndNum = 1;
@@ -123,8 +123,18 @@ __aicore__ inline void CopyGmNdToL1NzF32(LocalTensor<float> l1, GlobalTensor<flo
     p.dstNzNStride = 1;
     p.dstNzMatrixStride = 0;
     DataCopy(l1, gm, p);
+}
+
+__aicore__ inline void WaitGmToL1Fp32()
+{
     SetFlag<HardEvent::MTE2_MTE1>(0);
     WaitFlag<HardEvent::MTE2_MTE1>(0);
+}
+
+__aicore__ inline void CopyGmNdToL1NzF32(LocalTensor<float> l1, GlobalTensor<float> gm)
+{
+    CopyGmNdToL1NzF32NoWait(l1, gm);
+    WaitGmToL1Fp32();
 }
 
 __aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l1B,
@@ -178,11 +188,15 @@ __aicore__ inline void FixF32GmNzCs(GlobalTensor<float> gm, LocalTensor<float> l
     Fixpipe<float, float, kSparseFixL1>(gm, l0C, p);
 }
 
-__aicore__ inline void CopyGmNzToL1Fp32(LocalTensor<float> l1, GlobalTensor<float> gm)
+__aicore__ inline void CopyGmNzToL1Fp32NoWait(LocalTensor<float> l1, GlobalTensor<float> gm)
 {
     DataCopy(l1, gm, DataCopyParams(1, 32 * 32 / 8, 0, 0));
-    SetFlag<HardEvent::MTE2_MTE1>(0);
-    WaitFlag<HardEvent::MTE2_MTE1>(0);
+}
+
+__aicore__ inline void CopyGmNzToL1Fp32(LocalTensor<float> l1, GlobalTensor<float> gm)
+{
+    CopyGmNzToL1Fp32NoWait(l1, gm);
+    WaitGmToL1Fp32();
 }
 
 __aicore__ inline void FixB16L1(LocalTensor<bfloat16_t> l1, LocalTensor<float> l0C)
