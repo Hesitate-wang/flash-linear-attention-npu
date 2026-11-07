@@ -587,7 +587,8 @@ __aicore__ inline void BuildNeumannInputVF(LocalTensor<float> &kkt,
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, score, all);
-            MaskReg lower = UpdateMask<float>(globalRow);
+            uint32_t lowerCount = globalRow;
+            MaskReg lower = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lower);
             StoreBf16(pAddr + static_cast<uint32_t>(row) * 64, gate, all);
             MaskReg diagonal;
