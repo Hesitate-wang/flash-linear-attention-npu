@@ -60,6 +60,7 @@ int main()
     // The role barrier must stay clear of the stage-local 0..6 ids and of the
     // SyncAll window 11..14.
     static_assert(GdnChunk64Sparse::kSparseBarrierFlagId == 7);
+    static_assert((GdnChunk64Sparse::kSparseDebugNdVnRight & 0xFFU) == 0);
 
     ChunkGatedDeltaRuleFwdPipelinePlan pipe{};
     assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(2, 4, 130, 2, 6, false, 16, 512, &pipe));

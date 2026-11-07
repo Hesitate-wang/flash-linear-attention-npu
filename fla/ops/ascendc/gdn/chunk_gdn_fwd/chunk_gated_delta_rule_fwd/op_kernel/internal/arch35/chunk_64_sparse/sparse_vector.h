@@ -617,7 +617,8 @@ __aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
                                      LocalTensor<float> &g,
                                      LocalTensor<float> &energy,
                                      float gLast, float lastEnergy,
-                                     bool useEnergyRatio, uint32_t firstRow)
+                                     bool useEnergyRatio, uint32_t firstRow,
+                                     bool directNz)
 {
     __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
     __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
@@ -639,7 +640,11 @@ __aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
             GdnFwd32::LoadEvenOdd(uAddr + offset, u0, u1, m16);
             Sub(u0, u0, p0, all);
             Sub(u1, u1, p1, all);
-            GdnFwd32::StoreNzEvenOdd(vAddr, row, u0, u1, m16, m128);
+            if (directNz) {
+                GdnFwd32::StoreNzEvenOdd(vAddr, row, u0, u1, m16, m128);
+            } else {
+                StoreNdEvenOdd(vAddr, row, u0, u1, m16, m128);
+            }
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, eAddr + firstRow + row);
                 Div(scale, last, scale, all);
@@ -653,7 +658,11 @@ __aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
             }
             Mul(u0, u0, scale, all);
             Mul(u1, u1, scale, all);
-            GdnFwd32::StoreNzEvenOdd(rAddr, row, u0, u1, m16, m128);
+            if (directNz) {
+                GdnFwd32::StoreNzEvenOdd(rAddr, row, u0, u1, m16, m128);
+            } else {
+                StoreNdEvenOdd(rAddr, row, u0, u1, m16, m128);
+            }
         }
     }
 }

@@ -240,6 +240,9 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                   : (std::getenv("GDN_SPARSE_DEBUG_OL") != nullptr ? 2U
                   : (std::getenv("GDN_SPARSE_DEBUG_OS") != nullptr ? 3U
                   : (std::getenv("GDN_SPARSE_DEBUG_SCALARS") != nullptr ? 4U : 0U)));
+    if (std::getenv("GDN_SPARSE_DEBUG_ND_VNRIGHT") != nullptr) {
+        td.reserved |= GdnChunk64Sparse::kSparseDebugNdVnRight;
+    }
     const double *scale = attrs->GetAttrPointer<double>(2);
     td.scale = scale == nullptr ? 1.0f : static_cast<float>(*scale);
     const auto *initialDesc = context->GetOptionalInputDesc(7);

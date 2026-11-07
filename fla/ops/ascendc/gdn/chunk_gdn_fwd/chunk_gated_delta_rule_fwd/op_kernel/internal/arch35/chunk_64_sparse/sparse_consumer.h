@@ -244,18 +244,24 @@ private:
         const int64_t lastIndex = window_.rows - 1;
         const float gLast = ubG_.GetValue(lastIndex);
         const float lastEnergy = ubEnergy_.GetValue(lastIndex);
+        const bool directVnRight = (td_.reserved & kSparseDebugNdVnRight) == 0;
         if (td_.useExp2 != 0) {
             VNewRightNzVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                                gLast, lastEnergy, gateRatioSafe_, firstRow);
+                                gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight);
         } else {
             VNewRightNzVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                                 gLast, lastEnergy, gateRatioSafe_, firstRow);
+                                 gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const int64_t token = window_.tokenStart + firstRow;
-        CopyNzToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
-        CopyNzToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
+        if (directVnRight) {
+            CopyNzToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
+            CopyNzToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
+            UploadNdToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
+        }
         AivPublish(kConsVn);
 
         if (td_.reserved == 4) {
