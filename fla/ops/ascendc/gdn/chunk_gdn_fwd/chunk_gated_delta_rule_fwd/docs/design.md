@@ -12,7 +12,7 @@ For each `(sequence, value-head)` chain, two MIX groups execute a chunk-synchron
 
 Producer, per chunk:
 
-1. Two AIVs process three independent stages in order: K load/wait/normalize, Q load/wait/normalize, then V/gate/beta load/wait/transform. K normalization writes tight NZ directly in UB; after the K NZ copy reaches L1, `kProdK` releases AIC KKT while the Q and V/gate/beta stages continue. Public K/Q hats retain their required ND layout.
+1. Two AIVs first process only the inverse dependencies: K load/wait/normalize, then gate/beta load/wait/transform. K normalization writes tight NZ directly in UB; after the K NZ copy reaches L1, `kProdK` releases AIC KKT while gate/beta processing continues. Producer no longer loads or normalizes Q. Public KHat, V loading, and Vb/Kbg scaling are deferred until after `PublishInverse`, so they overlap the AIC coupling GEMMs. Public KHat retains ND and uses an independent buffer from the FP32 coupling temporary T.
 2. AIC computes `KKT=K@K^T` in parallel with the remaining AIV preparation, then sends the upper/lower 32-row bands to AIV0/AIV1 respectively. Vb and Kbg are also produced directly in NZ, so their L1 path is a contiguous copy rather than an ND-to-NZ panel transform.
 3. The two AIVs compute the diagonal inverses in FP32. For strictly-lower `L=-raw` and `M=I-L=[[M00,0],[-L10,M11]]`, AIV0 computes `X0=M00^-1` and AIV1 computes `X1=M11^-1` independently. AIC then evaluates `T=X1@L10` and `X10=T@X0` with two native FP32 32x32 GEMMs; all inverse arithmetic remains FP32 until the final BF16 cast.
 4. AIC computes `W=A@kbg` and `U=A@vb`. U reuses A already loaded in L0A by W.
@@ -27,6 +27,7 @@ Consumer, on the same chunk before and after the W/U rendezvous:
 5. AIC computes `P=W@H` and `O_s=Q@H`. AIV computes `v_new=U-P` and `right=E(g_last-g)*v_new`, then publishes both to L1.
 6. AIC computes `D=K^T@right` (or `right^T@K` for stateVFirst) and `O_l=A'@v_new`.
 7. AIV writes `o=(E(g)*O_s+O_l)*scale`, updates the FP32 state with `H=E(g_last)*H+D`, and refreshes its BF16 cube mirror.
+8. After the current chunk's H/O work, the consumer asynchronously writes public q_hat/q_rstd in ND form. No wait is inserted before QK, W/U, the mode-0 barrier, or H/O. The following chunk's Prepare waits only for the previous GM reads to retire before reusing q_hat/q_rstd buffers, and the kernel drains the final writes at exit.
 
 Per chain, the current main Cube MAC count is approximately 1.57M in producer and 4.19M in consumer. Consumer-side QK/A' is concurrent with producer work; only W/U cross the role boundary. The inverse merge adds two logical 32x32 matrix products, implemented by the two AIVs in FP32 rather than by extra BF16 Cube operations.
 
@@ -45,7 +46,7 @@ The mode-0 Set uses PIPE_MTE3 and Wait blocks PIPE_MTE2. This publishes producer
 
 Mode-4 flags are directional. AIV0/AIV1 use raw IDs 0..15. AIC waits IDs `id` and `id+16` for a two-AIV input and publishes to either AIV0 only or both AIVs as required.
 
-The inverse uses per-chunk mode-4 handshakes. AIV0 writes X0; AIV1 writes X1 and L10. After the PIPE_MTE3 publication, AIC reads all three FP32 blocks from GM to L1 and computes the first coupling GEMM. T is fixed to AIV0's UB in ND form and uploaded to L1 in C0=8 NZ form with four 8-column copies, then AIC computes the second GEMM and publishes X10 through FIX. No peer-AIV GM read or mode-1 inverse rendezvous is used. MTE2_MTE1 covers the GM-to-L1 input path before the native FP32 GEMMs, and the T-ready/coupled flags close the UB/L1 lifetimes.
+The inverse uses per-chunk mode-4 handshakes. AIV0 writes X0; AIV1 writes X1 and L10. After the PIPE_MTE3 publication, AIC reads all three FP32 blocks from GM to L1 and computes the first coupling GEMM. T is written directly from L0C to its L1 C0=8 NZ slot through `FixpipeL0CToL1`, followed by an explicit FIX_MTE1 barrier before the second GEMM's MTE1 LoadData. AIC then computes the second GEMM and publishes X10 through FIX. No UB staging, AIV format-conversion task, peer-AIV GM read, or mode-1 inverse rendezvous is used. MTE2_MTE1 covers the GM-to-L1 input path before the native FP32 GEMMs, FIX_MTE1 covers T between the two GEMMs, and the coupled flag closes the L1 lifetime.
 
 Above the low-parallelism bound, each group runs producer then consumer for whole chains. A mode-1 AIV rendezvous publishes the chain inside that group; no mode-0 barrier is used.
 

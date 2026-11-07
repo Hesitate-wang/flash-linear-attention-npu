@@ -202,10 +202,15 @@ __aicore__ inline void UploadNzStateToL1(LocalTensor<bfloat16_t> l1,
 
 __aicore__ inline void CopyNzToL1(LocalTensor<bfloat16_t> l1,
                                   LocalTensor<bfloat16_t> nz,
-                                  uint32_t rows, uint32_t cols)
+                                  uint32_t rows, uint32_t cols,
+                                  uint32_t totalRows, uint32_t rowOffset)
 {
-    const uint32_t bytes = rows * cols * sizeof(bfloat16_t);
-    DataCopy(l1, nz, DataCopyParams(1, static_cast<uint16_t>(bytes / 32), 0, 0));
+    const uint32_t panels = cols / 16;
+    const uint32_t panelBytes = rows * 16 * sizeof(bfloat16_t);
+    for (uint32_t panel = 0; panel < panels; ++panel) {
+        DataCopy(l1[panel * totalRows * 16 + rowOffset * 16], nz[panel * rows * 16],
+                 DataCopyParams(1, static_cast<uint16_t>(panelBytes / 32), 0, 0));
+    }
 }
 
 __aicore__ inline void UploadNdToL1(LocalTensor<bfloat16_t> l1,

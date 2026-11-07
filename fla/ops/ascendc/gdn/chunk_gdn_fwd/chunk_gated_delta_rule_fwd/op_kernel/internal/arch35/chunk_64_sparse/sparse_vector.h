@@ -215,7 +215,7 @@ __aicore__ inline void StoreNdEvenOdd(__ubuf__ bfloat16_t *dst, uint32_t row,
     Cast<bfloat16_t, float, GdnFwd32::kCastB322B16>(lo, even, m16);
     Cast<bfloat16_t, float, GdnFwd32::kCastB322B16Hi>(hi, odd, m16);
     Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)hi, m16);
-    StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(dst + row * 128, lo, 128, m128);
+    StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(dst + row * 128, lo, 1, m128);
 }
 
 template <bool Normalize, bool WriteNd = false>

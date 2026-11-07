@@ -12,23 +12,23 @@ constexpr uint32_t kKiB = 1024;
 constexpr uint32_t kUbBudget = 208 * kKiB;
 
 // Producer UB, per AIV. Row-shaped tensors contain a 32-row band. KKT/L/A hold
-// that AIV's diagonal inverse inputs and FP32 temporaries; the old QK region is
-// reused for peer X0/X1/L10 exchange.
-constexpr uint32_t kPUbQ = 0;
+// that AIV's diagonal inverse inputs and FP32 temporaries. Q and its public
+// output are no longer produced here; kPUbQHat is reused only for public KHat ND.
+constexpr uint32_t kPUbQ = 0; // Unused after removing producer Q.
 constexpr uint32_t kPUbK = 8 * kKiB;
 constexpr uint32_t kPUbV = 16 * kKiB;
-constexpr uint32_t kPUbQHat = 24 * kKiB;
+constexpr uint32_t kPUbQHat = 24 * kKiB; // Independent 8 KiB public KHat ND buffer.
 constexpr uint32_t kPUbKHat = 32 * kKiB;
 constexpr uint32_t kPUbVb = 40 * kKiB;
 constexpr uint32_t kPUbKbg = 48 * kKiB;
 constexpr uint32_t kPUbW = 56 * kKiB;
 constexpr uint32_t kPUbU = 64 * kKiB;
-constexpr uint32_t kPUbQk = 72 * kKiB;
+constexpr uint32_t kPUbQk = 72 * kKiB; // Unused after moving T to direct L0C-to-L1 Fixpipe.
 constexpr uint32_t kPUbKkt = 80 * kKiB;
 constexpr uint32_t kPUbL = 96 * kKiB;
 constexpr uint32_t kPUbA = 112 * kKiB;
 constexpr uint32_t kPUbABf = 128 * kKiB;
-constexpr uint32_t kPUbAPrime = 136 * kKiB;
+constexpr uint32_t kPUbAPrime = 136 * kKiB; // Unused 4 KiB slot; not large enough for KHat ND.
 constexpr uint32_t kPUbGates = 140 * kKiB;
 constexpr uint32_t kPUbShift = 142 * kKiB;
 constexpr uint32_t kPUbEnd = 144 * kKiB;

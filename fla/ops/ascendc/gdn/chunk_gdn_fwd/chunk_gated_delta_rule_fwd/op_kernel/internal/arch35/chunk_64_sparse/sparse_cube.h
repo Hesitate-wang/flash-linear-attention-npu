@@ -165,6 +165,20 @@ __aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l
     WaitFlag<HardEvent::M_FIX>(0);
 }
 
+// Native FP32 32x32 NZ block: adjacent Z panels are 32*8 elements apart.
+__aicore__ inline void FixF32L1(LocalTensor<float> l1, LocalTensor<float> l0C)
+{
+    FixpipeParamsArch3510<CO2Layout::NZ> p{};
+    p.nSize = 32;
+    p.mSize = 32;
+    p.srcStride = 32;
+    p.dstStride = 32 * 8;
+    p.quantPre = QuantMode_t::NoQuant;
+    p.isChannelSplit = false;
+    p.unitFlag = 0;
+    Fixpipe<float, float, kSparseFixL1>(l1, l0C, p);
+}
+
 // The inverse A block is BF16 NZ inside a full 64-row L1 matrix.
 __aicore__ inline void FixB16L1(LocalTensor<bfloat16_t> l1, LocalTensor<float> l0C)
 {

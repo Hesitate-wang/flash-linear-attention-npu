@@ -15,7 +15,6 @@ namespace GdnChunk64Sparse {
 
 constexpr uint16_t kProdInputs = 0;
 constexpr uint16_t kProdKkt = 1;
-constexpr uint16_t kProdT = 2;
 constexpr uint16_t kProdA = 3;
 constexpr uint16_t kProdW = 4;
 constexpr uint16_t kProdInverse = 5;
@@ -28,7 +27,6 @@ public:
     {
         td_ = td;
         sub_ = GetSubBlockIdx();
-        gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.q));
         gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
         gmV_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.v));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
@@ -47,9 +45,7 @@ public:
         gmInverse_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmGOut_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         if (td.useNorm != 0) {
-            gmQHat_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.qHat));
             gmKHat_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.kHat));
-            gmQRstd_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.qRstd));
             gmKRstd_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.kRstd));
         }
         if (td.outputA != 0) {
@@ -81,7 +77,7 @@ public:
     {
         window_ = ResolveWindow(loc_, chunk);
         if ASCEND_IS_AIV {
-            Prepare(chunk);
+            PrepareKGate(chunk);
             AivWait(kProdKkt);
             BuildA(chunk);
             AivPublish(kProdA);
@@ -97,25 +93,21 @@ private:
     __aicore__ inline void InitBuffers()
     {
         OnChipBuffer buf;
-        ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbQ);
         ubK_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbK);
         ubV_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbV);
-        ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbQHat);
         ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbKHat);
         ubVb_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbVb);
         ubKbg_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbKbg);
         ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbW);
         ubU_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbU);
         ubKkt_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbKkt);
-        ubPublicB16_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbQk);
-        ubT_ = ubPublicB16_.ReinterpretCast<float>();
+        ubPublicB16_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbQHat);
         ubL_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbL);
         ubA_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbA);
         ubABf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbABf);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbGates);
         ubEnergy_ = ubG_[64];
         ubBeta_ = ubG_[192];
-        ubQRstd_ = ubG_[256];
         ubKRstd_ = ubG_[288];
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kPUbShift);
 
@@ -131,21 +123,20 @@ private:
         l0A1_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank1);
         l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
         l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
+        l0Af_ = buf.GetBuffer<BufferType::ASCEND_L0A, float>(kL0Bank0);
+        l0Bf_ = buf.GetBuffer<BufferType::ASCEND_L0B, float>(kL0Bank0);
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
         l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
     }
 
-    __aicore__ inline void Prepare(int64_t chunk)
+    __aicore__ inline void PrepareKGate(int64_t)
     {
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (rows < static_cast<uint32_t>(kHalfRows)) {
-            if (td_.useNorm != 0) {
-                Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            }
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
@@ -159,10 +150,8 @@ private:
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                              td_.valueHeads, td_.tokens);
-        const int64_t qkOut = OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
-        const int64_t rstdOut = OffsetBht(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
 
-        // K: load -> wait -> normalize -> release KKT immediately.
+        // K is the only Cube input needed before inverse.
         CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(0);
         WaitFlag<HardEvent::MTE2_V>(0);
@@ -173,28 +162,11 @@ private:
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1K_[firstRow * 16], ubKHat_, kHalfRows, kDim);
+        CopyNzToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kProdK);
-        if (td_.useNorm != 0) {
-            CopyUbToGm(gmKHat_, qkOut, ubPublicB16_, elems);
-            CopyUbToGm(gmKRstd_, rstdOut, ubKRstd_, rows);
-        }
 
-        // Q: only the public normalized result is needed in producer. Its
-        // load and compute stay after the K stage, while AIC runs KKT.
-        if (td_.useNorm != 0) {
-            CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-            SetFlag<HardEvent::MTE2_V>(0);
-            WaitFlag<HardEvent::MTE2_V>(0);
-            NormalizeRowsVF(ubQ_, ubQHat_, ubQRstd_);
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
-            CopyUbToGm(gmQHat_, qkOut, ubQHat_, elems);
-            CopyUbToGm(gmQRstd_, rstdOut, ubQRstd_, rows);
-        }
-
-        // V/gate/beta: finish this load group before starting its compute.
-        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        // Gate/beta are the only remaining inputs of inverse. KKT overlaps
+        // this load/wait/compute stage while Q/V stay off the critical path.
         CopyGmToUb(ubG_, gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
         CopyGmToUb(ubBeta_, gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(0);
@@ -214,6 +186,29 @@ private:
         } else {
             CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
         }
+    }
+
+    __aicore__ inline void PrepareQvAfterInverse(int64_t)
+    {
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                                             td_.valueHeads, td_.tokens);
+        const int64_t qkOut = OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
+        const int64_t rstdOut = OffsetBht(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
+
+        if (td_.useNorm != 0) {
+            CopyUbToGm(gmKHat_, qkOut, ubPublicB16_, elems);
+            CopyUbToGm(gmKRstd_, rstdOut, ubKRstd_, rows);
+        }
+
+        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(0);
         ScaleKbgNzVF(ubPublicB16_, ubKbg_, ubBeta_, ubEnergy_, firstRow);
         ScaleVbNzVF(ubV_, ubVb_, ubBeta_, firstRow);
         if (sub_ == 0) {
@@ -224,8 +219,8 @@ private:
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1Vb_[firstRow * 16], ubVb_, kHalfRows, kDim);
-        CopyNzToL1(l1Kbg_[firstRow * 16], ubKbg_, kHalfRows, kDim);
+        CopyNzToL1(l1Vb_, ubVb_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1Kbg_, ubKbg_, kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kProdInputs);
     }
 
@@ -276,15 +271,6 @@ private:
         }
     }
 
-    __aicore__ inline void UploadCouplingT()
-    {
-        // FP32 ND 32x32 -> L1 NZ C0=8, four independent 8-column copies.
-        for (uint32_t fc = 0; fc < 4; ++fc) {
-            DataCopy(l1InvT_[fc * 8 * 32], ubT_[fc * 8],
-                     DataCopyParams(32, 1, 7, 0));
-        }
-    }
-
     __aicore__ inline void BuildA(int64_t chunk)
     {
         SetFlag<HardEvent::V_S>(1);
@@ -301,6 +287,7 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         PublishInverse(chunk);
+        PrepareQvAfterInverse(chunk);
 
         Cast(ubABf_, ubA_, RoundMode::CAST_RINT, 1024);
         if (sub_ == 0) {
@@ -317,11 +304,6 @@ private:
         if (td_.outputA != 0) {
             WritePublicA();
         }
-        AivWait(kProdT);
-        if (sub_ == 0) {
-            UploadCouplingT();
-        }
-        AivPublish(kProdT);
         AivWait(kProdCoupled);
     }
 
@@ -344,14 +326,14 @@ private:
         const int64_t base = record * 3 * 1024;
         CopyGmNdToL1NzF32(l1InvX1_, gmInverse_[base + 1024]);
         CopyGmNdToL1NzF32(l1InvL10_, gmInverse_[base + 2048]);
-        ComputeMmF32(l1InvX1_, l1InvL10_, l0A0_, l0B0_, l0C0_);
-        FixF32(ubT_, l0C0_, 32, 32);
+        ComputeMmF32(l1InvX1_, l1InvL10_, l0Af_, l0Bf_, l0C0_);
+        FixF32L1(l1InvT_, l0C0_);
+        SetFlag<HardEvent::FIX_MTE1>(0);
+        WaitFlag<HardEvent::FIX_MTE1>(0);
         ReleaseL0C();
-        AicPublishToBoth(kProdT);
 
         CopyGmNdToL1NzF32(l1InvX0_, gmInverse_[base]);
-        AicWaitBoth(kProdT);
-        ComputeMmF32(l1InvT_, l1InvX0_, l0A0_, l0B0_, l0C0_);
+        ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
         FixB16L1(l1A_[32 * 16], l0C0_);
         if (td_.outputA != 0) {
             const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
@@ -393,19 +375,20 @@ private:
     uint32_t sub_{0};
     bool hasBetaEffOut_{false};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmQHat_, gmKHat_, gmW_, gmU_, gmA_;
-    GlobalTensor<float> gmG_, gmBeta_, gmGOut_, gmBetaEff_, gmQRstd_, gmKRstd_, gmInverse_;
+    GlobalTensor<bfloat16_t> gmK_, gmV_, gmKHat_, gmW_, gmU_, gmA_;
+    GlobalTensor<float> gmG_, gmBeta_, gmGOut_, gmBetaEff_, gmKRstd_, gmInverse_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 
-    LocalTensor<bfloat16_t> ubQ_, ubK_, ubV_, ubQHat_, ubKHat_, ubVb_, ubKbg_, ubW_, ubU_;
+    LocalTensor<bfloat16_t> ubK_, ubV_, ubKHat_, ubVb_, ubKbg_, ubW_, ubU_;
     LocalTensor<bfloat16_t> ubABf_;
-    LocalTensor<float> ubKkt_, ubL_, ubA_, ubT_;
+    LocalTensor<float> ubKkt_, ubL_, ubA_;
     LocalTensor<bfloat16_t> ubPublicB16_;
-    LocalTensor<float> ubG_, ubEnergy_, ubBeta_, ubQRstd_, ubKRstd_;
+    LocalTensor<float> ubG_, ubEnergy_, ubBeta_, ubKRstd_;
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1K_, l1Vb_, l1Kbg_, l1A_;
     LocalTensor<float> l1InvX0_, l1InvX1_, l1InvL10_, l1InvT_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
+    LocalTensor<float> l0Af_, l0Bf_;
     LocalTensor<float> l0C0_, l0C2_, l0C3_;
 };
 
