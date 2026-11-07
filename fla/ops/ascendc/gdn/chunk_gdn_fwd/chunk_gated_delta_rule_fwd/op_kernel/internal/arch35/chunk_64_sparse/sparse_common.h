@@ -200,6 +200,14 @@ __aicore__ inline void UploadNzStateToL1(LocalTensor<bfloat16_t> l1,
     DataCopy(l1[rowOffset * 16], ub, DataCopyParams(8, 64, 0, 64));
 }
 
+__aicore__ inline void CopyNzToL1(LocalTensor<bfloat16_t> l1,
+                                  LocalTensor<bfloat16_t> nz,
+                                  uint32_t rows, uint32_t cols)
+{
+    const uint32_t bytes = rows * cols * sizeof(bfloat16_t);
+    DataCopy(l1, nz, DataCopyParams(1, static_cast<uint16_t>(bytes / 32), 0, 0));
+}
+
 __aicore__ inline void UploadNdToL1(LocalTensor<bfloat16_t> l1,
                                     LocalTensor<bfloat16_t> ub,
                                     uint32_t rows, uint32_t cols,

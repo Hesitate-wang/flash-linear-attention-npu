@@ -12,9 +12,9 @@ For each `(sequence, value-head)` chain, two MIX groups execute a chunk-synchron
 
 Producer, per chunk:
 
-1. Two AIVs load independent 32-row Q/K/V bands. They compute gate/beta transforms, a 64-element Sklansky prefix sum, exp/exp2 energies, optional L2 normalization, `vb=v*beta`, and `kbg=k_hat*beta*E(g)`.
-2. AIC computes `KKT=K@K^T` and sends the upper/lower 32-row bands to AIV0/AIV1 respectively.
-3. The two AIVs compute the inverse in FP32. For strictly-lower `L=-raw` and `M=I-L=[[M00,0],[-L10,M11]]`, AIV0 computes `X0=M00^-1` and AIV1 computes `X1=M11^-1` independently. Each then computes sixteen rows of `X10=X1@L10@X0`; all inverse arithmetic remains FP32 until the final BF16 cast.
+1. Two AIVs process three independent stages in order: K load/wait/normalize, Q load/wait/normalize, then V/gate/beta load/wait/transform. K normalization writes tight NZ directly in UB; after the K NZ copy reaches L1, `kProdK` releases AIC KKT while the Q and V/gate/beta stages continue. Public K/Q hats retain their required ND layout.
+2. AIC computes `KKT=K@K^T` in parallel with the remaining AIV preparation, then sends the upper/lower 32-row bands to AIV0/AIV1 respectively. Vb and Kbg are also produced directly in NZ, so their L1 path is a contiguous copy rather than an ND-to-NZ panel transform.
+3. The two AIVs compute the diagonal inverses in FP32. For strictly-lower `L=-raw` and `M=I-L=[[M00,0],[-L10,M11]]`, AIV0 computes `X0=M00^-1` and AIV1 computes `X1=M11^-1` independently. AIC then evaluates `T=X1@L10` and `X10=T@X0` with two native FP32 32x32 GEMMs; all inverse arithmetic remains FP32 until the final BF16 cast.
 4. AIC computes `W=A@kbg` and `U=A@vb`. U reuses A already loaded in L0A by W.
 5. W/U and requested Prepare outputs are published through GM.
 
@@ -45,7 +45,7 @@ The mode-0 Set uses PIPE_MTE3 and Wait blocks PIPE_MTE2. This publishes producer
 
 Mode-4 flags are directional. AIV0/AIV1 use raw IDs 0..15. AIC waits IDs `id` and `id+16` for a two-AIV input and publishes to either AIV0 only or both AIVs as required.
 
-The inverse uses one additional per-chunk mode-1 AIV rendezvous. AIV0 writes X0; AIV1 writes X1 and L10. The PIPE_MTE3 Set publishes these FP32 workspace blocks, and the PIPE_MTE2 Wait allows each AIV to read the blocks required for its coupling rows. The flag is consumed before the next chunk, so no credit leaks across iterations. A local V_MTE2 barrier prevents the next chunk's peer-buffer load from overwriting data still read by the previous coupling task, and MTE2_V covers the current load before Vector use.
+The inverse uses per-chunk mode-4 handshakes. AIV0 writes X0; AIV1 writes X1 and L10. After the PIPE_MTE3 publication, AIC reads all three FP32 blocks from GM to L1 and computes the first coupling GEMM. T is fixed to AIV0's UB in ND form and uploaded to L1 in C0=8 NZ form with four 8-column copies, then AIC computes the second GEMM and publishes X10 through FIX. No peer-AIV GM read or mode-1 inverse rendezvous is used. MTE2_MTE1 covers the GM-to-L1 input path before the native FP32 GEMMs, and the T-ready/coupled flags close the UB/L1 lifetimes.
 
 Above the low-parallelism bound, each group runs producer then consumer for whole chains. A mode-1 AIV rendezvous publishes the chain inside that group; no mode-0 barrier is used.
 
@@ -56,7 +56,7 @@ Host reserves `totalChunks * Hv * 3 * 32 * 32 * sizeof(float)` bytes, 512-byte a
 - dense: `(batch*chunksPerBatch + chunk)*Hv + hv`;
 - varlen: `(sequenceChunkPrefix + chunk)*Hv + hv`.
 
-Each tile contains three aligned 4 KiB FP32 blocks: X0, X1 and L10. AIV0 reads X1/L10 (8 KiB), and AIV1 reads X0 (4 KiB); writes total 12 KiB and reads total 12 KiB per chunk. Blocks within a tile are disjoint, and different chains/chunks never share a tile. The workspace is not an output and is not part of the public ABI.
+Each tile contains three aligned 4 KiB FP32 blocks: X0, X1 and L10. AIC reads all 12 KiB from GM to L1 per chunk; there are no peer-AIV reads. T occupies a separate FP32 L1 slot and X10 is fixed directly into the BF16 A L1 block and, when requested, the public A output. The workspace is not an output and is not part of the public ABI.
 
 The previous A' workspace is no longer reserved: QK/A' are recomputed in the consumer and never cross the role boundary.
 
@@ -77,7 +77,7 @@ State is split into contiguous 64-row halves. For `[K,V]`, each AIV owns 64 K ro
 
 ## 6. Output and HBM traffic
 
-Only cross-role data is written to HBM unconditionally: W/U, gate cumsum, and normalized q/k when L2Norm is enabled. These are public or consumer inputs and cannot remain producer-local. The inverse exchange adds the 24 KiB per-chunk GM traffic described above.
+Only cross-role data is written to HBM unconditionally: W/U, gate cumsum, and normalized q/k when L2Norm is enabled. These are public or consumer inputs and cannot remain producer-local. The inverse exchange writes 12 KiB and reads 12 KiB per chunk; T and the AIV peer traffic have been eliminated.
 
 Consumer-local `v_new` is uploaded directly from UB to L1 and is never written to GM. H is written only when `hOutOptional` is explicitly requested; A is written only when `aOutOptional` is explicitly requested. Otherwise their internal output slots contain rank-1 dummies and the corresponding stores are skipped. Public q_hat/k_hat/rstd and beta_eff retain the existing stable ABI behavior.
 
@@ -85,7 +85,7 @@ Consumer-local `v_new` is uploaded directly from UB to L1 and is never written t
 
 - Gate softplus, beta sigmoid, L2 epsilon, exp/exp2 selection, scale and output casts follow the existing wrapper/reference semantics.
 - Prefix sum uses six register snapshot gather/add stages.
-- Each diagonal inverse preserves the FP32 forward-substitution order of the 32-row solver. The coupling block evaluates `X1@L10@X0` as `(X1@L10)@X0`, which is algebraically equivalent to the former full 64-row substitution for `(I-L)^-1` but has a different FP32 FMA association for X10. There is no BF16 quantization of X0/X1/L10 before the coupling computation.
+- Each diagonal inverse preserves the FP32 forward-substitution order of the 32-row solver. The coupling block evaluates `X1@L10@X0` as `(X1@L10)@X0` with native FP32 Cube GEMMs, which is algebraically equivalent to the former full 64-row substitution for `(I-L)^-1` but has a different FP32 FMA association for X10. There is no BF16 quantization of X0/X1/L10 before the coupling computation.
 - Lower/attention gates and `right` evaluate `E(g[i]-g[j])` directly when the reciprocal path is unsafe. They never form `1/E(g[j])` in that mode; this avoids `0*Inf` when a strongly negative cumulative gate underflows. A' includes the diagonal.
 - Recurrence state and vector epilogues remain FP32; A/W/U/A'/v_new/right/H cube inputs are BF16.
 

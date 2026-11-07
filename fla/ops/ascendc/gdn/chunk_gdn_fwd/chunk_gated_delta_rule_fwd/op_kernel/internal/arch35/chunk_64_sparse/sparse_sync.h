@@ -44,14 +44,6 @@ __aicore__ inline void AivWaitMte3(uint16_t id)
     CrossCoreWaitFlag<0x4, PIPE_MTE3>(id);
 }
 
-// Both producer AIVs publish disjoint FP32 inverse blocks, then read the
-// peer blocks from the same per-tile workspace record.
-__aicore__ inline void AivExchange(uint16_t id)
-{
-    CrossCoreSetFlag<0x1, PIPE_MTE3>(id);
-    CrossCoreWaitFlag<0x1, PIPE_MTE2>(id);
-}
-
 __aicore__ inline void AicRelayAiv0ToAiv1(uint16_t id)
 {
     CrossCoreWaitFlag<0x4, PIPE_MTE2>(id);

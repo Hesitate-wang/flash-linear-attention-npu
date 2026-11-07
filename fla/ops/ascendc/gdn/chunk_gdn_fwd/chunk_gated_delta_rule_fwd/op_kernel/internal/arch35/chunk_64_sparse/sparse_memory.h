@@ -35,7 +35,10 @@ constexpr uint32_t kPUbEnd = 144 * kKiB;
 static_assert(kPUbEnd <= kUbBudget);
 
 constexpr uint32_t kPL1K = 0;
-constexpr uint32_t kPL1Q = 16 * kKiB;
+constexpr uint32_t kPL1InvX0 = 16 * kKiB;
+constexpr uint32_t kPL1InvX1 = 20 * kKiB;
+constexpr uint32_t kPL1InvL10 = 24 * kKiB;
+constexpr uint32_t kPL1InvT = 28 * kKiB;
 constexpr uint32_t kPL1Vb = 32 * kKiB;
 constexpr uint32_t kPL1Kbg = 48 * kKiB;
 constexpr uint32_t kPL1A = 64 * kKiB;

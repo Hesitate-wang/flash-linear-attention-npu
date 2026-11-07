@@ -8,6 +8,7 @@
 #define GDN_CHUNK64_SPARSE_VECTOR_H
 
 #include "sparse_common.h"
+#include "../chunk_gated_delta_rule_fwd_chunk32/chunk_gated_delta_rule_fwd_32_vf.h"
 
 namespace GdnChunk64Sparse {
 using namespace AscendC::MicroAPI;
@@ -201,6 +202,114 @@ __aicore__ inline void NormalizeRowsVF(LocalTensor<bfloat16_t> &input,
             StoreBf16(dst + offset, x0, all);
             StoreBf16(dst + offset + 64, x1, all);
             StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, sum0, scalar);
+        }
+    }
+}
+
+// Store the same even/odd registers in the original ND row order.
+__aicore__ inline void StoreNdEvenOdd(__ubuf__ bfloat16_t *dst, uint32_t row,
+                                      RegTensor<float> &even, RegTensor<float> &odd,
+                                      MaskReg &m16, MaskReg &m128)
+{
+    RegTensor<bfloat16_t> lo, hi;
+    Cast<bfloat16_t, float, GdnFwd32::kCastB322B16>(lo, even, m16);
+    Cast<bfloat16_t, float, GdnFwd32::kCastB322B16Hi>(hi, odd, m16);
+    Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)hi, m16);
+    StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(dst + row * 128, lo, 128, m128);
+}
+
+template <bool Normalize, bool WriteNd = false>
+__aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
+                                         LocalTensor<bfloat16_t> &nzOutput,
+                                         LocalTensor<bfloat16_t> &ndOutput,
+                                         LocalTensor<float> &rstd)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(input.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(nzOutput.GetPhyAddr());
+    __ubuf__ bfloat16_t *nd = reinterpret_cast<__ubuf__ bfloat16_t *>(ndOutput.GetPhyAddr());
+    __ubuf__ float *norm = reinterpret_cast<__ubuf__ float *>(rstd.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg scalar = CreateMask<float, MaskPattern::VL1>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> even, odd, sum0, sum1, one, scale;
+        Duplicate(one, 1.0f, all);
+        for (uint16_t row = 0; row < 32; ++row) {
+            GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
+            if constexpr (Normalize) {
+                Mul(sum0, even, even, all);
+                Mul(sum1, odd, odd, all);
+                Add(sum0, sum0, sum1, all);
+                Reduce<Reg::ReduceType::SUM>(sum0, sum0, all);
+                Adds(sum0, sum0, kSparseEps, scalar);
+                Sqrt(sum0, sum0, scalar);
+                Div(sum0, one, sum0, scalar);
+                Duplicate(scale, sum0, all);
+                Mul(even, even, scale, all);
+                Mul(odd, odd, scale, all);
+                StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, sum0, scalar);
+            }
+            GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
+            if constexpr (WriteNd) {
+                StoreNdEvenOdd(nd, row, even, odd, m16, m128);
+            }
+        }
+    }
+}
+
+__aicore__ inline void ScaleVbNzVF(LocalTensor<bfloat16_t> &v,
+                                   LocalTensor<bfloat16_t> &out,
+                                   LocalTensor<float> &beta,
+                                   uint32_t firstRow)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(v.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> even, odd, scale;
+        for (uint16_t row = 0; row < 32; ++row) {
+            GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, b + firstRow + row);
+            Mul(even, even, scale, all);
+            Mul(odd, odd, scale, all);
+            GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
+        }
+    }
+}
+
+__aicore__ inline void ScaleKbgNzVF(LocalTensor<bfloat16_t> &k,
+                                    LocalTensor<bfloat16_t> &out,
+                                    LocalTensor<float> &beta,
+                                    LocalTensor<float> &energy,
+                                    uint32_t firstRow)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(k.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> even, odd, scale, be;
+        for (uint16_t row = 0; row < 32; ++row) {
+            GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(be, b + firstRow + row);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
+            Mul(scale, scale, be, all);
+            Mul(even, even, scale, all);
+            Mul(odd, odd, scale, all);
+            GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
         }
     }
 }
@@ -413,56 +522,6 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
     }
 #undef SPARSE_SOLVE_PREV
 #undef SPARSE_SOLVE_LOCAL
-}
-
-// X10 = X1 @ L10 @ X0. Each AIV evaluates sixteen rows in FP32:
-// first tmp = X1[rowBegin:rowBegin+16] @ L10, then tmp @ X0.
-// a[0:1024] holds the local diagonal inverse, a[1024:1536] tmp,
-// a[1536:2048] X10, and AIV1's a[2048:3072] holds its local L10.
-__aicore__ inline void InverseCoupling16VF(LocalTensor<float> &a,
-                                           LocalTensor<float> &exchange,
-                                           uint32_t sub)
-{
-    __ubuf__ float *aAddr = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
-    __ubuf__ float *peer = reinterpret_cast<__ubuf__ float *>(exchange.GetPhyAddr());
-    __ubuf__ float *x0 = sub == 0 ? aAddr : peer;
-    __ubuf__ float *x1 = sub == 1 ? aAddr : peer;
-    __ubuf__ float *l10 = sub == 1 ? aAddr + 2048 : peer + 1024;
-    __ubuf__ float *tmp = aAddr + 1024;
-    __ubuf__ float *out = aAddr + 1536;
-    const uint32_t rowBegin = sub * 16;
-    __VEC_SCOPE__
-    {
-        MaskReg half = CreateMask<float, MaskPattern::VL32>();
-        RegTensor<float> acc, row, coefficient;
-        for (uint16_t r = 0; r < 16; ++r) {
-            Duplicate(acc, 0.0f, half);
-            for (uint16_t t = 0; t < 32; ++t) {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(
-                    coefficient, x1 + (rowBegin + r) * 32 + t);
-                LoadAlign(row, l10 + static_cast<uint32_t>(t) * 32);
-                MulAddDst(acc, row, coefficient, half);
-            }
-            StoreAlign(tmp + static_cast<uint32_t>(r) * 32, acc, half);
-        }
-    }
-    PipeBarrier<PIPE_V>();
-    __VEC_SCOPE__
-    {
-        MaskReg half = CreateMask<float, MaskPattern::VL32>();
-        RegTensor<float> acc, row, coefficient;
-        for (uint16_t r = 0; r < 16; ++r) {
-            Duplicate(acc, 0.0f, half);
-            for (uint16_t t = 0; t < 32; ++t) {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(
-                    coefficient, tmp + static_cast<uint32_t>(r) * 32 + t);
-                LoadAlign(row, x0 + static_cast<uint32_t>(t) * 32);
-                MulAddDst(acc, row, coefficient, half);
-            }
-            StoreAlign(out + static_cast<uint32_t>(r) * 32, acc, half);
-        }
-    }
-    PipeBarrier<PIPE_V>();
 }
 
 template <bool UseExp2>

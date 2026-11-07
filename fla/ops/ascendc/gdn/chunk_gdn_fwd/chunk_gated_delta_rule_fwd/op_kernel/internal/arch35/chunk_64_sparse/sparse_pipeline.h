@@ -78,6 +78,7 @@ __aicore__ inline void RunSerial(const PhaseArgs &args, const FusedTilingData &t
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
 {
     if ASCEND_IS_AIC {
+        SetHF32Mode(false);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::FIX_M>(0);
     }

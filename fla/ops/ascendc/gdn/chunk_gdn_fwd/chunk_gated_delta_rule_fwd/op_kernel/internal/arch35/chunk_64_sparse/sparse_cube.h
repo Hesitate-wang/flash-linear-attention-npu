@@ -11,6 +11,8 @@ namespace GdnChunk64Sparse {
 
 constexpr FixpipeConfig kSparseFixUb = {CO2Layout::ROW_MAJOR, true};
 constexpr FixpipeConfig kSparseFixUbNz = {CO2Layout::NZ, true};
+constexpr FixpipeConfig kSparseFixL1 = {CO2Layout::NZ, false};
+constexpr FixpipeConfig kSparseFixGm = {CO2Layout::ROW_MAJOR, false};
 
 __aicore__ inline void LoadA(LocalTensor<bfloat16_t> l0, LocalTensor<bfloat16_t> l1,
                              int32_t m, int32_t k, bool transpose)
@@ -106,6 +108,97 @@ __aicore__ inline void ComputeMmReuseA(LocalTensor<bfloat16_t> l1B,
 __aicore__ inline void ReleaseL0C()
 {
     SetFlag<HardEvent::FIX_M>(0);
+}
+
+// Native FP32 32x32 blocks use C0=8 and two fractals per side.
+__aicore__ inline void CopyGmNdToL1NzF32(LocalTensor<float> l1, GlobalTensor<float> gm)
+{
+    Nd2NzParams p{};
+    p.ndNum = 1;
+    p.nValue = 32;
+    p.dValue = 32;
+    p.srcDValue = 32;
+    p.srcNdMatrixStride = 0;
+    p.dstNzC0Stride = 32;
+    p.dstNzNStride = 1;
+    p.dstNzMatrixStride = 0;
+    DataCopy(l1, gm, p);
+    SetFlag<HardEvent::MTE2_MTE1>(0);
+    WaitFlag<HardEvent::MTE2_MTE1>(0);
+}
+
+__aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l1B,
+                                    LocalTensor<float> l0A, LocalTensor<float> l0B,
+                                    LocalTensor<float> l0C)
+{
+    WaitFlag<HardEvent::M_MTE1>(0);
+    LoadData2DParamsV2 a{};
+    a.mStep = 2;
+    a.kStep = 4;
+    a.srcStride = 2;
+    a.dstStride = 2;
+    a.ifTranspose = false;
+    a.sid = 0;
+    LoadData(l0A, l1A, a);
+    LoadData2DParamsV2 b{};
+    b.mStep = 2;
+    b.kStep = 4;
+    b.srcStride = 2;
+    b.dstStride = 2;
+    b.ifTranspose = true;
+    b.sid = 0;
+    LoadData(l0B, l1B, b);
+
+    SetFlag<HardEvent::MTE1_M>(0);
+    WaitFlag<HardEvent::MTE1_M>(0);
+    WaitFlag<HardEvent::FIX_M>(0);
+    MmadParams p{};
+    p.m = 32;
+    p.n = 32;
+    p.k = 32;
+    p.cmatrixInitVal = true;
+    p.cmatrixSource = false;
+    p.unitFlag = 0;
+    Mmad(l0C, l0A, l0B, p);
+    SetFlag<HardEvent::M_MTE1>(0);
+    SetFlag<HardEvent::M_FIX>(0);
+    WaitFlag<HardEvent::M_FIX>(0);
+}
+
+// The inverse A block is BF16 NZ inside a full 64-row L1 matrix.
+__aicore__ inline void FixB16L1(LocalTensor<bfloat16_t> l1, LocalTensor<float> l0C)
+{
+    FixpipeParamsArch3510<CO2Layout::NZ> p{};
+    p.nSize = 32;
+    p.mSize = 32;
+    p.srcStride = 32;
+    p.dstStride = 64 * 16;
+    p.quantPre = QuantMode_t::F322BF16;
+    p.isChannelSplit = false;
+    p.unitFlag = 0;
+    Fixpipe<bfloat16_t, float, kSparseFixL1>(l1, l0C, p);
+}
+
+__aicore__ inline void FixB16Gm(GlobalTensor<bfloat16_t> gm, LocalTensor<float> l0C,
+                                uint32_t rows)
+{
+    if (rows == 0) {
+        return;
+    }
+    FixpipeParamsArch3510<CO2Layout::ROW_MAJOR> p{};
+    p.nSize = 32;
+    p.mSize = static_cast<uint16_t>(rows);
+    p.srcStride = 32;
+    p.dstStride = 64;
+    p.quantPre = QuantMode_t::F322BF16;
+    p.dualDstCtl = 0;
+    p.subBlockId = 0;
+    p.isChannelSplit = false;
+    p.unitFlag = 0;
+    p.params.ndNum = 1;
+    p.params.srcNdStride = 0;
+    p.params.dstNdStride = 0;
+    Fixpipe<bfloat16_t, float, kSparseFixGm>(gm, l0C, p);
 }
 
 __aicore__ inline void FixF32(LocalTensor<float> ub, LocalTensor<float> l0C,
