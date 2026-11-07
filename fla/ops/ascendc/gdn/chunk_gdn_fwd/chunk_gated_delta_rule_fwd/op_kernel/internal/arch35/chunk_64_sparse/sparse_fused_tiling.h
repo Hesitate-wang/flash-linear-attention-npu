@@ -14,6 +14,7 @@ namespace GdnChunk64Sparse {
 constexpr uint32_t kSparseScheduleSerial = 0;
 constexpr uint32_t kSparseSchedulePipeline = 1;
 constexpr uint32_t kSparseBarrierFlagId = 7;
+constexpr uint32_t kSparseInverseBytesPerTile = 4 * 32 * 32 * sizeof(float);
 // Temporary A/B bit: preserve math and scheduling, but use ND v_new/right.
 constexpr uint32_t kSparseDebugNdVnRight = 0x100U;
 

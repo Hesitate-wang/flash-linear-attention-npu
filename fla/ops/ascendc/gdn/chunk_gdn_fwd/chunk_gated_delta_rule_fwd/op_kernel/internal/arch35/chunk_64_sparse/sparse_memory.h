@@ -11,33 +11,41 @@ namespace GdnChunk64Sparse {
 constexpr uint32_t kKiB = 1024;
 constexpr uint32_t kUbBudget = 208 * kKiB;
 
-// Producer double-buffer layout, per AIV. Each slot owns all Vector inputs and
-// the KKT/Neumann input band. W/U no longer consume UB: AIC writes them to GM.
-constexpr uint32_t kPUbSlotBytes = 68 * kKiB;
+// Two input slots per AIV. Normalized K is uploaded to L1 for Cube; each AIV
+// also keeps its own ND half and gate/beta copy for the later scaling pass.
+constexpr uint32_t kPUbSlotBytes = 48 * kKiB;
 constexpr uint32_t kPUbK = 0;
 constexpr uint32_t kPUbV = 8 * kKiB;
 constexpr uint32_t kPUbKHat = 16 * kKiB;
 constexpr uint32_t kPUbPublic = 24 * kKiB;
 constexpr uint32_t kPUbVb = 32 * kKiB;
 constexpr uint32_t kPUbKbg = 40 * kKiB;
-constexpr uint32_t kPUbKkt = 48 * kKiB;
-constexpr uint32_t kPUbP = 56 * kKiB;
-constexpr uint32_t kPUbS = 60 * kKiB;
-constexpr uint32_t kPUbGates = 64 * kKiB;
-constexpr uint32_t kPUbShift = 2 * kPUbSlotBytes;
+
+// The parity owner receives one complete KKT and packs both diagonal solves
+// into a single 32x64 FP32 VCS workspace.
+constexpr uint32_t kPUbKkt = 2 * kPUbSlotBytes;
+constexpr uint32_t kPUbL = kPUbKkt + 16 * kKiB;
+constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
+constexpr uint32_t kPUbL10 = kPUbX + 8 * kKiB;
+constexpr uint32_t kPUbABf = kPUbL10 + 4 * kKiB;
+constexpr uint32_t kPUbZero = kPUbABf + 8 * kKiB;
+constexpr uint32_t kPUbGates = kPUbZero + 4 * kKiB;
+constexpr uint32_t kPUbShift = kPUbGates + 4 * kKiB;
 constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;
 static_assert(kPUbEnd <= kUbBudget);
 
-// Two full producer slots. P/S are complete 64x64 BF16 matrices in L1; each
-// AIV writes one 32-row band. Neumann reuses the current slot throughout.
-constexpr uint32_t kPL1SlotBytes = 64 * kKiB;
+// Two K/Vb/Kbg slots, one complete BF16 inverse, and native-FP32 coupling
+// records. No Neumann P/S or identity storage remains.
+constexpr uint32_t kPL1SlotBytes = 48 * kKiB;
 constexpr uint32_t kPL1K = 0;
 constexpr uint32_t kPL1Vb = 16 * kKiB;
 constexpr uint32_t kPL1Kbg = 32 * kKiB;
-constexpr uint32_t kPL1P = 48 * kKiB;
-constexpr uint32_t kPL1S = 56 * kKiB;
-constexpr uint32_t kPL1Identity = 2 * kPL1SlotBytes;
-constexpr uint32_t kPL1End = kPL1Identity + 8 * kKiB;
+constexpr uint32_t kPL1A = 2 * kPL1SlotBytes;
+constexpr uint32_t kPL1InvX0 = kPL1A + 8 * kKiB;
+constexpr uint32_t kPL1InvX1 = kPL1InvX0 + 4 * kKiB;
+constexpr uint32_t kPL1InvL10 = kPL1InvX1 + 4 * kKiB;
+constexpr uint32_t kPL1InvT = kPL1InvL10 + 4 * kKiB;
+constexpr uint32_t kPL1End = kPL1InvT + 4 * kKiB;
 static_assert(kPL1End <= 512 * kKiB);
 
 // Consumer UB, per AIV.

@@ -268,18 +268,28 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         }
     }
 
-    // Neumann stays entirely on chip; no inverse exchange workspace is needed.
-    td.workspaceOffset = 0;
-    td.workspaceBytes = 0;
+    // FP32 X0/X1/L10 exchange plus the T Channel Split record.
+    uint64_t inverseBytes = 0;
+    uint64_t cursor = 0;
+    uint64_t workspaceOffset = 0;
+    OP_CHECK_IF(!CheckedMulU64(tileCount,
+                               static_cast<uint64_t>(GdnChunk64Sparse::kSparseInverseBytesPerTile),
+                               &inverseBytes) ||
+                    !PlaceSparseWorkspaceRegion(inverseBytes, 512, &cursor, &workspaceOffset) ||
+                    workspaceOffset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+                    cursor > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Inverse workspace sizing overflows."),
+                return ge::GRAPH_FAILED);
+    td.workspaceOffset = static_cast<int64_t>(workspaceOffset);
+    td.workspaceBytes = static_cast<int64_t>(cursor);
 
     auto *raw = context->GetRawTilingData();
     auto *workspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(raw == nullptr || raw->GetCapacity() < sizeof(td) || workspace == nullptr,
+    uint64_t totalWorkspace = 0;
+    OP_CHECK_IF(raw == nullptr || raw->GetCapacity() < sizeof(td) || workspace == nullptr ||
+                    !CheckedAddU64(cursor, platform.GetLibApiWorkSpaceSize(), &totalWorkspace) ||
+                    totalWorkspace > std::numeric_limits<size_t>::max(),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse tiling/workspace allocation failed."),
-                return ge::GRAPH_FAILED);
-    const uint64_t totalWorkspace = platform.GetLibApiWorkSpaceSize();
-    OP_CHECK_IF(totalWorkspace > std::numeric_limits<size_t>::max(),
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse system workspace is too large."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(memcpy_s(raw->GetData(), raw->GetCapacity(), &td, sizeof(td)) != EOK,
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse tiling serialization failed."),

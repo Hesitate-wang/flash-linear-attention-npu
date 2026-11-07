@@ -537,6 +537,181 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
 #undef SPARSE_SOLVE_LOCAL
 }
 
+// Solve both 32x32 diagonal inverses in one 64-lane VCS stream. The packed X
+// rows are [X0 | X1]. L10 is produced separately for the two AIC FP32 GEMMs.
+template <bool UseExp2>
+__aicore__ inline void InversePair32x64VF(LocalTensor<float> &kkt,
+                                          LocalTensor<float> &lower,
+                                          LocalTensor<float> &lower10,
+                                          LocalTensor<float> &x,
+                                          LocalTensor<float> &g,
+                                          LocalTensor<float> &beta,
+                                          LocalTensor<float> &energy,
+                                          bool useEnergyRatio)
+{
+    __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
+    __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
+    __ubuf__ float *l10 = reinterpret_cast<__ubuf__ float *>(lower10.GetPhyAddr());
+    __ubuf__ float *xAddr = reinterpret_cast<__ubuf__ float *>(x.GetPhyAddr());
+    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
+    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg half = CreateMask<float, MaskPattern::VL32>();
+        uint32_t halfCount = 32;
+        MaskReg lowerHalf = UpdateMask<float>(halfCount);
+        MaskReg upper;
+        Xor(upper, all, lowerHalf, all);
+        RegTensor<float> gJ, gIL, gIR, gI, biL, biR, bi, diff, diffR;
+        RegTensor<float> gate, gateR, scoreL, scoreR, score, zero;
+        Duplicate(zero, 0.0f, all);
+        if (useEnergyRatio) {
+            LoadAlign(gJ, eAddr);
+        } else {
+            LoadAlign(gJ, gAddr);
+        }
+        for (uint16_t row = 0; row < 32; ++row) {
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(gIL, (useEnergyRatio ? eAddr : gAddr) + row);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(gIR, (useEnergyRatio ? eAddr : gAddr) + row + 32);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(biL, b + row);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(biR, b + row + 32);
+            Select(gI, gIL, gIR, upper);
+            Select(bi, biL, biR, upper);
+            if (useEnergyRatio) {
+                Div(gate, gI, gJ, all);
+                Div(gateR, gIR, gJ, all);
+            } else {
+                Sub(diff, gI, gJ, all);
+                Sub(diffR, gIR, gJ, all);
+                if constexpr (UseExp2) {
+                    Muls(diff, diff, kSparseLn2, all);
+                    Muls(diffR, diffR, kSparseLn2, all);
+                }
+                Exp(gate, diff, all);
+                Exp(gateR, diffR, all);
+            }
+            Mul(gate, gate, bi, all);
+            Mul(gateR, gateR, biR, all);
+            Muls(gate, gate, -1.0f, all);
+            Muls(gateR, gateR, -1.0f, all);
+            LoadAlign(scoreL, kk + static_cast<uint32_t>(row) * 64);
+            LoadAlign(scoreR, kk + static_cast<uint32_t>(row + 32) * 64);
+            Select(score, scoreL, scoreR, upper);
+            Mul(gate, gate, score, all);
+            Mul(gateR, gateR, scoreR, all);
+            uint32_t leftCount = row;
+            MaskReg leftMask = UpdateMask<float>(leftCount);
+            uint32_t rightCount = row + 32;
+            MaskReg rightPrefix = UpdateMask<float>(rightCount);
+            MaskReg rightMask, valid;
+            Xor(rightMask, rightPrefix, lowerHalf, all);
+            Or(valid, leftMask, rightMask, all);
+            Select(gate, gate, zero, valid);
+            Select(gateR, gateR, zero, leftMask);
+            StoreAlign(l + static_cast<uint32_t>(row) * 64, gate, all);
+            StoreAlign(l10 + static_cast<uint32_t>(row) * 32, gateR, half);
+        }
+    }
+    PipeBarrier<PIPE_V>();
+
+#define PAIR_SOLVE_PREV(dst, rr)                                                                                        \
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(coefL, l + (base + (rr)) * 64 + col);                                     \
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(coefR, l + (base + (rr)) * 64 + 32 + col);                                \
+    Select(coefficient, coefL, coefR, upper);                                                                            \
+    MulAddDst(dst, previous, coefficient, all);
+#define PAIR_SOLVE_LOCAL(dst, src, rr, cc)                                                                              \
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(coefL, l + (base + (rr)) * 64 + base + (cc));                             \
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(coefR, l + (base + (rr)) * 64 + 32 + base + (cc));                        \
+    Select(coefficient, coefL, coefR, upper);                                                                            \
+    MulAddDst(dst, src, coefficient, all);
+    for (uint16_t group = 0; group < 4; ++group) {
+        const uint32_t base = static_cast<uint32_t>(group) * 8;
+        __VEC_SCOPE__
+        {
+            MaskReg all = CreateMask<float, MaskPattern::ALL>();
+            uint32_t halfCount = 32;
+            MaskReg lowerHalf = UpdateMask<float>(halfCount);
+            MaskReg upper;
+            Xor(upper, all, lowerHalf, all);
+            RegTensor<float> y0, y1, y2, y3, y4, y5, y6, y7;
+            RegTensor<float> previous, coefL, coefR, coefficient, zero, one;
+            RegTensor<int32_t> lanes;
+            Duplicate(zero, 0.0f, all);
+            Duplicate(one, 1.0f, all);
+            Arange<int32_t, IndexOrder::INCREASE_ORDER>(lanes, 0);
+#define PAIR_INIT_Y(yy, rr)                                                                                             \
+            {                                                                                                           \
+                MaskReg dl, dr, diagonal;                                                                                 \
+                CompareScalar<int32_t, CMPMODE::EQ>(dl, lanes, static_cast<int32_t>(base + (rr)), all);                  \
+                CompareScalar<int32_t, CMPMODE::EQ>(dr, lanes, static_cast<int32_t>(32 + base + (rr)), all);             \
+                Or(diagonal, dl, dr, all);                                                                                \
+                Select(yy, one, zero, diagonal);                                                                          \
+            }
+            PAIR_INIT_Y(y0, 0)
+            PAIR_INIT_Y(y1, 1)
+            PAIR_INIT_Y(y2, 2)
+            PAIR_INIT_Y(y3, 3)
+            PAIR_INIT_Y(y4, 4)
+            PAIR_INIT_Y(y5, 5)
+            PAIR_INIT_Y(y6, 6)
+            PAIR_INIT_Y(y7, 7)
+#undef PAIR_INIT_Y
+            for (uint16_t col = 0; col < base; ++col) {
+                LoadAlign(previous, xAddr + static_cast<uint32_t>(col) * 64);
+                PAIR_SOLVE_PREV(y0, 0)
+                PAIR_SOLVE_PREV(y1, 1)
+                PAIR_SOLVE_PREV(y2, 2)
+                PAIR_SOLVE_PREV(y3, 3)
+                PAIR_SOLVE_PREV(y4, 4)
+                PAIR_SOLVE_PREV(y5, 5)
+                PAIR_SOLVE_PREV(y6, 6)
+                PAIR_SOLVE_PREV(y7, 7)
+            }
+            PAIR_SOLVE_LOCAL(y1, y0, 1, 0)
+            PAIR_SOLVE_LOCAL(y2, y0, 2, 0)
+            PAIR_SOLVE_LOCAL(y2, y1, 2, 1)
+            PAIR_SOLVE_LOCAL(y3, y0, 3, 0)
+            PAIR_SOLVE_LOCAL(y3, y1, 3, 1)
+            PAIR_SOLVE_LOCAL(y3, y2, 3, 2)
+            PAIR_SOLVE_LOCAL(y4, y0, 4, 0)
+            PAIR_SOLVE_LOCAL(y4, y1, 4, 1)
+            PAIR_SOLVE_LOCAL(y4, y2, 4, 2)
+            PAIR_SOLVE_LOCAL(y4, y3, 4, 3)
+            PAIR_SOLVE_LOCAL(y5, y0, 5, 0)
+            PAIR_SOLVE_LOCAL(y5, y1, 5, 1)
+            PAIR_SOLVE_LOCAL(y5, y2, 5, 2)
+            PAIR_SOLVE_LOCAL(y5, y3, 5, 3)
+            PAIR_SOLVE_LOCAL(y5, y4, 5, 4)
+            PAIR_SOLVE_LOCAL(y6, y0, 6, 0)
+            PAIR_SOLVE_LOCAL(y6, y1, 6, 1)
+            PAIR_SOLVE_LOCAL(y6, y2, 6, 2)
+            PAIR_SOLVE_LOCAL(y6, y3, 6, 3)
+            PAIR_SOLVE_LOCAL(y6, y4, 6, 4)
+            PAIR_SOLVE_LOCAL(y6, y5, 6, 5)
+            PAIR_SOLVE_LOCAL(y7, y0, 7, 0)
+            PAIR_SOLVE_LOCAL(y7, y1, 7, 1)
+            PAIR_SOLVE_LOCAL(y7, y2, 7, 2)
+            PAIR_SOLVE_LOCAL(y7, y3, 7, 3)
+            PAIR_SOLVE_LOCAL(y7, y4, 7, 4)
+            PAIR_SOLVE_LOCAL(y7, y5, 7, 5)
+            PAIR_SOLVE_LOCAL(y7, y6, 7, 6)
+            StoreAlign(xAddr + (base + 0) * 64, y0, all);
+            StoreAlign(xAddr + (base + 1) * 64, y1, all);
+            StoreAlign(xAddr + (base + 2) * 64, y2, all);
+            StoreAlign(xAddr + (base + 3) * 64, y3, all);
+            StoreAlign(xAddr + (base + 4) * 64, y4, all);
+            StoreAlign(xAddr + (base + 5) * 64, y5, all);
+            StoreAlign(xAddr + (base + 6) * 64, y6, all);
+            StoreAlign(xAddr + (base + 7) * 64, y7, all);
+        }
+        PipeBarrier<PIPE_V>();
+    }
+#undef PAIR_SOLVE_PREV
+#undef PAIR_SOLVE_LOCAL
+}
+
 // Build the two full-chunk Neumann inputs for one AIV's 32-row band.
 // P is the strict-lower L in (I-L)^-1; S starts at I+L. The inverse itself is
 // evaluated entirely by full 64x64 Cube GEMMs in the producer.

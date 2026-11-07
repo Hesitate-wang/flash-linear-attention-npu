@@ -110,6 +110,94 @@ __aicore__ inline void ReleaseL0C()
     SetFlag<HardEvent::FIX_M>(0);
 }
 
+// Native FP32 32x32 blocks use C0=8 and two fractals per side.
+__aicore__ inline void CopyGmNdToL1NzF32(LocalTensor<float> l1, GlobalTensor<float> gm)
+{
+    Nd2NzParams p{};
+    p.ndNum = 1;
+    p.nValue = 32;
+    p.dValue = 32;
+    p.srcDValue = 32;
+    p.srcNdMatrixStride = 0;
+    p.dstNzC0Stride = 32;
+    p.dstNzNStride = 1;
+    p.dstNzMatrixStride = 0;
+    DataCopy(l1, gm, p);
+    SetFlag<HardEvent::MTE2_MTE1>(0);
+    WaitFlag<HardEvent::MTE2_MTE1>(0);
+}
+
+__aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l1B,
+                                    LocalTensor<float> l0A, LocalTensor<float> l0B,
+                                    LocalTensor<float> l0C)
+{
+    WaitFlag<HardEvent::M_MTE1>(0);
+    LoadData2DParamsV2 a{};
+    a.mStep = 2;
+    a.kStep = 4;
+    a.srcStride = 2;
+    a.dstStride = 2;
+    a.ifTranspose = false;
+    a.sid = 0;
+    LoadData(l0A, l1A, a);
+    LoadData2DParamsV2 b{};
+    b.mStep = 2;
+    b.kStep = 4;
+    b.srcStride = 2;
+    b.dstStride = 2;
+    b.ifTranspose = true;
+    b.sid = 0;
+    LoadData(l0B, l1B, b);
+
+    SetFlag<HardEvent::MTE1_M>(0);
+    WaitFlag<HardEvent::MTE1_M>(0);
+    WaitFlag<HardEvent::FIX_M>(0);
+    MmadParams p{};
+    p.m = 32;
+    p.n = 32;
+    p.k = 32;
+    p.cmatrixInitVal = true;
+    p.cmatrixSource = false;
+    p.unitFlag = 0;
+    Mmad(l0C, l0A, l0B, p);
+    SetFlag<HardEvent::M_MTE1>(0);
+    SetFlag<HardEvent::M_FIX>(0);
+    WaitFlag<HardEvent::M_FIX>(0);
+}
+
+__aicore__ inline void FixF32GmNzCs(GlobalTensor<float> gm, LocalTensor<float> l0C)
+{
+    FixpipeParamsArch3510<CO2Layout::NZ> p{};
+    p.nSize = 32;
+    p.mSize = 32;
+    p.srcStride = 32;
+    p.dstStride = 32 * 8;
+    p.quantPre = QuantMode_t::NoQuant;
+    p.isChannelSplit = true;
+    p.unitFlag = 0;
+    Fixpipe<float, float, kSparseFixL1>(gm, l0C, p);
+}
+
+__aicore__ inline void CopyGmNzToL1Fp32(LocalTensor<float> l1, GlobalTensor<float> gm)
+{
+    DataCopy(l1, gm, DataCopyParams(1, 32 * 32 / 8, 0, 0));
+    SetFlag<HardEvent::MTE2_MTE1>(0);
+    WaitFlag<HardEvent::MTE2_MTE1>(0);
+}
+
+__aicore__ inline void FixB16L1(LocalTensor<bfloat16_t> l1, LocalTensor<float> l0C)
+{
+    FixpipeParamsArch3510<CO2Layout::NZ> p{};
+    p.nSize = 32;
+    p.mSize = 32;
+    p.srcStride = 32;
+    p.dstStride = 64 * 16;
+    p.quantPre = QuantMode_t::F322BF16;
+    p.isChannelSplit = false;
+    p.unitFlag = 0;
+    Fixpipe<bfloat16_t, float, kSparseFixL1>(l1, l0C, p);
+}
+
 // Full BF16 Neumann matrix in L1. L0C keeps the FP32 accumulator live so the
 // next S update can accumulate with initC=false after this store retires.
 __aicore__ inline void FixB16L1Matrix(LocalTensor<bfloat16_t> l1, LocalTensor<float> l0C,
@@ -128,7 +216,8 @@ __aicore__ inline void FixB16L1Matrix(LocalTensor<bfloat16_t> l1, LocalTensor<fl
 
 // AIC direct ND output for public A/W/U. Only valid rows are written for tails.
 __aicore__ inline void FixB16GmNd(GlobalTensor<bfloat16_t> gm, LocalTensor<float> l0C,
-                                  uint32_t rows, uint32_t cols, uint32_t dstStride)
+                                  uint32_t rows, uint32_t cols, uint32_t dstStride,
+                                  uint32_t srcStride = 64)
 {
     if (rows == 0) {
         return;
@@ -136,7 +225,7 @@ __aicore__ inline void FixB16GmNd(GlobalTensor<bfloat16_t> gm, LocalTensor<float
     FixpipeParamsArch3510<CO2Layout::ROW_MAJOR> p{};
     p.nSize = static_cast<uint16_t>(cols);
     p.mSize = static_cast<uint16_t>(rows);
-    p.srcStride = 64;
+    p.srcStride = static_cast<uint16_t>(srcStride);
     p.dstStride = dstStride;
     p.quantPre = QuantMode_t::F322BF16;
     p.dualDstCtl = 0;
