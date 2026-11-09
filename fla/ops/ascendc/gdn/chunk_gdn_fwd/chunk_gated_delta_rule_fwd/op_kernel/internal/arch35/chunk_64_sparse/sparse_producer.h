@@ -78,7 +78,6 @@ public:
             if (loc_.chunks > 0) {
                 window_ = ResolveWindow(loc_, 0);
                 PrepareGate(0);
-                PrepareK(0);
                 PrepareScaled(0);
             }
             for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
@@ -92,7 +91,6 @@ public:
                     // The owner recomputes its local copy after VCS; the other AIV
                     // already did this work while VCS was running. No UB/L1 exchange.
                     PrepareGate(chunk + 1);
-                    PrepareK(chunk + 1);
                     PrepareScaled(chunk + 1);
                 }
             }
@@ -199,16 +197,18 @@ private:
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                              td_.valueHeads, td_.tokens);
-        // Issue all independent GM loads once. Each consumer waits only its own input.
+        // K is the KKT dependency. Normalize and publish it before gate work so
+        // AIC can start KKT while gate/beta and V preparation continue.
         CopyGmToUb(ubK_[slot], gmK_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(1);
-        CopyGmToUb(ubV_[slot], gmV_,
-                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
         CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
         CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(0);
+        CopyGmToUb(ubV_[slot], gmV_,
+                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
+        PrepareK(chunk);
         WaitFlag<HardEvent::MTE2_V>(0);
         float aLog = 0.0f;
         float dtBias = 0.0f;
