@@ -27,7 +27,7 @@ X = [ X0 | X1 ]
 
 The left 32 lanes solve X0 and the right 32 lanes solve X1. Each forward-substitution FMA therefore works on both diagonal blocks. L10 is generated separately and is not part of the diagonal VCS.
 
-The owner publishes X0/X1/L10 as FP32 records. AIC computes `T=X1@L10` and `X10=T@X0` with two native-FP32 32x32 GEMMs. The diagonal A blocks are uploaded by the owner, the lower-left block by AIC. Public A retains the same four-block layout.
+The owner publishes X0/X1/L10 as FP32 records. AIC computes `T=X1@L10` and `X10=T@X0` with two native-FP32 32x32 GEMMs. The diagonal A blocks are uploaded by the owner, the lower-left block by AIC. A is used only on chip for W/U and is not written as a public output.
 
 ## 3. Alternating AIV ownership and overlap
 
@@ -38,7 +38,7 @@ Chunk `c` uses owner `c&1`:
 3. After publishing the inverse, the owner also recomputes its local gate/beta copy for chunk `c+1`. Both AIVs then perform their own 32-row L2Norm(K), Kbg and Vb work while AIC performs coupling and W/U.
 4. AIC computes the next KKT after the current W/U. Ownership alternates and the other AIV prepares the following gate/beta.
 
-Each AIV keeps a local gate/beta copy for its own VCS and its 32-row scaling work. The duplicate work is only 64 elements per chunk. No L1-to-UB gate transfer and no GM gate roundtrip are used. Public g_cumsum/beta_eff are written only by AIV0.
+Each AIV keeps a local gate/beta copy for its own VCS and its 32-row scaling work. The duplicate work is only 64 elements per chunk. No L1-to-UB gate transfer and no GM gate roundtrip are used. Public intermediate outputs are disabled: g_cumsum/beta_eff/KHat/KRstd/A/H/qHat/qRstd are not written. Only Consumer-required W/U and the final O/final_state are written to GM.
 
 K/Kbg/Vb use two slots. The current chunk's coupling and W/U overlap the other slot's Vector preparation; a single AIC still executes its own GEMMs serially.
 
@@ -54,7 +54,7 @@ Producer-specific mode-4 flags are:
 - `kProdInputs`: both Kbg/Vb halves are ready for W/U.
 - `kProdA`: the owner's diagonal A blocks are ready in L1.
 
-Ready flags are published before public g_cumsum/beta_eff/KHat/KRstd/A writes, so the MTE3 publication only covers data required by KKT/coupling/WU. Public writes retire on slot reuse or at kernel exit. K, V, gate and beta use strict load/wait/compute stages: K is normalized and published first so AIC can start KKT, then gate/beta is loaded and transformed, Kbg is scaled and uploaded before the V load, and Vb is scaled and uploaded after V arrives. X1/L10 share one MTE2-to-MTE1 wait, and T/X0 share another. NZ panel uploads use one multi-block DataCopy with a destination gap instead of one call per panel. Packed `[X0|X1]` is written to GM contiguously and read with `srcDValue=64`; the public 32-column-to-64-column A blocks remain explicitly strided.
+Ready flags cover only data required by KKT/coupling/WU. K, V, gate and beta use strict load/wait/compute stages: K is normalized and published first so AIC can start KKT, then gate/beta is loaded and transformed, Kbg is scaled and uploaded before the V load, and Vb is scaled and uploaded after V arrives. X1/L10 share one MTE2-to-MTE1 wait, and T/X0 share another. NZ panel uploads use one multi-block DataCopy with a destination gap instead of one call per panel. Packed `[X0|X1]` is written to GM contiguously and read with `srcDValue=64`.
 
 Serial mode does not use mode-0. AIC publishes `kProdW` only after the final chunk, and AIV waits it before the existing mode-1 whole-chain hand-off.
 
@@ -73,7 +73,7 @@ Producer L1 per MIX group:
 - One 8 KiB complete BF16 A and four 4 KiB native-FP32 coupling records.
 - Total: 120 KiB, below the 512 KiB hardware budget.
 
-The per-tile GM workspace contains X0, X1, L10 and T, each a 32x32 FP32 record. It is indexed by the same dense/varlen tile mapping as before. Public A/W/U retain their existing BHTD addresses and valid-row tail handling.
+The per-tile GM workspace contains packed X, L10 and T for the native-FP32 coupling path. It is indexed by the same dense/varlen tile mapping as before. W/U use the existing BHTD addresses and valid-row tail handling. A/g_cumsum/KHat/KRstd and other public intermediate tensors are not written.
 
 ## 6. Numeric order
 

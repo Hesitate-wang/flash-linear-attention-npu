@@ -28,14 +28,14 @@ These checks do not validate Ascend instruction behavior or device performance.
 - Producer L1: 120 KiB per MIX group, below the 512 KiB budget.
 - The parity owner receives one complete KKT; the other AIV does not wait for it.
 - X0/X1/L10 are published before coupling; diagonal A blocks are published before W/U.
-- Two K/Kbg/Vb slots are drained before reuse. Public K/g_cumsum/A writes have separate lifetime protection.
+- Two K/Kbg/Vb slots are drained before reuse. Public intermediate stores are removed; only W/U and O/final_state are written.
 - Serial publishes `kProdW` only after the final chunk. Pipeline uses paired AIC mode-0 calls on every iteration.
 
 ## Required Ascend 950 validation
 
 1. Build with `bash build.sh --pkg --soc=ascend950 --vendor_name=fla_npu --ops=chunk_gated_delta_rule_fwd` and fix any CANN-version diagnostics.
 2. Reproduce the original 58 us Producer baseline and compare packed VCS with the rejected Neumann profile. Use the same workload, warmup 5 and 20 samples, and record all Task Duration samples and min/median/mean/max. The target is **Producer median <=30 us**.
-3. Restore normal AIC mode-0 and run lightweight `o/final_state` and ATK cases 348/187. Include public A/W/U, T=64/640, a non-64-aligned tail and strongly negative gates.
+3. Restore normal AIC mode-0 and run lightweight `o/final_state` and ATK cases 348/187. Include W/U, T=64/640, a non-64-aligned tail and strongly negative gates. Public A/g_cumsum/KHat/KRstd/H/qHat/qRstd are intentionally not written.
 4. Cover varlen empty sequences, norm on/off, exp/exp2, beta sigmoid/output coupling, stateVFirst and FP32/BF16 states.
 5. Run synchronization stress and MSS, focusing on parity-owner KKT delivery, inverse/A hand-offs, gate recomputation, two-slot reuse and serial final-W publication.
 6. Regress high-chain serial shapes and T=16384. Full-pipeline results do not replace the standalone Producer target.

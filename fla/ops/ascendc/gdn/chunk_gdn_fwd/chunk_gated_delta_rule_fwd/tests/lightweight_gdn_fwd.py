@@ -477,7 +477,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 chunk_size=64, use_exp2=config["use_exp2"],
                 use_qk_l2norm_in_kernel=config["l2norm"],
                 use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
-                disable_recompute=True, **common)
+                disable_recompute=False, **common)
 
         for index in range(config["warmup"]):
             logger.info("warmup %d started", index)

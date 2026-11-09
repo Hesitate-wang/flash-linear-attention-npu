@@ -35,12 +35,7 @@ public:
         gmU_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
         gmU_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
-        gmH_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.h));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
-        if (td.useNorm != 0) {
-            gmQHatOut_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.qHat));
-            gmQRstdOut_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.qRstd));
-        }
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
         }
@@ -203,20 +198,10 @@ private:
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
-        if (qOutputsLive_) {
-            SetFlag<HardEvent::MTE3_V>(2);
-            WaitFlag<HardEvent::MTE3_V>(2);
-            qOutputsLive_ = false;
-        }
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        if (td_.writeH != 0) {
-            DataCopy(gmH_[OffsetStateTile(tile, loc_.hv, td_.valueHeads) + sub_ * (kStateElems / 2)],
-                     ubStateB_, kStateElems / 2);
-        }
         LoadQkInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
 
@@ -294,24 +279,6 @@ private:
         StateUpdateVF(ubStateF_, ubStateB_, ubD_, lastEnergy);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        WritePublicQOutputs(firstRow, rows);
-    }
-
-    __aicore__ inline void WritePublicQOutputs(uint32_t firstRow, uint32_t rows)
-    {
-        if (td_.useNorm == 0) {
-            return;
-        }
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        const int64_t qkOut = OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
-        const int64_t rstdOut = OffsetBht(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens);
-        // These MTE3 writes trail the current chunk's H/O work. Do not wait
-        // here; the next chunk protects buffer reuse and the kernel drains the
-        // final writes at exit.
-        CopyUbToGm(gmQHatOut_, qkOut, ubQHat_, elems);
-        CopyUbToGm(gmQRstdOut_, rstdOut, ubQRstd_, rows);
-        qOutputsLive_ = true;
     }
 
     __aicore__ inline void LoadQkInputs(int64_t chunk, uint32_t firstRow, uint32_t rows)
@@ -445,11 +412,10 @@ private:
     uint32_t sub_{0};
     bool hasInitial_{false};
     bool gateRatioSafe_{false};
-    bool qOutputsLive_{false};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmU_, gmH_, gmO_, gmQHatOut_;
+    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmU_, gmO_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
-    GlobalTensor<float> gmG_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_, gmQRstdOut_;
+    GlobalTensor<float> gmG_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubQk_, ubQRstd_, ubKRstd_;
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_;

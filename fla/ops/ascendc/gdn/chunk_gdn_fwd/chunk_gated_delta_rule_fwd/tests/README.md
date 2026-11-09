@@ -80,7 +80,7 @@ bash tests/run_lightweight.sh \
 - `o`：统一为公开 BSND；
 - 请求时的 `final_state`。
 
-`g_cumsum/A/h/beta_eff/q_hat/k_hat/q_rstd/k_rstd` 不参与比较，也不再打印输出统计。`return_intermediate_states` 固定为 false。启用 `--compare-chain` 时，Prepare 链的中间张量只用于计算，最终仍只比较 `o/final_state`。
+`g_cumsum/A/h/beta_eff/q_hat/k_hat/q_rstd/k_rstd` 不参与比较，也不再打印输出统计。CHUNK_64 DUT 固定 `disable_recompute=false`、`return_intermediate_states=false`，这些公开中间槽位不写出；W/U 仅用于 Consumer。启用 `--compare-chain` 时，Prepare 链的中间张量只用于计算，最终仍只比较 `o/final_state`。
 
 ## 在线比较
 
