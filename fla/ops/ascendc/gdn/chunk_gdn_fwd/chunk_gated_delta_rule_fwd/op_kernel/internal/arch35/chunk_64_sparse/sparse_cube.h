@@ -111,13 +111,14 @@ __aicore__ inline void ReleaseL0C()
 }
 
 // Native FP32 32x32 blocks use C0=8 and two fractals per side.
-__aicore__ inline void CopyGmNdToL1NzF32NoWait(LocalTensor<float> l1, GlobalTensor<float> gm)
+__aicore__ inline void CopyGmNdToL1NzF32NoWait(LocalTensor<float> l1, GlobalTensor<float> gm,
+                                               uint32_t srcDValue = 32)
 {
     Nd2NzParams p{};
     p.ndNum = 1;
     p.nValue = 32;
     p.dValue = 32;
-    p.srcDValue = 32;
+    p.srcDValue = srcDValue;
     p.srcNdMatrixStride = 0;
     p.dstNzC0Stride = 32;
     p.dstNzNStride = 1;

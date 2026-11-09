@@ -286,25 +286,14 @@ private:
         PublishPublicInputs(chunk);
     }
 
-    __aicore__ inline void CopyInverseRows(GlobalTensor<float> dst, int64_t offset,
-                                           LocalTensor<float> src)
-    {
-        DataCopyExtParams params{};
-        params.blockCount = 32;
-        params.blockLen = 32 * sizeof(float);
-        params.srcStride = 32 * sizeof(float);
-        params.dstStride = 0;
-        params.rsv = 0;
-        DataCopyPad(dst[offset], src, params);
-    }
-
     __aicore__ inline void PublishInverse(int64_t chunk)
     {
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t record = tile * td_.valueHeads + loc_.hv;
         const int64_t base = record * 4 * 1024;
-        CopyInverseRows(gmInverse_, base, ubX_);
-        CopyInverseRows(gmInverse_, base + 1024, ubX_[32]);
+        // X is already packed as [X0|X1]. Keep that layout in GM and let the
+        // ND->NZ readers use a 64-float source row stride instead of 64 row writes.
+        CopyUbToGm(gmInverse_, base, ubX_, 2048);
         CopyUbToGm(gmInverse_, base + 2048, ubL10_, 1024);
         AivPublish(kProdInverse);
     }
@@ -379,7 +368,7 @@ private:
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t record = tile * td_.valueHeads + loc_.hv;
         const int64_t base = record * 4 * 1024;
-        CopyGmNdToL1NzF32NoWait(l1InvX1_, gmInverse_[base + 1024]);
+        CopyGmNdToL1NzF32NoWait(l1InvX1_, gmInverse_[base + 32], 64);
         CopyGmNdToL1NzF32NoWait(l1InvL10_, gmInverse_[base + 2048]);
         WaitGmToL1Fp32();
         ComputeMmF32(l1InvX1_, l1InvL10_, l0Af_, l0Bf_, l0C0_);
@@ -389,7 +378,7 @@ private:
         ReleaseL0C();
 
         CopyGmNzToL1Fp32NoWait(l1InvT_, gmInverse_[base + 3072]);
-        CopyGmNdToL1NzF32NoWait(l1InvX0_, gmInverse_[base]);
+        CopyGmNdToL1NzF32NoWait(l1InvX0_, gmInverse_[base], 64);
         WaitGmToL1Fp32();
         ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
         FixB16L1(l1A_[32 * 16], l0C0_);
