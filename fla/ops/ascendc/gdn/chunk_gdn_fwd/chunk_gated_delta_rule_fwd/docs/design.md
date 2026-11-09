@@ -54,7 +54,7 @@ Producer-specific mode-4 flags are:
 - `kProdInputs`: both Kbg/Vb halves are ready for W/U.
 - `kProdA`: the owner's diagonal A blocks are ready in L1.
 
-Ready flags are published before public g_cumsum/beta_eff/KHat/KRstd/A writes, so the MTE3 publication only covers data required by KKT/coupling/WU. Public writes retire on slot reuse or at kernel exit. K, V, gate and beta GM loads are issued back-to-back with independent MTE2 events. K is normalized and published first so AIC can start KKT while gate/beta and V preparation continue. X1/L10 share one MTE2-to-MTE1 wait, and T/X0 share another. NZ panel uploads use one multi-block DataCopy with a destination gap instead of one call per panel. Packed `[X0|X1]` is written to GM contiguously and read with `srcDValue=64`; the public 32-column-to-64-column A blocks remain explicitly strided.
+Ready flags are published before public g_cumsum/beta_eff/KHat/KRstd/A writes, so the MTE3 publication only covers data required by KKT/coupling/WU. Public writes retire on slot reuse or at kernel exit. K, V, gate and beta use strict load/wait/compute stages: K is normalized and published first so AIC can start KKT, then gate/beta is loaded and transformed, Kbg is scaled and uploaded before the V load, and Vb is scaled and uploaded after V arrives. X1/L10 share one MTE2-to-MTE1 wait, and T/X0 share another. NZ panel uploads use one multi-block DataCopy with a destination gap instead of one call per panel. Packed `[X0|X1]` is written to GM contiguously and read with `srcDValue=64`; the public 32-column-to-64-column A blocks remain explicitly strided.
 
 Serial mode does not use mode-0. AIC publishes `kProdW` only after the final chunk, and AIV waits it before the existing mode-1 whole-chain hand-off.
 

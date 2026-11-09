@@ -197,19 +197,16 @@ private:
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                              td_.valueHeads, td_.tokens);
-        // K is the KKT dependency. Normalize and publish it before gate work so
-        // AIC can start KKT while gate/beta and V preparation continue.
+        // Strict load/wait/compute stages. KKT is released before the next
+        // gate/beta load starts; V is loaded only after gate processing.
         CopyGmToUb(ubK_[slot], gmK_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(1);
+        SetFlag<HardEvent::MTE2_V>(0);
+        PrepareK(chunk);
         CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
         CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
-        SetFlag<HardEvent::MTE2_V>(0);
-        CopyGmToUb(ubV_[slot], gmV_,
-                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
-        PrepareK(chunk);
-        WaitFlag<HardEvent::MTE2_V>(0);
+        SetFlag<HardEvent::MTE2_V>(1);
+        WaitFlag<HardEvent::MTE2_V>(1);
         float aLog = 0.0f;
         float dtBias = 0.0f;
         if (td_.hasALog != 0) {
@@ -225,13 +222,23 @@ private:
         } else {
             CumsumEnergyVF<false>(ubG_[slot], ubEnergy_[slot], ubShift_);
         }
+        // Kbg reads normalized K, beta and energy written by the preceding V
+        // stages. Retire those UB writes before issuing the dependent V stage.
+        PipeBarrier<PIPE_V>();
+        ScaleKbgNzVF(ubPublicB16_[slot], ubKbg_[slot], ubBeta_[slot], ubEnergy_[slot], firstRow);
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        CopyNzToL1(l1Kbg_[slot], ubKbg_[slot], kHalfRows, kDim, kChunk, firstRow);
+        CopyGmToUb(ubV_[slot], gmV_,
+                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
     }
 
     __aicore__ inline void PrepareK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        WaitFlag<HardEvent::MTE2_V>(1);
+        WaitFlag<HardEvent::MTE2_V>(0);
         if (td_.useNorm != 0) {
             NormalizeRowsNzVF<true, true>(ubK_[slot], ubKHat_[slot], ubPublicB16_[slot], ubKRstd_[slot]);
         } else {
@@ -276,12 +283,10 @@ private:
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         WaitFlag<HardEvent::MTE2_V>(2);
-        ScaleKbgNzVF(ubPublicB16_[slot], ubKbg_[slot], ubBeta_[slot], ubEnergy_[slot], firstRow);
         ScaleVbNzVF(ubV_[slot], ubVb_[slot], ubBeta_[slot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1Vb_[slot], ubVb_[slot], kHalfRows, kDim, kChunk, firstRow);
-        CopyNzToL1(l1Kbg_[slot], ubKbg_[slot], kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kProdInputs);
         PublishPublicInputs(chunk);
     }
