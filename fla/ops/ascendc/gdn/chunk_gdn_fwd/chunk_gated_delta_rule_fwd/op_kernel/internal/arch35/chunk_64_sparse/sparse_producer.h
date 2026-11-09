@@ -261,7 +261,7 @@ private:
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
-        const bool useEnergyRatio = GateRatioSafe(ubG_[slot], static_cast<uint32_t>(window_.rows));
+        const bool useEnergyRatio = GateRatioSafe(ubG_[slot], ubL_, static_cast<uint32_t>(window_.rows));
         if (td_.useExp2 != 0) {
             InversePair32x64VF<true>(ubKkt_, ubL_, ubL10_, ubX_, ubG_[slot], ubBeta_[slot],
                                      ubEnergy_[slot], useEnergyRatio);

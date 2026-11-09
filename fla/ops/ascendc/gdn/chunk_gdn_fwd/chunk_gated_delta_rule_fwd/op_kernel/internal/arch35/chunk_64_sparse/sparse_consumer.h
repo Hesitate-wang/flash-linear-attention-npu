@@ -320,7 +320,7 @@ private:
         }
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
-        gateRatioSafe_ = GateRatioSafe(ubG_, static_cast<uint32_t>(window_.rows));
+        gateRatioSafe_ = GateRatioSafe(ubG_, ubP_, static_cast<uint32_t>(window_.rows));
 
         WaitFlag<HardEvent::MTE2_V>(1);
         if (td_.useNorm != 0) {

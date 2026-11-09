@@ -169,15 +169,27 @@ __aicore__ inline void EnergyVF(LocalTensor<float> &g,
 
 // Both the energies and every possible pairwise ratio must stay in the
 // normal FP32 range. NaN fails all comparisons and selects the safe path.
-__aicore__ inline bool GateRatioSafe(LocalTensor<float> &g, uint32_t rows)
+// scratch only needs its first two floats and is reused by the following stage.
+__aicore__ inline bool GateRatioSafe(LocalTensor<float> &g, LocalTensor<float> &scratch,
+                                     uint32_t rows)
 {
-    float lo = g.GetValue(0);
-    float hi = lo;
-    for (uint32_t row = 1; row < rows; ++row) {
-        const float value = g.GetValue(row);
-        lo = value < lo ? value : lo;
-        hi = value > hi ? value : hi;
+    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
+    __ubuf__ float *scratchAddr = reinterpret_cast<__ubuf__ float *>(scratch.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg mask = UpdateMask<float>(rows);
+        MaskReg scalar = CreateMask<float, MaskPattern::VL1>();
+        RegTensor<float> values, lo, hi;
+        LoadAlign(values, gAddr);
+        Reduce<Reg::ReduceType::MIN>(lo, values, mask);
+        Reduce<Reg::ReduceType::MAX>(hi, values, mask);
+        StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(scratchAddr, lo, scalar);
+        StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(scratchAddr + 1, hi, scalar);
     }
+    SetFlag<HardEvent::V_S>(0);
+    WaitFlag<HardEvent::V_S>(0);
+    const float lo = scratch.GetValue(0);
+    const float hi = scratch.GetValue(1);
     return lo >= -kSparseExpSafeLimit && hi <= kSparseExpSafeLimit &&
            hi - lo <= kSparseExpSafeLimit;
 }
