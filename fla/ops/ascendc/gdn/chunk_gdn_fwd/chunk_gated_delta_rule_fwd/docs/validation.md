@@ -17,6 +17,8 @@ The development host is macOS without `ccec`, `ascendc++`, an Ascend toolkit, or
 | Internal OpDef/device argument order | `sparse_entry_contract.py` | Passed |
 | Split VCS and lower-left coupling | Independent X0/X1 substitution and `X1@L10@X0` versus the complete inverse; full 32x32 L10 retention | NumPy checks passed |
 | FP32 ND-to-NZ layout | Four C0=8 panels reconstructed from the 32x32 ND source; all source blocks 32-byte aligned | NumPy address-mapping check passed |
+| Tail T memory bounds | T=65: the former 64-row read exceeded the 65-row allocation; valid-row loading ends exactly at the allocation boundary | Static address check passed |
+| Producer copy spans | New UB regions plus four-panel UB→L1 and two-panel L0C→L1 FP32 copies | Static span checks passed |
 | Negative-Kbg identity | `U + (-trueW)@S` equals `U - trueW@S` | Same L0C accumulation semantics |
 | Source whitespace | `git diff --check` | Passed |
 | Test scripts | `py_compile` and lightweight `--cpu-only` | Passed |

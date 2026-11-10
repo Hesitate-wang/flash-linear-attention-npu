@@ -203,6 +203,16 @@ private:
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        if (window_.rows < kChunk) {
+            // The internal T allocation has only valid tokens. Clear the L1 tail
+            // before kConsInputs, then let LoadT read only the valid GM rows.
+            Duplicate(ubAPrime_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
+            SetFlag<HardEvent::V_MTE3>(0);
+            WaitFlag<HardEvent::V_MTE3>(0);
+            CopyNzToL1(l1T_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
+            SetFlag<HardEvent::MTE3_V>(0);
+            WaitFlag<HardEvent::MTE3_V>(0);
+        }
         LoadQkInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
         // Kbg is stored negated so U + W@S directly produces U - trueW@S.
@@ -363,7 +373,7 @@ private:
     {
         Nd2NzParams params{};
         params.ndNum = 1;
-        params.nValue = 64;
+        params.nValue = static_cast<uint32_t>(window_.rows);
         params.dValue = 64;
         params.srcDValue = 64;
         params.srcNdMatrixStride = 0;

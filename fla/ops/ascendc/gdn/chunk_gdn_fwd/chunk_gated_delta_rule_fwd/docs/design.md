@@ -51,7 +51,7 @@ Kbg and Vb are written from UB to L1. Kbg is negative so the later Cube accumula
 
 Consumer also computes QK and masked attention A' and leaves it in L1.
 
-Once T is ready, Consumer AIC performs:
+Once T is ready, Consumer AIC performs the mode-0 wait with MTE2 blocked, then loads only the valid GM rows of T. For a non-64-aligned tail, both AIVs pre-clear their 32x64 halves of L1 T before publishing `kConsInputs`, so padded Cube rows remain zero without reading past the internal T allocation.
 
 ```text
 T GM -> L1

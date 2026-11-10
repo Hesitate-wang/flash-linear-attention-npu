@@ -38,9 +38,9 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             if (iteration < chunks) {
                 role.RunPrepare(iteration);
             }
-            // Producer arrives after T@Kb/T@Vb and their GM Fixpipe. Once all
-            // AICs arrive, release this group's AIVs to load W/U from GM.
-            PublishIterationAic<PIPE_FIX>();
+            // T is complete after the producer's mode-0. The next operation is
+            // the Consumer's GM->L1 T copy, so block MTE2 rather than only FIX.
+            PublishIterationAic<PIPE_MTE2>();
             if (iteration < chunks) {
                 role.RunAfterWu(iteration);
             }
