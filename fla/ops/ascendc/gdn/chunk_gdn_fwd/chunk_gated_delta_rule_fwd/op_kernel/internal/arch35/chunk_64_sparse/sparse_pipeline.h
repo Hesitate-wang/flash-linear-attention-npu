@@ -42,7 +42,6 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             // AICs arrive, release this group's AIVs to load W/U from GM.
             PublishIterationAic<PIPE_FIX>();
             if (iteration < chunks) {
-                AicPublishToBoth(kConsWuGmReady);
                 role.RunAfterWu(iteration);
             }
         }

@@ -19,8 +19,6 @@ constexpr uint16_t kConsVn = 2;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsQk = 6;
-constexpr uint16_t kConsW = 3;
-constexpr uint16_t kConsWuGmReady = 7;
 
 class ConsumerRole {
 public:
@@ -30,11 +28,10 @@ public:
         sub_ = GetSubBlockIdx();
         gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.q));
         gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
-        gmW_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.w));
-        gmW_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        gmU_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
-        gmU_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmV_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.v));
+        gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
+        gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
@@ -134,6 +131,7 @@ private:
         ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbW);
         ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQ);
         ubK_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbK);
+        ubV_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbV);
         if (td_.useNorm != 0) {
             ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
             ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
@@ -149,9 +147,10 @@ private:
         ubQRstd_ = ubG_[256];
         ubKRstd_ = ubG_[288];
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
-        ubBetaDummy_ = ubG_[128];
+        ubBeta_ = ubG_[128];
 
         l1W_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1W);
+        l1U_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1U);
         l1QHat_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QHat);
         l1QExp_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QExp);
         l1K_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1K);
@@ -160,6 +159,7 @@ private:
         l1VNew_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1VNew);
         l1Right_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1Right);
         l1APrime_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1APrime);
+        l1T_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1T);
         l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
         l0A1_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank1);
         l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
@@ -204,6 +204,14 @@ private:
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         LoadQkInputs(chunk, firstRow, rows);
         AivPublish(kConsInputs);
+        // Kbg is stored negated so U + W@S directly produces U - trueW@S.
+        // Vb and Kbg stay in L1 while AIC runs QK and the producer builds T.
+        ScaleVbNzVF(ubV_, ubU_, ubBeta_, firstRow);
+        ScaleKbgNzVF(ubKHat_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        CopyNzToL1(l1U_, ubU_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
 
         AivWait(kConsQk);
         if (td_.useExp2 != 0) {
@@ -222,8 +230,6 @@ private:
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        LoadWu(firstRow, rows);
-
         AivWait(kConsP);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
@@ -233,10 +239,10 @@ private:
         const bool directVnRight = (td_.reserved & kSparseDebugNdVnRight) == 0;
         if (td_.useExp2 != 0) {
             VNewRightNzVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                                gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight);
+                                gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight, false);
         } else {
             VNewRightNzVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                                 gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight);
+                                 gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight, false);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -286,9 +292,11 @@ private:
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
         if (window_.rows < kChunk) {
             Duplicate(ubG_, 0.0f, kChunk);
+            Duplicate(ubBeta_, 0.0f, kChunk);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
@@ -297,11 +305,16 @@ private:
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window_.rows));
+        CopyGmToUb(ubBeta_, gmBeta_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                                               td_.valueHeads, td_.tokens),
+                   static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(0);
         CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(1);
         CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(2);
+        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(3);
         WaitFlag<HardEvent::MTE2_V>(0);
 
         float aLog = 0.0f;
@@ -312,7 +325,8 @@ private:
         if (td_.hasDtBias != 0) {
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
-        PrepareGateBetaVF(ubG_, ubBetaDummy_, aLog, dtBias, td_.gateSoftplus != 0, false, 1.0f);
+        PrepareGateBetaVF(ubG_, ubBeta_, aLog, dtBias, td_.gateSoftplus != 0,
+                          td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
             CumsumEnergyVF<true>(ubG_, ubEnergy_, ubShift_);
         } else {
@@ -341,32 +355,25 @@ private:
         UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
         UploadNdToL1(l1H_[chunk & 1], ubStateB_, kHalfDim, kDim, kDim,
                      sub_ * static_cast<uint32_t>(kHalfDim));
+        WaitFlag<HardEvent::MTE2_V>(3);
     }
 
-    __aicore__ inline void LoadWu(uint32_t firstRow, uint32_t rows)
+    __aicore__ inline void LoadT()
     {
-        if (td_.schedule == kSparseSchedulePipeline) {
-            AivWaitMte2(kConsWuGmReady);
-        }
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubW_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubU_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubW_, gmW_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(0);
-        CopyGmToUb(ubU_, gmU_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(1);
-        WaitFlag<HardEvent::MTE2_V>(0);
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
-        AivPublish(kConsW);
-        // W@H only needs W. Let AIC start while the independent U load retires.
-        WaitFlag<HardEvent::MTE2_V>(1);
+        Nd2NzParams params{};
+        params.ndNum = 1;
+        params.nValue = 64;
+        params.dValue = 64;
+        params.srcDValue = 64;
+        params.srcNdMatrixStride = 0;
+        params.dstNzC0Stride = 64;
+        params.dstNzNStride = 1;
+        params.dstNzMatrixStride = 0;
+        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+                                          td_.valueHeads, td_.tokens, kChunk);
+        DataCopy(l1T_, gmT_[offset], params);
+        SetFlag<HardEvent::MTE2_MTE1>(0);
+        WaitFlag<HardEvent::MTE2_MTE1>(0);
     }
 
     __aicore__ inline void RunCubePrepare(int64_t)
@@ -380,10 +387,17 @@ private:
 
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
     {
-        AicWaitBoth(kConsW);
+        LoadT();
+        // Kbg is negated: W = -trueW. U starts in L0C and W@S accumulates
+        // into it, so the final accumulator is U - trueW@S = v_new.
+        ComputeMm(l1T_, l1W_, l0A0_, l0B0_, l0C2_, 64, 128, 64, false, true);
+        FixB16L1Matrix(l1W_, l0C2_, 64, 128, 64);
+        ReleaseL0C();
+
+        ComputeMm(l1T_, l1U_, l0A0_, l0B0_, l0C0_, 64, 128, 64, false, true);
         ComputeMm(l1W_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
-                  false, td_.stateVFirst == 0);
-        FixF32Halves(ubP_, l0C0_, 64, 128);
+                  false, td_.stateVFirst == 0, false);
+        FixF32Halves(ubU_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
@@ -413,17 +427,17 @@ private:
     bool hasInitial_{false};
     bool gateRatioSafe_{false};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmW_, gmU_, gmO_;
+    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmT_, gmO_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
-    GlobalTensor<float> gmG_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
+    GlobalTensor<float> gmG_, gmBeta_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubQk_, ubQRstd_, ubKRstd_;
-    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_;
+    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubAPrime_, ubO_, ubInitB_, ubOSB_;
-    LocalTensor<float> ubG_, ubEnergy_, ubBetaDummy_;
+    LocalTensor<float> ubG_, ubEnergy_, ubBeta_;
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1W_, l1QHat_, l1QExp_, l1K_, l1H_[2];
-    LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_;
+    LocalTensor<bfloat16_t> l1W_, l1U_, l1QHat_, l1QExp_, l1K_, l1H_[2];
+    LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_, l1T_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
     LocalTensor<float> l0C0_, l0C1_, l0C3_;
 };

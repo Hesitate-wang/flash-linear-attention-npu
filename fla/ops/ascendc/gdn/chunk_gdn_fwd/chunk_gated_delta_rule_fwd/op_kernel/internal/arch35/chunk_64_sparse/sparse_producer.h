@@ -13,7 +13,6 @@
 
 namespace GdnChunk64Sparse {
 
-constexpr uint16_t kProdInputs = 0;
 constexpr uint16_t kProdKkt = 1;
 constexpr uint16_t kProdA = 3;
 constexpr uint16_t kProdW = 4;
@@ -27,13 +26,9 @@ public:
         td_ = td;
         sub_ = GetSubBlockIdx();
         gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
-        gmV_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.v));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
-        gmW_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.w));
-        gmU_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.u));
-        gmW_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
-        gmU_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
+        gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
         gmInverse_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
             GetUserWorkspace(args.workspace) + td.workspaceOffset));
         gmInverse_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
@@ -65,7 +60,6 @@ public:
             if (loc_.chunks > 0) {
                 window_ = ResolveWindow(loc_, 0);
                 PrepareGate(0);
-                PrepareScaled(0);
             }
             for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
                 window_ = ResolveWindow(loc_, chunk);
@@ -78,7 +72,6 @@ public:
                     // The owner recomputes its local copy after VCS; the other AIV
                     // already did this work while VCS was running. No UB/L1 exchange.
                     PrepareGate(chunk + 1);
-                    PrepareScaled(chunk + 1);
                 }
             }
             if (td_.schedule != kSparseSchedulePipeline && loc_.chunks > 0) {
@@ -133,7 +126,6 @@ private:
         }
         ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbZero);
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kPUbShift);
-        l1A_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kPL1A);
         l1InvX0_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvX0);
         l1InvX1_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvX1);
         l1InvL10_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvL10);
@@ -167,7 +159,6 @@ private:
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubV_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
         if (window_.rows < kChunk) {
             Duplicate(ubG_[slot], 0.0f, kChunk);
@@ -204,16 +195,6 @@ private:
         } else {
             CumsumEnergyVF<false>(ubG_[slot], ubEnergy_[slot], ubShift_);
         }
-        // Kbg reads normalized K, beta and energy written by the preceding V
-        // stages. Retire those UB writes before issuing the dependent V stage.
-        PipeBarrier<PIPE_V>();
-        ScaleKbgNzVF(ubPublicB16_[slot], ubKbg_[slot], ubBeta_[slot], ubEnergy_[slot], firstRow);
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1Kbg_[slot], ubKbg_[slot], kHalfRows, kDim, kChunk, firstRow);
-        CopyGmToUb(ubV_[slot], gmV_,
-                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
     }
 
     __aicore__ inline void PrepareK(int64_t chunk)
@@ -232,18 +213,6 @@ private:
         AivPublish(kProdK);
     }
 
-    __aicore__ inline void PrepareScaled(int64_t chunk)
-    {
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        WaitFlag<HardEvent::MTE2_V>(2);
-        ScaleVbNzVF(ubV_[slot], ubVb_[slot], ubBeta_[slot], firstRow);
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1Vb_[slot], ubVb_[slot], kHalfRows, kDim, kChunk, firstRow);
-        AivPublish(kProdInputs);
-    }
-
     __aicore__ inline void PublishInverse(int64_t chunk)
     {
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
@@ -254,6 +223,24 @@ private:
         CopyUbToGm(gmInverse_, base, ubX_, 2048);
         CopyUbToGm(gmInverse_, base + 2048, ubL10_, 1024);
         AivPublish(kProdInverse);
+    }
+
+    __aicore__ inline void WriteTBlock(uint32_t rows, uint32_t rowOffset,
+                                       uint32_t colOffset, LocalTensor<bfloat16_t> src)
+    {
+        if (rows == 0) {
+            return;
+        }
+        DataCopyExtParams params{};
+        params.blockCount = static_cast<uint16_t>(rows);
+        params.blockLen = 32 * sizeof(bfloat16_t);
+        params.srcStride = 0;
+        params.dstStride = 32 * sizeof(bfloat16_t);
+        params.rsv = 0;
+        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+                                          td_.valueHeads, td_.tokens, kChunk) +
+                               rowOffset * kChunk + colOffset;
+        DataCopyPad(gmT_[offset], src, params);
     }
 
     __aicore__ inline void BuildInversePair(int64_t chunk)
@@ -280,9 +267,14 @@ private:
         Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), 1024);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1A_, ubABf_[0], 32, 32, kChunk, 0, 0);
-        UploadNdToL1(l1A_, ubZeroBf_, 32, 32, kChunk, 0, 32);
-        UploadNdToL1(l1A_, ubABf_[1], 32, 32, kChunk, 32, 32);
+        const uint32_t topRows = static_cast<uint32_t>(
+            window_.rows < kHalfRows ? window_.rows : kHalfRows);
+        const int64_t bottomRemaining = window_.rows - kHalfRows;
+        const uint32_t bottomRows = bottomRemaining <= 0 ? 0U
+            : static_cast<uint32_t>(bottomRemaining < kHalfRows ? bottomRemaining : kHalfRows);
+        WriteTBlock(topRows, 0, 0, ubABf_[0]);
+        WriteTBlock(topRows, 0, 32, ubZeroBf_);
+        WriteTBlock(bottomRows, 32, 32, ubABf_[1]);
         AivPublish(kProdA);
     }
 
@@ -304,7 +296,12 @@ private:
         CopyGmNdToL1NzF32NoWait(l1InvX0_, gmInverse_[base], 64);
         WaitGmToL1Fp32();
         ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
-        FixB16L1(l1A_[32 * 16], l0C0_);
+        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+                                          td_.valueHeads, td_.tokens, kChunk) + 32 * kChunk + 32;
+        const int64_t remaining = window_.rows - 32;
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < 32 ? remaining : 32);
+        FixB16GmNd(gmT_[offset], l0C0_, rows, 32, 64, 32);
         ReleaseL0C();
     }
 
@@ -320,17 +317,7 @@ private:
 
         AicWaitOwner(kProdInverse, owner);
         ComputeCoupling(chunk);
-        AicWaitBoth(kProdInputs);
         AicWaitOwner(kProdA, owner);
-        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
-                                          td_.valueHeads, td_.tokens);
-        const uint32_t rows = static_cast<uint32_t>(window_.rows);
-        ComputeMm(l1A_, l1Kbg_[slot], l0A0_, l0B0_, l0C2_, 64, 128, 64, false, true);
-        FixB16GmNd(gmW_[offset], l0C2_, rows, kDim, kDim);
-        ReleaseL0C();
-        ComputeMmReuseA(l1Vb_[slot], l0A0_, l0B1_, l0C3_, 64, 128, 64, true);
-        FixB16GmNd(gmU_[offset], l0C3_, rows, kDim, kDim);
-        ReleaseL0C();
     }
 
     FusedTilingData td_{};
@@ -338,7 +325,7 @@ private:
     ChunkWindow window_{};
     uint32_t sub_{0};
 
-    GlobalTensor<bfloat16_t> gmK_, gmV_, gmW_, gmU_;
+    GlobalTensor<bfloat16_t> gmK_, gmT_;
     GlobalTensor<float> gmG_, gmBeta_, gmInverse_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 
@@ -347,7 +334,7 @@ private:
     LocalTensor<bfloat16_t> ubABf_[2], ubZeroBf_;
     LocalTensor<float> ubG_[2], ubEnergy_[2], ubBeta_[2], ubKRstd_[2];
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2], l1A_;
+    LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2];
     LocalTensor<float> l1InvX0_, l1InvX1_, l1InvL10_, l1InvT_;
     LocalTensor<bfloat16_t> l0A0_, l0B0_, l0B1_;
     LocalTensor<float> l0Af_, l0Bf_;

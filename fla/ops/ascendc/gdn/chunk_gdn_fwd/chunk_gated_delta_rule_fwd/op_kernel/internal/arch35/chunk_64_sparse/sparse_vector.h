@@ -314,7 +314,7 @@ __aicore__ inline void ScaleKbgNzVF(LocalTensor<bfloat16_t> &k,
                                     LocalTensor<bfloat16_t> &out,
                                     LocalTensor<float> &beta,
                                     LocalTensor<float> &energy,
-                                    uint32_t firstRow)
+                                    uint32_t firstRow, bool negate = false)
 {
     __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(k.GetPhyAddr());
     __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
@@ -334,6 +334,10 @@ __aicore__ inline void ScaleKbgNzVF(LocalTensor<bfloat16_t> &k,
             Mul(scale, scale, be, all);
             Mul(even, even, scale, all);
             Mul(odd, odd, scale, all);
+            if (negate) {
+                Muls(even, even, -1.0f, all);
+                Muls(odd, odd, -1.0f, all);
+            }
             GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
         }
     }
@@ -867,7 +871,7 @@ __aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
                                      LocalTensor<float> &energy,
                                      float gLast, float lastEnergy,
                                      bool useEnergyRatio, uint32_t firstRow,
-                                     bool directNz)
+                                     bool directNz, bool subtractP)
 {
     __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
     __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
@@ -887,8 +891,10 @@ __aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
             LoadAlign<float, LoadDist::DIST_DINTLV_B32>(p0, p1, pAddr + offset);
             GdnFwd32::LoadEvenOdd(uAddr + offset, u0, u1, m16);
-            Sub(u0, u0, p0, all);
-            Sub(u1, u1, p1, all);
+            if (subtractP) {
+                Sub(u0, u0, p0, all);
+                Sub(u1, u1, p1, all);
+            }
             if (directNz) {
                 GdnFwd32::StoreNzEvenOdd(vAddr, row, u0, u1, m16, m128);
             } else {

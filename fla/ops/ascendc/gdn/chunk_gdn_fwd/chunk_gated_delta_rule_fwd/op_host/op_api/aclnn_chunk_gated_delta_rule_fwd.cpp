@@ -866,9 +866,7 @@ static aclnnStatus ChunkGatedDeltaRuleFwdGetWorkspaceSizeImpl(
         const aclTensor *gCumsumBht = executorPtr->AllocTensor(scalarHvShape, DataType::DT_FLOAT, Format::FORMAT_ND);
         const aclTensor *w = executorPtr->AllocTensor(wShape, dtype, Format::FORMAT_ND);
         const aclTensor *u = executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND);
-        const aclTensor *a = params.aOutOptional == nullptr
-                                 ? executorPtr->AllocTensor(MakeShape({1}), dtype, Format::FORMAT_ND)
-                                 : executorPtr->AllocTensor(aShape, dtype, Format::FORMAT_ND);
+        const aclTensor *a = executorPtr->AllocTensor(aShape, dtype, Format::FORMAT_ND);
         const aclTensor *qHat = params.useQkL2norm
                                     ? executorPtr->AllocTensor(qkShape, dtype, Format::FORMAT_ND)
                                     : nullptr;

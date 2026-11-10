@@ -4,9 +4,11 @@
 
 This implementation targets Ascend 950 / arch35, BF16 Q/K/V, FP32 gate/beta, `K=V=128`, and low parallelism `B*Hv <= AIC/2`. The public ACLNN ABI and ten-element Python result are unchanged.
 
-The Producer uses a packed 32x64 Vector forward substitution (VCS), two native-FP32 coupling GEMMs, two input slots, and alternating AIV ownership. The full 64x64 Neumann implementation has been removed from the active path because its GEMM/Fixpipe critical path increased latency.
+The Producer computes only KKT, the packed inverse and its lower-left coupling. It no longer computes Kbg/Vb or W/U. Consumer recomputes W/U and fuses `U-W@S` directly in L0C. The full 64x64 Neumann implementation is not active.
 
-## 2. Packed VCS and coupling
+Ascend 950 provides 512 KiB L1, 64 KiB L0A, 64 KiB L0B and 256 KiB L0C per AI Core. The Consumer keeps T, Kbg, Vb, W, U, H, vnew and right in L1/L0C wherever practical instead of making repeated GM roundtrips.
+
+## 2. Producer: packed inverse only
 
 For unit-lower-triangular `M=I-L`:
 
@@ -19,62 +21,84 @@ X1  = M11^-1
 X10 = X1 @ L10 @ X0
 ```
 
-One owner AIV receives the complete FP32 KKT. `InversePair32x64VF` packs the two independent diagonal solves into one 32x64 workspace:
+One owner AIV receives the complete FP32 KKT. `InversePair32x64VF` packs both diagonal solves into one 32x64 workspace, using the left 32 lanes for X0 and right 32 lanes for X1. L10 is generated separately.
 
-```text
-X = [ X0 | X1 ]
-```
+The owner publishes X0/X1/L10 as FP32 records. AIC computes `T=X1@L10` and `X10=T@X0` with two native-FP32 32x32 GEMMs. The owner writes the diagonal blocks of the complete inverse T, and AIC writes its lower-left block. T uses the internal `args.a` buffer and is not a public output. That buffer is allocated at full `[B,Hv,T,64]` size even when `aOutOptional` is null.
 
-The left 32 lanes solve X0 and the right 32 lanes solve X1. Each forward-substitution FMA therefore works on both diagonal blocks. L10 is generated separately and is not part of the diagonal VCS.
+Producer does not load V, compute Kbg/Vb, or execute `T@Kbg` / `T@Vb`. There is no Producer W/U GM store.
 
-The owner publishes X0/X1/L10 as FP32 records. AIC computes `T=X1@L10` and `X10=T@X0` with two native-FP32 32x32 GEMMs. The diagonal A blocks are uploaded by the owner, the lower-left block by AIC. A is used only on chip for W/U and is not written as a public output.
-
-## 3. Alternating AIV ownership and overlap
+## 3. Alternating AIV preparation
 
 Chunk `c` uses owner `c&1`:
 
-1. Both AIVs initially prepare gate/beta, normalized K and Kbg/Vb for chunk 0.
+1. Both AIVs initially prepare gate/beta and normalized K for chunk 0.
 2. The owner waits for its complete KKT and executes packed VCS. The other AIV prepares gate/beta for chunk `c+1`.
-3. After publishing the inverse, the owner also recomputes its local gate/beta copy for chunk `c+1`. Both AIVs then perform their own 32-row L2Norm(K), Kbg and Vb work while AIC performs coupling and W/U.
-4. AIC computes the next KKT after the current W/U. Ownership alternates and the other AIV prepares the following gate/beta.
+3. After publishing the inverse, the owner recomputes its local gate/beta copy for chunk `c+1`; both perform their own 32-row L2Norm(K).
+4. AIC computes the next KKT after the current inverse is published. Ownership alternates.
 
-Each AIV keeps a local gate/beta copy for its own VCS and its 32-row scaling work. The duplicate work is only 64 elements per chunk. No L1-to-UB gate transfer and no GM gate roundtrip are used. Public intermediate outputs are disabled: g_cumsum/beta_eff/KHat/KRstd/A/H/qHat/qRstd are not written. Only Consumer-required W/U and the final O/final_state are written to GM.
+Each AIV keeps a local gate/beta copy for VCS and scaling. Duplicate work is only 64 elements per chunk; no L1-to-UB or GM gate sharing is used. Public intermediate outputs are disabled.
 
-K/Kbg/Vb use two slots. The current chunk's coupling and W/U overlap the other slot's Vector preparation; a single AIC still executes its own GEMMs serially.
+## 4. Consumer: prepare in L1, then fuse W/U and FwdO
 
-## 4. W/U and synchronization
+While Producer computes KKT/inverse, Consumer prepares:
 
-AIC writes W/U directly from L0C to GM with BF16 ND Fixpipe. Pipeline mode-0 remains on AIC after W/U. Consumer AIC arrives after QK and releases its AIVs through `kConsWuGmReady`; W's L1-ready flag remains `kConsW`.
+```text
+Kbg = -normalizedK * beta * energy   // negative by construction
+Vb  = V * beta
+```
+
+Kbg and Vb are written from UB to L1. Kbg is negative so the later Cube accumulation computes `U-trueW@S` without a separate Vector subtraction.
+
+Consumer also computes QK and masked attention A' and leaves it in L1.
+
+Once T is ready, Consumer AIC performs:
+
+```text
+T GM -> L1
+W = T @ Kbg                  // W = -trueW
+U = T @ Vb                   // keep U in L0C
+accumulate W @ S into U      // vnew = U - trueW@S
+O = A' @ vnew + QExp @ S     // accumulate in L0C
+D = K^T @ (vnew * decay)
+```
+
+`FixF32Halves` sends vnew to AIV for the decayed right computation. A'@vnew accumulates into the QExp@S accumulator and is scaled during the final BF16 output Fixpipe. D returns to AIV, which performs the FP32 state update and refreshes the BF16 state mirror for the next chunk.
+
+## 5. Synchronization
+
+Pipeline mode-0 remains on AIC after the complete T has been written. Consumer AIC arrives after QK and then loads T itself; the former Consumer W/U GM-ready hand-off is removed.
 
 Producer-specific mode-4 flags are:
 
 - `kProdK`: both normalized K halves are ready for KKT.
 - `kProdKkt`: the complete KKT is delivered to the parity owner.
-- `kProdInverse`: the owner's X0/X1/L10 GM records are ready for coupling.
-- `kProdInputs`: both Kbg/Vb halves are ready for W/U.
-- `kProdA`: the owner's diagonal A blocks are ready in L1.
+- `kProdInverse`: X0/X1/L10 are ready for coupling.
+- `kProdA`: the diagonal blocks of T are ready.
 
-Ready flags cover only data required by KKT/coupling/WU. K, V, gate and beta use strict load/wait/compute stages: K is normalized and published first so AIC can start KKT, then gate/beta is loaded and transformed, Kbg is scaled and uploaded before the V load, and Vb is scaled and uploaded after V arrives. X1/L10 share one MTE2-to-MTE1 wait, and T/X0 share another. NZ panel uploads use one multi-block DataCopy with a destination gap instead of one call per panel. Packed `[X0|X1]` is written to GM contiguously and read with `srcDValue=64`.
+Consumer-specific flags are:
 
-Serial mode does not use mode-0. AIC publishes `kProdW` only after the final chunk, and AIV waits it before the existing mode-1 whole-chain hand-off.
+- `kConsP`: vnew is ready in UB after U-W@S accumulation.
+- `kConsVn`: vnew/right are ready in L1 for O_l and D.
+- `kConsOL`: the final O accumulator is ready.
+- `kConsD`: D is ready for the state update.
 
-## 5. Memory and workspace
+Serial mode does not use mode-0. AIC publishes `kProdW` only after the final T, and AIV waits it before the existing mode-1 whole-chain hand-off.
 
-Producer UB per AIV:
+## 6. Memory
 
-- Two 48 KiB input slots: K, V, normalized/public K, Vb and Kbg.
-- One 16 KiB complete KKT, 8 KiB packed L, 8 KiB packed X and 4 KiB L10.
-- Diagonal/zero BF16 staging, two 2 KiB gate slots and shared scan indices.
-- Total: 150 KiB, below the 208 KiB regbase budget.
+Producer UB uses two 48 KiB K/input slots plus KKT, packed L/X/L10 and diagonal staging. Producer L1 uses two K slots and native-FP32 coupling records. The per-tile workspace contains packed X, L10 and T.
 
-Producer L1 per MIX group:
+Consumer UB is 208 KiB per AIV, within the 208 KiB regbase budget. Consumer L1 is 192 KiB per MIX group, within the 512 KiB hardware budget. Existing regions are reused:
 
-- Two 48 KiB K/Vb/Kbg slots.
-- One 8 KiB complete BF16 A and four 4 KiB native-FP32 coupling records.
-- Total: 120 KiB, below the 512 KiB hardware budget.
+- `l1W_`: negative Kbg, then W.
+- `l1U_`: Vb.
+- `l1T_`: the complete inverse.
+- `l1H_[2]`: alternating state mirrors.
+- `l1APrime_`: masked attention.
+- `l1VNew_` and `l1Right_`: vnew and decayed vnew.
 
-The per-tile GM workspace contains packed X, L10 and T for the native-FP32 coupling path. It is indexed by the same dense/varlen tile mapping as before. W/U use the existing BHTD addresses and valid-row tail handling. A/g_cumsum/KHat/KRstd and other public intermediate tensors are not written.
+Public A/g_cumsum/KHat/KRstd/H/qHat/qRstd are not written. Only the internal T, final O and final_state reach GM.
 
-## 6. Numeric order
+## 7. Numeric order
 
-KKT, gate processing and both diagonal VCS blocks remain FP32. Coupling also remains native FP32 until the final BF16 cast. W/U Cube inputs and public A are BF16. This removes Neumann's extra full-chunk GEMM sequence without moving the diagonal solve or coupling to BF16 arithmetic.
+KKT, gate processing and diagonal VCS remain FP32. Coupling remains native FP32 until the final BF16 cast. T, Kbg, Vb, W/U and subsequent Cube inputs are BF16 with FP32 accumulation. Kbg's negation changes only its representation: `U + (-trueW)@S` is algebraically identical to `U - trueW@S`.

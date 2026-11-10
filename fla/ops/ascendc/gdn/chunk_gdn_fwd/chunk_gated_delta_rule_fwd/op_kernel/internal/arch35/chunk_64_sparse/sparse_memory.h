@@ -67,7 +67,8 @@ constexpr uint32_t kCUbO = 180 * kKiB;
 constexpr uint32_t kCUbGates = 188 * kKiB;
 constexpr uint32_t kCUbShift = 190 * kKiB;
 constexpr uint32_t kCUbQk = 192 * kKiB;
-constexpr uint32_t kCUbEnd = 200 * kKiB;
+constexpr uint32_t kCUbV = 200 * kKiB;
+constexpr uint32_t kCUbEnd = 208 * kKiB;
 static_assert(kCUbEnd <= kUbBudget);
 
 constexpr uint32_t kCL1W = 0;
@@ -80,7 +81,8 @@ constexpr uint32_t kCL1H1 = 112 * kKiB;
 constexpr uint32_t kCL1VNew = 144 * kKiB;
 constexpr uint32_t kCL1Right = 160 * kKiB;
 constexpr uint32_t kCL1APrime = 176 * kKiB;
-constexpr uint32_t kCL1End = 184 * kKiB;
+constexpr uint32_t kCL1T = 184 * kKiB;
+constexpr uint32_t kCL1End = 192 * kKiB;
 static_assert(kCL1End <= 512 * kKiB);
 
 constexpr uint32_t kL0Bank0 = 0;
