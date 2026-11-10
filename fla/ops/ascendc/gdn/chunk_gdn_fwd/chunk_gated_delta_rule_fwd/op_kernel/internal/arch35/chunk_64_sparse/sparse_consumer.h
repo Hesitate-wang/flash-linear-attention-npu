@@ -166,6 +166,7 @@ private:
         l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
         l0C1_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C1);
+        l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
     }
 
@@ -397,7 +398,7 @@ private:
         ComputeMm(l1T_, l1U_, l0A0_, l0B0_, l0C0_, 64, 128, 64, false, true);
         ComputeMm(l1W_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
                   false, td_.stateVFirst == 0, false);
-        FixF32Halves(ubU_, l0C0_, 64, 128);
+        FixB16Halves(ubU_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
@@ -439,7 +440,7 @@ private:
     LocalTensor<bfloat16_t> l1W_, l1U_, l1QHat_, l1QExp_, l1K_, l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_, l1T_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
-    LocalTensor<float> l0C0_, l0C1_, l0C3_;
+    LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
 };
 
 } // namespace GdnChunk64Sparse
