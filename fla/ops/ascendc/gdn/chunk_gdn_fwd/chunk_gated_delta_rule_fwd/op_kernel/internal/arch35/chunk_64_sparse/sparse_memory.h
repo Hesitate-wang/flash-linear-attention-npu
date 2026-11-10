@@ -21,14 +21,13 @@ constexpr uint32_t kPUbPublic = 24 * kKiB;
 constexpr uint32_t kPUbVb = 32 * kKiB;
 constexpr uint32_t kPUbKbg = 40 * kKiB;
 
-// The parity owner receives one complete KKT and packs both diagonal solves
-// into a single 32x64 FP32 VCS workspace.
+// Each AIV receives its 32x64 KKT row band and solves one 32x32 diagonal
+// inverse. AIV1 appends the complete 32x32 L10 leaf after its inverse storage.
 constexpr uint32_t kPUbKkt = 2 * kPUbSlotBytes;
-constexpr uint32_t kPUbL = kPUbKkt + 16 * kKiB;
+constexpr uint32_t kPUbL = kPUbKkt + 8 * kKiB;
 constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
-constexpr uint32_t kPUbL10 = kPUbX + 8 * kKiB;
-constexpr uint32_t kPUbABf = kPUbL10 + 4 * kKiB;
-constexpr uint32_t kPUbZero = kPUbABf + 8 * kKiB;
+constexpr uint32_t kPUbABf = kPUbX + 12 * kKiB;
+constexpr uint32_t kPUbZero = kPUbABf + 4 * kKiB;
 constexpr uint32_t kPUbGates = kPUbZero + 4 * kKiB;
 constexpr uint32_t kPUbShift = kPUbGates + 4 * kKiB;
 constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;

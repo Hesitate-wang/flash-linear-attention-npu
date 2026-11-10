@@ -61,10 +61,11 @@ __aicore__ inline void AicPublishToBoth(uint16_t id)
     CrossCoreSetFlag<0x4, PIPE_FIX>(static_cast<uint16_t>(id + kAiv1FlagOffset));
 }
 
+template <pipe_t WaitPipe = PIPE_MTE1>
 __aicore__ inline void AicWaitBoth(uint16_t id)
 {
-    CrossCoreWaitFlag<0x4, PIPE_MTE1>(id);
-    CrossCoreWaitFlag<0x4, PIPE_MTE1>(static_cast<uint16_t>(id + kAiv1FlagOffset));
+    CrossCoreWaitFlag<0x4, WaitPipe>(id);
+    CrossCoreWaitFlag<0x4, WaitPipe>(static_cast<uint16_t>(id + kAiv1FlagOffset));
 }
 
 __aicore__ inline void PublishChainInGroup()

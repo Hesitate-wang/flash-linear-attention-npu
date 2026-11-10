@@ -398,7 +398,7 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
 }
 
 // Each AIV owns one 32x32 diagonal inverse. The lower band still has 64
-// columns; AIV1 additionally keeps a compact L10 copy at a[2048].
+// columns; AIV1 additionally keeps the complete 32x32 L10 leaf at a[2048].
 template <bool UseExp2>
 __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
                                            LocalTensor<float> &lower,
@@ -625,7 +625,9 @@ __aicore__ inline void InversePair32x64VF(LocalTensor<float> &kkt,
             Xor(rightMask, rightPrefix, lowerHalf, all);
             Or(valid, leftMask, rightMask, all);
             Select(gate, gate, zero, valid);
-            Select(gateR, gateR, zero, leftMask);
+            // The lower-left leaf is a full 32x32 block: global column j < 32
+            // is always below global row 32+row. Do not apply a local triangle.
+            Select(gateR, gateR, zero, rightPrefix);
             StoreAlign(l + static_cast<uint32_t>(row) * 64, gate, all);
             StoreAlign(l10 + static_cast<uint32_t>(row) * 32, gateR, half);
         }

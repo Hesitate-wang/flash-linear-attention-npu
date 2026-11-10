@@ -110,32 +110,13 @@ __aicore__ inline void ReleaseL0C()
     SetFlag<HardEvent::FIX_M>(0);
 }
 
-// Native FP32 32x32 blocks use C0=8 and two fractals per side.
-__aicore__ inline void CopyGmNdToL1NzF32NoWait(LocalTensor<float> l1, GlobalTensor<float> gm,
-                                               uint32_t srcDValue = 32)
+// Native FP32 32x32 blocks use C0=8 and two fractals per side. Keep the VCS
+// working copy as ND in UB; four strided MTE3 copies form tight NZ in L1.
+__aicore__ inline void CopyUbNdToL1NzF32(LocalTensor<float> l1, LocalTensor<float> ub)
 {
-    Nd2NzParams p{};
-    p.ndNum = 1;
-    p.nValue = 32;
-    p.dValue = 32;
-    p.srcDValue = srcDValue;
-    p.srcNdMatrixStride = 0;
-    p.dstNzC0Stride = 32;
-    p.dstNzNStride = 1;
-    p.dstNzMatrixStride = 0;
-    DataCopy(l1, gm, p);
-}
-
-__aicore__ inline void WaitGmToL1Fp32()
-{
-    SetFlag<HardEvent::MTE2_MTE1>(0);
-    WaitFlag<HardEvent::MTE2_MTE1>(0);
-}
-
-__aicore__ inline void CopyGmNdToL1NzF32(LocalTensor<float> l1, GlobalTensor<float> gm)
-{
-    CopyGmNdToL1NzF32NoWait(l1, gm);
-    WaitGmToL1Fp32();
+    for (uint32_t panel = 0; panel < 4; ++panel) {
+        DataCopy(l1[panel * 32 * 8], ub[panel * 8], DataCopyParams(32, 1, 3, 0));
+    }
 }
 
 __aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l1B,
@@ -176,28 +157,19 @@ __aicore__ inline void ComputeMmF32(LocalTensor<float> l1A, LocalTensor<float> l
     WaitFlag<HardEvent::M_FIX>(0);
 }
 
-__aicore__ inline void FixF32GmNzCs(GlobalTensor<float> gm, LocalTensor<float> l0C)
+__aicore__ inline void FixF32L1Matrix(LocalTensor<float> l1, LocalTensor<float> l0C)
 {
     FixpipeParamsArch3510<CO2Layout::NZ> p{};
     p.nSize = 32;
     p.mSize = 32;
     p.srcStride = 32;
-    p.dstStride = 32 * 8;
+    // L0C->L1 cannot enable FP32 Channel Split. Two contiguous 16-column
+    // panels are four adjacent 512-byte C0=8 fractals to the next LoadData.
+    p.dstStride = 32 * 16;
     p.quantPre = QuantMode_t::NoQuant;
-    p.isChannelSplit = true;
+    p.isChannelSplit = false;
     p.unitFlag = 0;
-    Fixpipe<float, float, kSparseFixL1>(gm, l0C, p);
-}
-
-__aicore__ inline void CopyGmNzToL1Fp32NoWait(LocalTensor<float> l1, GlobalTensor<float> gm)
-{
-    DataCopy(l1, gm, DataCopyParams(1, 32 * 32 / 8, 0, 0));
-}
-
-__aicore__ inline void CopyGmNzToL1Fp32(LocalTensor<float> l1, GlobalTensor<float> gm)
-{
-    CopyGmNzToL1Fp32NoWait(l1, gm);
-    WaitGmToL1Fp32();
+    Fixpipe<float, float, kSparseFixL1>(l1, l0C, p);
 }
 
 __aicore__ inline void FixB16L1(LocalTensor<bfloat16_t> l1, LocalTensor<float> l0C)

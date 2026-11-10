@@ -29,9 +29,6 @@ public:
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
         gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
-        gmInverse_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-            GetUserWorkspace(args.workspace) + td.workspaceOffset));
-        gmInverse_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
         }
@@ -63,14 +60,10 @@ public:
             }
             for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
                 window_ = ResolveWindow(loc_, chunk);
-                if (sub_ == static_cast<uint32_t>(chunk & 1)) {
-                    AivWait(kProdKkt);
-                    BuildInversePair(chunk);
-                }
+                AivWait(kProdKkt);
+                BuildInverse(chunk);
                 if (chunk + 1 < loc_.chunks) {
                     window_ = ResolveWindow(loc_, chunk + 1);
-                    // The owner recomputes its local copy after VCS; the other AIV
-                    // already did this work while VCS was running. No UB/L1 exchange.
                     PrepareGate(chunk + 1);
                 }
             }
@@ -120,10 +113,7 @@ private:
         ubKkt_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbKkt);
         ubL_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbL);
         ubX_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbX);
-        ubL10_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbL10);
-        for (uint32_t index = 0; index < 2; ++index) {
-            ubABf_[index] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbABf + index * 4 * kKiB);
-        }
+        ubABf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbABf);
         ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbZero);
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kPUbShift);
         l1InvX0_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvX0);
@@ -138,16 +128,6 @@ private:
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
         l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
-    }
-
-    __aicore__ inline void AicPublishOwner(uint16_t id, uint32_t owner)
-    {
-        CrossCoreSetFlag<0x4, PIPE_FIX>(static_cast<uint16_t>(id + owner * kAiv1FlagOffset));
-    }
-
-    __aicore__ inline void AicWaitOwner(uint16_t id, uint32_t owner)
-    {
-        CrossCoreWaitFlag<0x4, PIPE_MTE1>(static_cast<uint16_t>(id + owner * kAiv1FlagOffset));
     }
 
     __aicore__ inline void PrepareGate(int64_t chunk)
@@ -213,15 +193,15 @@ private:
         AivPublish(kProdK);
     }
 
-    __aicore__ inline void PublishInverse(int64_t chunk)
+    __aicore__ inline void PublishInverse()
     {
-        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        const int64_t record = tile * td_.valueHeads + loc_.hv;
-        const int64_t base = record * 4 * 1024;
-        // X is already packed as [X0|X1]. Keep that layout in GM and let the
-        // ND->NZ readers use a 64-float source row stride instead of 64 row writes.
-        CopyUbToGm(gmInverse_, base, ubX_, 2048);
-        CopyUbToGm(gmInverse_, base + 2048, ubL10_, 1024);
+        if (sub_ == 0) {
+            CopyUbNdToL1NzF32(l1InvX0_, ubX_);
+        } else {
+            CopyUbNdToL1NzF32(l1InvX1_, ubX_);
+            // L10 is a complete 32x32 leaf, not a local triangular matrix.
+            CopyUbNdToL1NzF32(l1InvL10_, ubX_[2048]);
+        }
         AivPublish(kProdInverse);
     }
 
@@ -243,58 +223,55 @@ private:
         DataCopyPad(gmT_[offset], src, params);
     }
 
-    __aicore__ inline void BuildInversePair(int64_t chunk)
+    __aicore__ inline void BuildInverse(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        // The previous inverse/T copies must release ubX_/ubABf_ before reuse.
+        SetFlag<HardEvent::MTE3_V>(0);
+        WaitFlag<HardEvent::MTE3_V>(0);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         const bool useEnergyRatio = GateRatioSafe(ubG_[slot], ubL_, static_cast<uint32_t>(window_.rows));
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         if (td_.useExp2 != 0) {
-            InversePair32x64VF<true>(ubKkt_, ubL_, ubL10_, ubX_, ubG_[slot], ubBeta_[slot],
-                                     ubEnergy_[slot], useEnergyRatio);
+            Inverse32DiagonalVF<true>(ubKkt_, ubL_, ubX_, ubG_[slot], ubBeta_[slot],
+                                      ubEnergy_[slot], useEnergyRatio, firstRow);
         } else {
-            InversePair32x64VF<false>(ubKkt_, ubL_, ubL10_, ubX_, ubG_[slot], ubBeta_[slot],
-                                      ubEnergy_[slot], useEnergyRatio);
+            Inverse32DiagonalVF<false>(ubKkt_, ubL_, ubX_, ubG_[slot], ubBeta_[slot],
+                                       ubEnergy_[slot], useEnergyRatio, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        PublishInverse(chunk);
+        PublishInverse();
 
-        for (uint32_t row = 0; row < 32; ++row) {
-            Cast(ubABf_[0][row * 32], ubX_[row * 64], RoundMode::CAST_RINT, 32);
-            Cast(ubABf_[1][row * 32], ubX_[row * 64 + 32], RoundMode::CAST_RINT, 32);
+        Cast(ubABf_, ubX_, RoundMode::CAST_RINT, 1024);
+        if (sub_ == 0) {
+            Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), 1024);
         }
-        Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), 1024);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        const uint32_t topRows = static_cast<uint32_t>(
-            window_.rows < kHalfRows ? window_.rows : kHalfRows);
-        const int64_t bottomRemaining = window_.rows - kHalfRows;
-        const uint32_t bottomRows = bottomRemaining <= 0 ? 0U
-            : static_cast<uint32_t>(bottomRemaining < kHalfRows ? bottomRemaining : kHalfRows);
-        WriteTBlock(topRows, 0, 0, ubABf_[0]);
-        WriteTBlock(topRows, 0, 32, ubZeroBf_);
-        WriteTBlock(bottomRows, 32, 32, ubABf_[1]);
+        if (sub_ == 0) {
+            const uint32_t topRows = static_cast<uint32_t>(
+                window_.rows < kHalfRows ? window_.rows : kHalfRows);
+            WriteTBlock(topRows, 0, 0, ubABf_);
+            WriteTBlock(topRows, 0, 32, ubZeroBf_);
+        } else {
+            const int64_t bottomRemaining = window_.rows - kHalfRows;
+            const uint32_t bottomRows = bottomRemaining <= 0 ? 0U
+                : static_cast<uint32_t>(bottomRemaining < kHalfRows ? bottomRemaining : kHalfRows);
+            WriteTBlock(bottomRows, 32, 32, ubABf_);
+        }
         AivPublish(kProdA);
     }
 
     __aicore__ inline void ComputeCoupling(int64_t chunk)
     {
-        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        const int64_t record = tile * td_.valueHeads + loc_.hv;
-        const int64_t base = record * 4 * 1024;
-        CopyGmNdToL1NzF32NoWait(l1InvX1_, gmInverse_[base + 32], 64);
-        CopyGmNdToL1NzF32NoWait(l1InvL10_, gmInverse_[base + 2048]);
-        WaitGmToL1Fp32();
         ComputeMmF32(l1InvX1_, l1InvL10_, l0Af_, l0Bf_, l0C0_);
-        FixF32GmNzCs(gmInverse_[base + 3072], l0C0_);
-        SetFlag<HardEvent::FIX_MTE2>(0);
-        WaitFlag<HardEvent::FIX_MTE2>(0);
+        FixF32L1Matrix(l1InvT_, l0C0_);
+        SetFlag<HardEvent::FIX_MTE1>(0);
+        WaitFlag<HardEvent::FIX_MTE1>(0);
         ReleaseL0C();
 
-        CopyGmNzToL1Fp32NoWait(l1InvT_, gmInverse_[base + 3072]);
-        CopyGmNdToL1NzF32NoWait(l1InvX0_, gmInverse_[base], 64);
-        WaitGmToL1Fp32();
         ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
         const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens, kChunk) + 32 * kChunk + 32;
@@ -308,16 +285,15 @@ private:
     __aicore__ inline void RunCube(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t owner = slot;
         AicWaitBoth(kProdK);
         ComputeMm(l1K_[slot], l1K_[slot], l0A0_, l0B0_, l0C0_, 64, 64, 128, false, false);
-        FixF32(ubKkt_, l0C0_, 64, 64, owner != 0);
+        FixF32Halves(ubKkt_, l0C0_, 64, 64);
         ReleaseL0C();
-        AicPublishOwner(kProdKkt, owner);
+        AicPublishToBoth(kProdKkt);
 
-        AicWaitOwner(kProdInverse, owner);
+        AicWaitBoth(kProdInverse);
         ComputeCoupling(chunk);
-        AicWaitOwner(kProdA, owner);
+        AicWaitBoth<PIPE_FIX>(kProdA);
     }
 
     FusedTilingData td_{};
@@ -326,12 +302,12 @@ private:
     uint32_t sub_{0};
 
     GlobalTensor<bfloat16_t> gmK_, gmT_;
-    GlobalTensor<float> gmG_, gmBeta_, gmInverse_;
+    GlobalTensor<float> gmG_, gmBeta_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 
     LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubVb_[2], ubKbg_[2];
-    LocalTensor<float> ubKkt_, ubL_, ubX_, ubL10_;
-    LocalTensor<bfloat16_t> ubABf_[2], ubZeroBf_;
+    LocalTensor<float> ubKkt_, ubL_, ubX_;
+    LocalTensor<bfloat16_t> ubABf_, ubZeroBf_;
     LocalTensor<float> ubG_[2], ubEnergy_[2], ubBeta_[2], ubKRstd_[2];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2];

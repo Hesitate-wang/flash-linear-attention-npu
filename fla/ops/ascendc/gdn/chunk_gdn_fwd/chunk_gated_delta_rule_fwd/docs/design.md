@@ -4,11 +4,11 @@
 
 This implementation targets Ascend 950 / arch35, BF16 Q/K/V, FP32 gate/beta, `K=V=128`, and low parallelism `B*Hv <= AIC/2`. The public ACLNN ABI and ten-element Python result are unchanged.
 
-The Producer computes only KKT, the packed inverse and its lower-left coupling. It no longer computes Kbg/Vb or W/U. Consumer recomputes W/U and fuses `U-W@S` directly in L0C. The full 64x64 Neumann implementation is not active.
+The Producer computes only KKT, two independent 32x32 diagonal inverses and their lower-left coupling. It no longer computes Kbg/Vb or W/U. Consumer recomputes W/U and fuses `U-W@S` directly in L0C. The packed 32x64 VCS and full 64x64 Neumann implementations are not active.
 
 Ascend 950 provides 512 KiB L1, 64 KiB L0A, 64 KiB L0B and 256 KiB L0C per AI Core. The Consumer keeps T, Kbg, Vb, W, U, H, vnew and right in L1/L0C wherever practical instead of making repeated GM roundtrips.
 
-## 2. Producer: packed inverse only
+## 2. Producer: split diagonal inverses
 
 For unit-lower-triangular `M=I-L`:
 
@@ -21,22 +21,22 @@ X1  = M11^-1
 X10 = X1 @ L10 @ X0
 ```
 
-One owner AIV receives the complete FP32 KKT. `InversePair32x64VF` packs both diagonal solves into one 32x64 workspace, using the left 32 lanes for X0 and right 32 lanes for X1. L10 is generated separately.
+AIC sends KKT rows 0:32 to AIV0 and rows 32:64 to AIV1. AIV0 constructs L00 and solves X0; AIV1 constructs L11 and solves X1. AIV1 also generates L10 from KKT rows 32:64 and columns 0:32. L10 is a complete 32x32 leaf: every local element satisfies the global causal condition, so no local triangular mask is applied.
 
-The owner publishes X0/X1/L10 as FP32 records. AIC computes `T=X1@L10` and `X10=T@X0` with two native-FP32 32x32 GEMMs. The owner writes the diagonal blocks of the complete inverse T, and AIC writes its lower-left block. T uses the internal `args.a` buffer and is not a public output. That buffer is allocated at full `[B,Hv,T,64]` size even when `aOutOptional` is null.
+Each AIV keeps its FP32 diagonal inverse as ND in UB and uploads it to native-FP32 NZ L1 with four strided MTE3 copies. AIV1 uploads the complete L10 leaf in the same way. AIC computes `P=X1@L10`, Fixpipes P directly from FP32 L0C to FP32 NZ L1, and computes `X10=P@X0`. No inverse operand or intermediate coupling result reaches GM. The AIVs write the diagonal blocks of the complete inverse T, and AIC writes its lower-left block. T uses the internal `args.a` buffer and is not a public output. That buffer is allocated at full `[B,Hv,T,64]` size even when `aOutOptional` is null.
 
 Producer does not load V, compute Kbg/Vb, or execute `T@Kbg` / `T@Vb`. There is no Producer W/U GM store.
 
-## 3. Alternating AIV preparation
+## 3. Dual-AIV preparation and inverse
 
-Chunk `c` uses owner `c&1`:
+For every chunk:
 
-1. Both AIVs initially prepare gate/beta and normalized K for chunk 0.
-2. The owner waits for its complete KKT and executes packed VCS. The other AIV prepares gate/beta for chunk `c+1`.
-3. After publishing the inverse, the owner recomputes its local gate/beta copy for chunk `c+1`; both perform their own 32-row L2Norm(K).
-4. AIC computes the next KKT after the current inverse is published. Ownership alternates.
+1. Both AIVs prepare gate/beta and their own 32-row normalized K band.
+2. AIC computes KKT and delivers the two 32x64 row bands to the corresponding AIVs.
+3. Both AIVs wait for KKT and execute independent 32x32 VCS solves. AIV1 additionally publishes the complete L10 leaf.
+4. After publishing their inverse blocks, both AIVs prepare the next chunk's gate/beta and normalized K. AIC performs the lower-left coupling.
 
-Each AIV keeps a local gate/beta copy for VCS and scaling. Duplicate work is only 64 elements per chunk; no L1-to-UB or GM gate sharing is used. Public intermediate outputs are disabled.
+Each AIV keeps a local gate/beta copy for VCS. Duplicate work is only 64 elements per chunk; no L1-to-UB or GM gate sharing is used. Public intermediate outputs are disabled.
 
 ## 4. Consumer: prepare in L1, then fuse W/U and FwdO
 
@@ -71,8 +71,8 @@ Pipeline mode-0 remains on AIC after the complete T has been written. Consumer A
 Producer-specific mode-4 flags are:
 
 - `kProdK`: both normalized K halves are ready for KKT.
-- `kProdKkt`: the complete KKT is delivered to the parity owner.
-- `kProdInverse`: X0/X1/L10 are ready for coupling.
+- `kProdKkt`: both 32x64 KKT row bands are delivered to their AIVs.
+- `kProdInverse`: X0, X1 and the complete L10 are ready in FP32 NZ L1 for coupling.
 - `kProdA`: the diagonal blocks of T are ready.
 
 Consumer-specific flags are:
@@ -86,7 +86,7 @@ Serial mode does not use mode-0. AIC publishes `kProdW` only after the final T, 
 
 ## 6. Memory
 
-Producer UB uses two 48 KiB K/input slots plus KKT, packed L/X/L10 and diagonal staging. Producer L1 uses two K slots and native-FP32 coupling records. The per-tile workspace contains packed X, L10 and T.
+Producer UB uses two 48 KiB K/input slots plus per-AIV KKT row bands, diagonal L/X storage and the complete L10 leaf. Producer L1 uses two K slots and native-FP32 X0/X1/L10/P records. The former per-tile inverse workspace is removed; its tiling fields remain zero for ABI compatibility.
 
 Consumer UB is 208 KiB per AIV, within the 208 KiB regbase budget. Consumer L1 is 192 KiB per MIX group, within the 512 KiB hardware budget. Existing regions are reused:
 

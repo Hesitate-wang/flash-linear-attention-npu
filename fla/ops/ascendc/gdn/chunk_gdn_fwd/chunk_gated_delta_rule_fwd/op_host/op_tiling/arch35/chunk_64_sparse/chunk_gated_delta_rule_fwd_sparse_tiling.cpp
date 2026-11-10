@@ -164,11 +164,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse key64 requires AIC cores."),
                 return ge::GRAPH_FAILED);
 
-    uint64_t tileCount = 0;
-    OP_CHECK_IF(!CheckedMulU64(chunkCount, static_cast<uint64_t>(hv), &tileCount) ||
-                    tileCount > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse tile count overflows."),
-                return ge::GRAPH_FAILED);
     const bool norm = SparseBool(attrs, 10);
     const bool betaSigmoid = SparseBool(attrs, 12);
     const bool writeH = SparseBool(attrs, 14);
@@ -268,20 +263,10 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         }
     }
 
-    // FP32 X0/X1/L10 exchange plus the T Channel Split record.
-    uint64_t inverseBytes = 0;
+    // X0/X1/L10 and the intermediate coupling result stay in L1.
     uint64_t cursor = 0;
-    uint64_t workspaceOffset = 0;
-    OP_CHECK_IF(!CheckedMulU64(tileCount,
-                               static_cast<uint64_t>(GdnChunk64Sparse::kSparseInverseBytesPerTile),
-                               &inverseBytes) ||
-                    !PlaceSparseWorkspaceRegion(inverseBytes, 512, &cursor, &workspaceOffset) ||
-                    workspaceOffset > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
-                    cursor > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "Inverse workspace sizing overflows."),
-                return ge::GRAPH_FAILED);
-    td.workspaceOffset = static_cast<int64_t>(workspaceOffset);
-    td.workspaceBytes = static_cast<int64_t>(cursor);
+    td.workspaceOffset = 0;
+    td.workspaceBytes = 0;
 
     auto *raw = context->GetRawTilingData();
     auto *workspace = context->GetWorkspaceSizes(1);
