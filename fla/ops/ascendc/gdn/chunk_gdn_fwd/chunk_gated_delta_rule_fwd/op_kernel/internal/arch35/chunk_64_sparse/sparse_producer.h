@@ -59,16 +59,16 @@ public:
                 PrepareGate(0);
             }
             for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
-                if (chunk + 1 < loc_.chunks) {
-                    // Prepare the next independent inputs before waiting for
-                    // the current KKT. The AIC can then run the next KKT in
-                    // parallel with the current inverse.
-                    window_ = ResolveWindow(loc_, chunk + 1);
-                    PrepareGate(chunk + 1);
-                }
                 window_ = ResolveWindow(loc_, chunk);
                 AivWait(kProdKkt);
                 BuildInverse(chunk);
+                if (chunk + 1 < loc_.chunks) {
+                    // Finish the current inverse before preparing the next K;
+                    // the next gate/beta work overlaps the next KKT.
+                    window_ = ResolveWindow(loc_, chunk + 1);
+                    PrepareKInputs(chunk + 1);
+                    PrepareGateBeta(chunk + 1);
+                }
             }
             if (td_.schedule != kSparseSchedulePipeline && loc_.chunks > 0) {
                 AivWaitMte3(kProdW);
@@ -88,7 +88,12 @@ public:
                     }
                 }
                 if (td_.schedule == kSparseSchedulePipeline) {
+                    // Publish the current T before starting the next KKT so the
+                    // Consumer can overlap this KKT with its current v_new/O/D.
                     PublishIterationAic<PIPE_M>();
+                }
+                if (iteration < loc_.chunks && iteration + 1 < loc_.chunks) {
+                    RunKkt(iteration + 1);
                 }
             }
         }
@@ -145,6 +150,12 @@ private:
 
     __aicore__ inline void PrepareGate(int64_t chunk)
     {
+        PrepareKInputs(chunk);
+        PrepareGateBeta(chunk);
+    }
+
+    __aicore__ inline void PrepareKInputs(int64_t chunk)
+    {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
@@ -161,14 +172,19 @@ private:
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
-                                             td_.valueHeads, td_.tokens);
-        // Strict load/wait/compute stages. KKT is released before the next
-        // gate/beta load starts; V is loaded only after gate processing.
+        // K is a complete publication unit. Gate/beta are issued separately so
+        // the AIC can start this KKT before the remaining gate work finishes.
         CopyGmToUb(ubK_[slot], gmK_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(0);
         PrepareK(chunk);
+    }
+
+    __aicore__ inline void PrepareGateBeta(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                                             td_.valueHeads, td_.tokens);
         CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
         CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(1);
@@ -313,11 +329,6 @@ private:
 
     __aicore__ inline void RunCube(int64_t chunk)
     {
-        if (chunk + 1 < loc_.chunks) {
-            // The next KKT uses the other UB/L0C slot and overlaps the current
-            // AIV inverse. The current coupling still uses its own KKT slot.
-            RunKkt(chunk + 1);
-        }
         AicWaitBoth(kProdInverse);
         ComputeCoupling(chunk);
         AicWaitBoth<PIPE_FIX>(kProdA);
