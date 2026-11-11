@@ -40,13 +40,24 @@ __aicore__ inline void StoreBf16(__ubuf__ bfloat16_t *dst, RegTensor<float> &src
 // packs those 64 values before the strided block store; DATA_BLOCK_COPY alone
 // does not perform DIST_PACK_B32 packing.
 __aicore__ inline void StoreBf16Nz64(__ubuf__ bfloat16_t *nz, uint32_t row,
-                                     RegTensor<float> &src, MaskReg all, MaskReg m64)
+                                     RegTensor<float> &src, MaskReg all, MaskReg m64,
+                                     uint32_t totalRows = static_cast<uint32_t>(kHalfRows))
 {
     RegTensor<bfloat16_t> packed, values, unused;
     Cast<bfloat16_t, float, kSparseCastF32B16>(packed, src, all);
     DeInterleave(values, unused, packed, packed);
     StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
-        nz + row * 16, values, static_cast<uint32_t>(kHalfRows), m64);
+        nz + row * 16, values, totalRows, m64);
+}
+
+// Store two contiguous FP32 halves as one 128-column tight-NZ row. Each
+// 64-column group occupies four panels of totalRows*16 BF16 elements.
+__aicore__ inline void StoreBf16Nz128(__ubuf__ bfloat16_t *nz, uint32_t row,
+                                      RegTensor<float> &lo, RegTensor<float> &hi,
+                                      MaskReg all, MaskReg m64, uint32_t totalRows)
+{
+    StoreBf16Nz64(nz, row, lo, all, m64, totalRows);
+    StoreBf16Nz64(nz + totalRows * 64, row, hi, all, m64, totalRows);
 }
 
 __aicore__ inline void GenerateScanIndices(LocalTensor<uint32_t> &shift)
@@ -957,6 +968,8 @@ __aicore__ inline void StateUpdateVF(LocalTensor<float> &state,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t n64 = 64;
+        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
         RegTensor<float> s0, s1, d0, d1, alpha;
         Duplicate(alpha, decay, all);
         for (uint16_t row = 0; row < 64; ++row) {
@@ -971,8 +984,7 @@ __aicore__ inline void StateUpdateVF(LocalTensor<float> &state,
             Add(s1, s1, d1, all);
             StoreAlign(s + offset, s0, all);
             StoreAlign(s + offset + 64, s1, all);
-            StoreBf16(b + offset, s0, all);
-            StoreBf16(b + offset + 64, s1, all);
+            StoreBf16Nz128(b, row, s0, s1, all, m64, static_cast<uint32_t>(kHalfDim));
         }
     }
 }
@@ -1066,6 +1078,8 @@ __aicore__ inline void StateWidenVF(LocalTensor<bfloat16_t> &input,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t n64 = 64;
+        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
         RegTensor<float> v0, v1;
         for (uint16_t row = 0; row < 64; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
@@ -1073,8 +1087,7 @@ __aicore__ inline void StateWidenVF(LocalTensor<bfloat16_t> &input,
             LoadBf16(v1, src + offset + 64, all);
             StoreAlign(s + offset, v0, all);
             StoreAlign(s + offset + 64, v1, all);
-            StoreBf16(b + offset, v0, all);
-            StoreBf16(b + offset + 64, v1, all);
+            StoreBf16Nz128(b, row, v0, v1, all, m64, static_cast<uint32_t>(kHalfDim));
         }
     }
 }
@@ -1087,13 +1100,14 @@ __aicore__ inline void StateMirrorVF(LocalTensor<float> &state,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t n64 = 64;
+        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
         RegTensor<float> v0, v1;
         for (uint16_t row = 0; row < 64; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
             LoadAlign(v0, s + offset);
             LoadAlign(v1, s + offset + 64);
-            StoreBf16(b + offset, v0, all);
-            StoreBf16(b + offset + 64, v1, all);
+            StoreBf16Nz128(b, row, v0, v1, all, m64, static_cast<uint32_t>(kHalfDim));
         }
     }
 }

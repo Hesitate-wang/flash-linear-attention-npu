@@ -18,10 +18,10 @@ constexpr uint16_t kAiv1FlagOffset = 16;
 template <pipe_t WaitPipe>
 __aicore__ inline void PublishIterationAic()
 {
-    if ASCEND_IS_AIC {
-        CrossCoreSetFlag<0x0, PIPE_FIX>(kSparseBarrierFlagId);
-        CrossCoreWaitFlag<0x0, WaitPipe>(kSparseBarrierFlagId);
-    }
+    // if ASCEND_IS_AIC {
+    //     CrossCoreSetFlag<0x0, PIPE_FIX>(kSparseBarrierFlagId);
+    //     CrossCoreWaitFlag<0x0, WaitPipe>(kSparseBarrierFlagId);
+    // }
 }
 
 __aicore__ inline void AivPublish(uint16_t id)

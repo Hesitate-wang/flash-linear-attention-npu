@@ -273,8 +273,10 @@ private:
         ReleaseL0C();
 
         ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
+        // X10 is the lower-left block. X1 is independently written to the
+        // lower-right block by AIV1, so the two stores must not overlap.
         const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
-                                          td_.valueHeads, td_.tokens, kChunk) + 32 * kChunk + 32;
+                                          td_.valueHeads, td_.tokens, kChunk) + 32 * kChunk;
         const int64_t remaining = window_.rows - 32;
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < 32 ? remaining : 32);

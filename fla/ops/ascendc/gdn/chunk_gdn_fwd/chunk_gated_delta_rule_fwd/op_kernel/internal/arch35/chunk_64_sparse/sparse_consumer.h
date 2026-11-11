@@ -16,6 +16,7 @@ namespace GdnChunk64Sparse {
 constexpr uint16_t kConsInputs = 0;
 constexpr uint16_t kConsP = 1;
 constexpr uint16_t kConsVn = 2;
+constexpr uint16_t kConsWU = 3;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsQk = 6;
@@ -109,9 +110,18 @@ public:
                 if (td_.stateFp32 != 0) {
                     DataCopy(gmFinalF_[offset], ubStateF_, kStateElems / 2);
                 } else {
-                    DataCopy(gmFinalB_[offset], ubStateB_, kStateElems / 2);
+                    // The recurrent BF16 mirror is tight NZ for H uploads, but
+                    // public final_state is ND. ubD_ is dead after StateUpdate.
+                    Bf16PanelsToNd(ubInitB_, ubStateB_);
+                    SetFlag<HardEvent::V_MTE3>(0);
+                    WaitFlag<HardEvent::V_MTE3>(0);
+                    DataCopy(gmFinalB_[offset], ubInitB_, kStateElems / 2);
                 }
             }
+            // Serial mode reuses this UB for the next chain's Producer. Do not
+            // let its Vector/MTE2 writes overtake the final-state MTE3 read.
+            SetFlag<HardEvent::MTE3_V>(0);
+            WaitFlag<HardEvent::MTE3_V>(0);
         }
     }
 
@@ -214,15 +224,18 @@ private:
             WaitFlag<HardEvent::MTE3_V>(0);
         }
         LoadQkInputs(chunk, firstRow, rows);
+        // QKT/QS need only Q/K/S; do not make their publication wait for V.
         AivPublish(kConsInputs);
         // Kbg is stored negated so U + W@S directly produces U - trueW@S.
-        // Vb and Kbg stay in L1 while AIC runs QK and the producer builds T.
+        // Kbg overlaps the in-flight V load and the AIC's QKT/QExp@S work.
+        ScaleKbgNzVF(ubK_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
+        WaitFlag<HardEvent::MTE2_V>(3);
         ScaleVbNzVF(ubV_, ubU_, ubBeta_, firstRow);
-        ScaleKbgNzVF(ubKHat_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1U_, ubU_, kHalfRows, kDim, kChunk, firstRow);
         CopyNzToL1(l1W_, ubW_, kHalfRows, kDim, kChunk, firstRow);
+        AivPublish(kConsWU);
 
         AivWait(kConsQk);
         if (td_.useExp2 != 0) {
@@ -313,6 +326,9 @@ private:
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+
+        // Stage gate/beta first. Once their Vector work has been issued, the
+        // next MTE2 load runs in parallel with that work.
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window_.rows));
@@ -320,12 +336,6 @@ private:
                                                td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(0);
-        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(1);
-        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
-        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(3);
         WaitFlag<HardEvent::MTE2_V>(0);
 
         float aLog = 0.0f;
@@ -343,30 +353,55 @@ private:
         } else {
             CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
         }
+
+        // Q load overlaps gate/cumsum. Publish QExp and S together so the AIC
+        // can retain QExp@S before T arrives.
+        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(1);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         gateRatioSafe_ = GateRatioSafe(ubG_, ubP_, static_cast<uint32_t>(window_.rows));
 
         WaitFlag<HardEvent::MTE2_V>(1);
         if (td_.useNorm != 0) {
-            NormalizeRowsVF(ubQ_, ubQHat_, ubQRstd_);
+            // Keep normalized ND rows in ubQ_ for QExp, while ubQHat_ receives
+            // tight NZ panels for a single multi-panel MTE3 upload.
+            NormalizeRowsNzVF<true, true>(ubQ_, ubQHat_, ubQ_, ubQRstd_);
         }
-        QExpNzVF(ubQHat_, ubOSB_, ubEnergy_, firstRow);
+        QExpNzVF(ubQ_, ubOSB_, ubEnergy_, firstRow);
+
+        // K load overlaps Q normalization/QExp. QHat, QExp and S are then
+        // drained through MTE3 while the next Vector stage handles K.
+        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        if (td_.useNorm != 0) {
+            CopyNzToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        }
         CopyNzToL1(l1QExp_, ubOSB_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1H_[chunk & 1], ubStateB_, kHalfDim, kDim, kDim,
+                   sub_ * static_cast<uint32_t>(kHalfDim));
 
         WaitFlag<HardEvent::MTE2_V>(2);
         if (td_.useNorm != 0) {
-            NormalizeRowsVF(ubK_, ubKHat_, ubKRstd_);
+            // ubK_ remains the normalized ND source for Kbg; ubKHat_ is NZ.
+            NormalizeRowsNzVF<true, true>(ubK_, ubKHat_, ubK_, ubKRstd_);
         }
+
+        // V load overlaps K normalization and then Kbg. Event 3 deliberately
+        // remains pending so the caller can publish Q/K/S before using Vb.
+        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(3);
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
-        UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
-        UploadNdToL1(l1H_[chunk & 1], ubStateB_, kHalfDim, kDim, kDim,
-                     sub_ * static_cast<uint32_t>(kHalfDim));
-        WaitFlag<HardEvent::MTE2_V>(3);
+        if (td_.useNorm != 0) {
+            CopyNzToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1K_, ubKHat_, kHalfRows, kDim, kChunk, firstRow);
+        }
     }
 
     __aicore__ inline void LoadT()
@@ -387,37 +422,48 @@ private:
         WaitFlag<HardEvent::MTE2_MTE1>(0);
     }
 
-    __aicore__ inline void RunCubePrepare(int64_t)
+    __aicore__ inline void RunCubePrepare(int64_t chunk)
     {
         AicWaitBoth(kConsInputs);
         ComputeMm(l1QHat_, l1K_, l0A0_, l0B1_, l0C1_, 64, 64, 128, false, false);
         FixF32Halves(ubQk_, l0C1_, 64, 64);
         ReleaseL0C();
+        // Release APrime generation before starting the second independent GEMM.
         AicPublishToBoth(kConsQk);
+
+        // QS is independent of T. Keep its accumulator live in L0C3 while the
+        // T/v_new path uses L0C0/L0C2. B0 retains S for the later W@S GEMM.
+        ComputeMm(l1QExp_, l1H_[chunk & 1], l0A0_, l0B0_, l0C3_, 64, 128, 128,
+                  false, td_.stateVFirst == 0);
+        // No Fixpipe follows QS. This is only the FIX_M event priming required
+        // by the next independent L0C2 GEMM; the QS accumulator stays live.
+        ReleaseL0C();
     }
 
-    __aicore__ inline void RunCubeAfterWu(int64_t chunk)
+    __aicore__ inline void RunCubeAfterWu(int64_t)
     {
         LoadT();
+        AicWaitBoth(kConsWU);
         // Kbg is negated: W = -trueW. U starts in L0C and W@S accumulates
         // into it, so the final accumulator is U - trueW@S = v_new.
-        ComputeMm(l1T_, l1W_, l0A0_, l0B0_, l0C2_, 64, 128, 64, false, true);
+        ComputeMm(l1T_, l1W_, l0A0_, l0B1_, l0C2_, 64, 128, 64, false, true);
         FixB16L1Matrix(l1W_, l0C2_, 64, 128, 64);
         ReleaseL0C();
 
-        ComputeMm(l1T_, l1U_, l0A0_, l0B0_, l0C0_, 64, 128, 64, false, true);
-        ComputeMm(l1W_, l1H_[chunk & 1], l0A0_, l0B0_, l0C0_, 64, 128, 128,
-                  false, td_.stateVFirst == 0, false);
+        ComputeMm(l1T_, l1U_, l0A0_, l0B1_, l0C0_, 64, 128, 64, false, true);
+        // B0 still holds S from the early QS GEMM; only W needs an MTE1 load.
+        ComputeMmReuseB(l1W_, l0A0_, l0B0_, l0C0_, 64, 128, 128, false, false);
         FixB16Halves(ubU_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
-        ComputeMmReuseB(l1QExp_, l0A0_, l0B0_, l0C0_, 64, 128, 128, false, true);
-
         AicWaitBoth(kConsVn);
-        ComputeMm(l1APrime_, l1VNew_, l0A1_, l0B1_, l0C0_, 64, 128, 64,
+        // Consume the v_new Fixpipe event before O's ReleaseL0C. The explicit
+        // wait replaces the one formerly provided by the late QS GEMM.
+        WaitFlag<HardEvent::FIX_M>(0);
+        ComputeMm(l1APrime_, l1VNew_, l0A1_, l0B1_, l0C3_, 64, 128, 64,
                   false, true, false);
-        FixB16ScaledHalves(ubO_, l0C0_, 64, 128, td_.scale);
+        FixB16ScaledHalves(ubO_, l0C3_, 64, 128, td_.scale);
         ReleaseL0C();
         AicPublishToBoth(kConsOL);
 

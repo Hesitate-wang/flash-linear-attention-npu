@@ -79,7 +79,8 @@ __aicore__ inline void ComputeMm(LocalTensor<bfloat16_t> l1A,
     IssueMm(l0A, l0B, l0C, m, n, k, initC);
 }
 
-// Reuse the B operand left in L0 by the immediately preceding GEMM.
+// Reuse a B operand retained in an L0 bank by an earlier GEMM. The caller
+// must prove that no intervening LoadB writes that bank.
 __aicore__ inline void ComputeMmReuseB(LocalTensor<bfloat16_t> l1A,
                                        LocalTensor<bfloat16_t> l0A,
                                        LocalTensor<bfloat16_t> l0B,
