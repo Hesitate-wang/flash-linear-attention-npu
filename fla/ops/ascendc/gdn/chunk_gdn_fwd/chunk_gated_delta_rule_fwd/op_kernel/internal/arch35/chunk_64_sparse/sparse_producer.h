@@ -80,6 +80,11 @@ public:
                 RunKkt(0);
             }
             for (int64_t iteration = 0; iteration < iterations; ++iteration) {
+                if (td_.schedule == kSparseSchedulePipeline && iteration >= 2) {
+                    // Drain iteration i-2 before reusing its parity flag and
+                    // before consuming this iteration's inverse.
+                    WaitIterationAic<PIPE_M>(iteration);
+                }
                 if (iteration < loc_.chunks) {
                     window_ = ResolveWindow(loc_, iteration);
                     RunCube(iteration);
@@ -90,10 +95,20 @@ public:
                 if (td_.schedule == kSparseSchedulePipeline) {
                     // Publish the current T before starting the next KKT so the
                     // Consumer can overlap this KKT with its current v_new/O/D.
-                    PublishIterationAic<PIPE_M>();
+                    SetIterationAic(iteration);
                 }
                 if (iteration < loc_.chunks && iteration + 1 < loc_.chunks) {
                     RunKkt(iteration + 1);
+                }
+            }
+            if (td_.schedule == kSparseSchedulePipeline) {
+                // The final two generations have no later iteration in which
+                // to drain them. Wait only for flags that were actually set.
+                if (iterations >= 2) {
+                    WaitIterationAic<PIPE_M>(iterations - 2);
+                }
+                if (iterations >= 1) {
+                    WaitIterationAic<PIPE_M>(iterations - 1);
                 }
             }
         }

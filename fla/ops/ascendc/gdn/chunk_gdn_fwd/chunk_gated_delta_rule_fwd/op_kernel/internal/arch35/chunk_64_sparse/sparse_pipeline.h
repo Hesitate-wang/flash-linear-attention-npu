@@ -41,7 +41,7 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             }
             // T is complete after the producer's mode-0. The next operation is
             // the Consumer's GM->L1 T copy, so block MTE2 rather than only FIX.
-            PublishIterationAic<PIPE_MTE2>();
+            PublishIterationAic<PIPE_MTE2>(iteration);
             if (iteration < chunks) {
                 role.RunAfterWu(iteration);
             }

@@ -12,16 +12,36 @@ namespace GdnChunk64Sparse {
 using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
+constexpr uint16_t kSparseBarrierFlagIdAlt = 12;
 
-// AIC publishes W/U after the final L0C->GM Fixpipe. Mode 0 synchronizes the
-// AIC dimension; Consumer AIC uses the same barrier before releasing its AIVs.
-template <pipe_t WaitPipe>
-__aicore__ inline void PublishIterationAic()
+__aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 {
-    // if ASCEND_IS_AIC {
-    //     CrossCoreSetFlag<0x0, PIPE_FIX>(kSparseBarrierFlagId);
-    //     CrossCoreWaitFlag<0x0, WaitPipe>(kSparseBarrierFlagId);
-    // }
+    return (iteration & 1) != 0 ? kSparseBarrierFlagIdAlt : kSparseBarrierFlagId;
+}
+
+// Producer sets this after the current T is complete but delays the matching
+// wait until the same parity flag is reused two iterations later.
+__aicore__ inline void SetIterationAic(int64_t iteration)
+{
+    if ASCEND_IS_AIC {
+        CrossCoreSetFlag<0x0, PIPE_FIX>(IterationBarrierFlag(iteration));
+    }
+}
+
+template <pipe_t WaitPipe>
+__aicore__ inline void WaitIterationAic(int64_t iteration)
+{
+    if ASCEND_IS_AIC {
+        CrossCoreWaitFlag<0x0, WaitPipe>(IterationBarrierFlag(iteration));
+    }
+}
+
+// Consumer still publishes and drains each T generation immediately.
+template <pipe_t WaitPipe>
+__aicore__ inline void PublishIterationAic(int64_t iteration)
+{
+    SetIterationAic(iteration);
+    WaitIterationAic<WaitPipe>(iteration);
 }
 
 __aicore__ inline void AivPublish(uint16_t id)
