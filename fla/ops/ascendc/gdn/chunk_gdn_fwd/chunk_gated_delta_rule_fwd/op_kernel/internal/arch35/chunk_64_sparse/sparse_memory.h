@@ -22,9 +22,11 @@ constexpr uint32_t kPUbVb = 32 * kKiB;
 constexpr uint32_t kPUbKbg = 40 * kKiB;
 
 // Each AIV receives its 32x64 KKT row band and solves one 32x32 diagonal
+// inverse. KKT is double-buffered so the next KKT can overlap the current
 // inverse. AIV1 appends the complete 32x32 L10 leaf after its inverse storage.
 constexpr uint32_t kPUbKkt = 2 * kPUbSlotBytes;
-constexpr uint32_t kPUbL = kPUbKkt + 8 * kKiB;
+constexpr uint32_t kPUbKktSlotBytes = 8 * kKiB;
+constexpr uint32_t kPUbL = kPUbKkt + 2 * kPUbKktSlotBytes;
 constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
 constexpr uint32_t kPUbABf = kPUbX + 12 * kKiB;
 constexpr uint32_t kPUbZero = kPUbABf + 4 * kKiB;
@@ -33,18 +35,19 @@ constexpr uint32_t kPUbShift = kPUbGates + 4 * kKiB;
 constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;
 static_assert(kPUbEnd <= kUbBudget);
 
-// Two K/Vb/Kbg slots, one complete BF16 inverse, and native-FP32 coupling
-// records. No Neumann P/S or identity storage remains.
+// Two K/Vb/Kbg slots and two sets of native-FP32 inverse/coupling records.
+// The next inverse cannot overwrite the L1 inputs of the current coupling.
 constexpr uint32_t kPL1SlotBytes = 48 * kKiB;
 constexpr uint32_t kPL1K = 0;
 constexpr uint32_t kPL1Vb = 16 * kKiB;
 constexpr uint32_t kPL1Kbg = 32 * kKiB;
 constexpr uint32_t kPL1A = 2 * kPL1SlotBytes;
+constexpr uint32_t kPL1InvSlotBytes = 4 * kKiB;
 constexpr uint32_t kPL1InvX0 = kPL1A + 8 * kKiB;
-constexpr uint32_t kPL1InvX1 = kPL1InvX0 + 4 * kKiB;
-constexpr uint32_t kPL1InvL10 = kPL1InvX1 + 4 * kKiB;
-constexpr uint32_t kPL1InvT = kPL1InvL10 + 4 * kKiB;
-constexpr uint32_t kPL1End = kPL1InvT + 4 * kKiB;
+constexpr uint32_t kPL1InvX1 = kPL1InvX0 + 2 * kPL1InvSlotBytes;
+constexpr uint32_t kPL1InvL10 = kPL1InvX1 + 2 * kPL1InvSlotBytes;
+constexpr uint32_t kPL1InvT = kPL1InvL10 + 2 * kPL1InvSlotBytes;
+constexpr uint32_t kPL1End = kPL1InvT + 2 * kPL1InvSlotBytes;
 static_assert(kPL1End <= 512 * kKiB);
 
 // Consumer UB, per AIV.

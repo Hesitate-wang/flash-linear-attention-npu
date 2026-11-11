@@ -59,13 +59,16 @@ public:
                 PrepareGate(0);
             }
             for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
-                window_ = ResolveWindow(loc_, chunk);
-                AivWait(kProdKkt);
-                BuildInverse(chunk);
                 if (chunk + 1 < loc_.chunks) {
+                    // Prepare the next independent inputs before waiting for
+                    // the current KKT. The AIC can then run the next KKT in
+                    // parallel with the current inverse.
                     window_ = ResolveWindow(loc_, chunk + 1);
                     PrepareGate(chunk + 1);
                 }
+                window_ = ResolveWindow(loc_, chunk);
+                AivWait(kProdKkt);
+                BuildInverse(chunk);
             }
             if (td_.schedule != kSparseSchedulePipeline && loc_.chunks > 0) {
                 AivWaitMte3(kProdW);
@@ -73,6 +76,9 @@ public:
         }
         if ASCEND_IS_AIC {
             const int64_t iterations = td_.schedule == kSparseSchedulePipeline ? td_.maxChunks : loc_.chunks;
+            if (loc_.chunks > 0) {
+                RunKkt(0);
+            }
             for (int64_t iteration = 0; iteration < iterations; ++iteration) {
                 if (iteration < loc_.chunks) {
                     window_ = ResolveWindow(loc_, iteration);
@@ -104,22 +110,27 @@ private:
             ubEnergy_[slot] = ubG_[slot][64];
             ubBeta_[slot] = ubG_[slot][192];
             ubKRstd_[slot] = ubG_[slot][288];
+            ubKkt_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
+                kPUbKkt + slot * kPUbKktSlotBytes);
 
             const uint32_t l1Base = slot * kPL1SlotBytes;
             l1K_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(l1Base + kPL1K);
             l1Vb_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(l1Base + kPL1Vb);
             l1Kbg_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(l1Base + kPL1Kbg);
+            l1InvX0_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, float>(
+                kPL1InvX0 + slot * kPL1InvSlotBytes);
+            l1InvX1_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, float>(
+                kPL1InvX1 + slot * kPL1InvSlotBytes);
+            l1InvL10_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, float>(
+                kPL1InvL10 + slot * kPL1InvSlotBytes);
+            l1InvT_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, float>(
+                kPL1InvT + slot * kPL1InvSlotBytes);
         }
-        ubKkt_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbKkt);
         ubL_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbL);
         ubX_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbX);
         ubABf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbABf);
         ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbZero);
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kPUbShift);
-        l1InvX0_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvX0);
-        l1InvX1_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvX1);
-        l1InvL10_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvL10);
-        l1InvT_ = buf.GetBuffer<BufferType::ASCEND_CB, float>(kPL1InvT);
         l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
         l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
         l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
@@ -128,6 +139,8 @@ private:
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
         l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
+        l0CKkt_[0] = l0C0_;
+        l0CKkt_[1] = l0C2_;
     }
 
     __aicore__ inline void PrepareGate(int64_t chunk)
@@ -193,14 +206,15 @@ private:
         AivPublish(kProdK);
     }
 
-    __aicore__ inline void PublishInverse()
+    __aicore__ inline void PublishInverse(int64_t chunk)
     {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         if (sub_ == 0) {
-            CopyUbNdToL1NzF32(l1InvX0_, ubX_);
+            CopyUbNdToL1NzF32(l1InvX0_[slot], ubX_);
         } else {
-            CopyUbNdToL1NzF32(l1InvX1_, ubX_);
+            CopyUbNdToL1NzF32(l1InvX1_[slot], ubX_);
             // L10 is a complete 32x32 leaf, not a local triangular matrix.
-            CopyUbNdToL1NzF32(l1InvL10_, ubX_[2048]);
+            CopyUbNdToL1NzF32(l1InvL10_[slot], ubX_[2048]);
         }
         AivPublish(kProdInverse);
     }
@@ -234,15 +248,15 @@ private:
         const bool useEnergyRatio = GateRatioSafe(ubG_[slot], ubL_, static_cast<uint32_t>(window_.rows));
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         if (td_.useExp2 != 0) {
-            Inverse32DiagonalVF<true>(ubKkt_, ubL_, ubX_, ubG_[slot], ubBeta_[slot],
+            Inverse32DiagonalVF<true>(ubKkt_[slot], ubL_, ubX_, ubG_[slot], ubBeta_[slot],
                                       ubEnergy_[slot], useEnergyRatio, firstRow);
         } else {
-            Inverse32DiagonalVF<false>(ubKkt_, ubL_, ubX_, ubG_[slot], ubBeta_[slot],
+            Inverse32DiagonalVF<false>(ubKkt_[slot], ubL_, ubX_, ubG_[slot], ubBeta_[slot],
                                        ubEnergy_[slot], useEnergyRatio, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        PublishInverse();
+        PublishInverse(chunk);
 
         Cast(ubABf_, ubX_, RoundMode::CAST_RINT, 1024);
         if (sub_ == 0) {
@@ -266,13 +280,15 @@ private:
 
     __aicore__ inline void ComputeCoupling(int64_t chunk)
     {
-        ComputeMmF32(l1InvX1_, l1InvL10_, l0Af_, l0Bf_, l0C0_);
-        FixF32L1Matrix(l1InvT_, l0C0_);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        LocalTensor<float> l0C = l0CKkt_[slot];
+        ComputeMmF32(l1InvX1_[slot], l1InvL10_[slot], l0Af_, l0Bf_, l0C);
+        FixF32L1Matrix(l1InvT_[slot], l0C);
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
         ReleaseL0C();
 
-        ComputeMmF32(l1InvT_, l1InvX0_, l0Af_, l0Bf_, l0C0_);
+        ComputeMmF32(l1InvT_[slot], l1InvX0_[slot], l0Af_, l0Bf_, l0C);
         // X10 is the lower-left block. X1 is independently written to the
         // lower-right block by AIV1, so the two stores must not overlap.
         const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
@@ -280,19 +296,28 @@ private:
         const int64_t remaining = window_.rows - 32;
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < 32 ? remaining : 32);
-        FixB16GmNd(gmT_[offset], l0C0_, rows, 32, 64, 32);
+        FixB16GmNd(gmT_[offset], l0C, rows, 32, 64, 32);
         ReleaseL0C();
+    }
+
+    __aicore__ inline void RunKkt(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        AicWaitBoth(kProdK);
+        ComputeMm(l1K_[slot], l1K_[slot], l0A0_, l0B0_, l0CKkt_[slot], 64, 64, 128,
+                  false, false);
+        FixF32Halves(ubKkt_[slot], l0CKkt_[slot], 64, 64);
+        ReleaseL0C();
+        AicPublishToBoth(kProdKkt);
     }
 
     __aicore__ inline void RunCube(int64_t chunk)
     {
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        AicWaitBoth(kProdK);
-        ComputeMm(l1K_[slot], l1K_[slot], l0A0_, l0B0_, l0C0_, 64, 64, 128, false, false);
-        FixF32Halves(ubKkt_, l0C0_, 64, 64);
-        ReleaseL0C();
-        AicPublishToBoth(kProdKkt);
-
+        if (chunk + 1 < loc_.chunks) {
+            // The next KKT uses the other UB/L0C slot and overlaps the current
+            // AIV inverse. The current coupling still uses its own KKT slot.
+            RunKkt(chunk + 1);
+        }
         AicWaitBoth(kProdInverse);
         ComputeCoupling(chunk);
         AicWaitBoth<PIPE_FIX>(kProdA);
@@ -308,15 +333,15 @@ private:
     GlobalTensor<float> gmALog_, gmDtBias_;
 
     LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubVb_[2], ubKbg_[2];
-    LocalTensor<float> ubKkt_, ubL_, ubX_;
+    LocalTensor<float> ubKkt_[2], ubL_, ubX_;
     LocalTensor<bfloat16_t> ubABf_, ubZeroBf_;
     LocalTensor<float> ubG_[2], ubEnergy_[2], ubBeta_[2], ubKRstd_[2];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2];
-    LocalTensor<float> l1InvX0_, l1InvX1_, l1InvL10_, l1InvT_;
+    LocalTensor<float> l1InvX0_[2], l1InvX1_[2], l1InvL10_[2], l1InvT_[2];
     LocalTensor<bfloat16_t> l0A0_, l0B0_, l0B1_;
     LocalTensor<float> l0Af_, l0Bf_;
-    LocalTensor<float> l0C0_, l0C2_, l0C3_;
+    LocalTensor<float> l0C0_, l0C2_, l0C3_, l0CKkt_[2];
 };
 
 } // namespace GdnChunk64Sparse
