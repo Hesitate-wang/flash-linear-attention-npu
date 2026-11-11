@@ -59,8 +59,8 @@ constexpr uint32_t kCUbOS = 96 * kKiB;
 constexpr uint32_t kCUbQHat = 112 * kKiB;
 constexpr uint32_t kCUbKHat = 120 * kKiB;
 constexpr uint32_t kCUbU = 128 * kKiB;
-// v_new bypasses UB and is Fixpiped directly from L0C to L1. Keep this slot
-// reserved so the remaining Consumer UB offsets stay unchanged.
+// v_new uses this UB only for right generation; O uses a separate L0C->L1
+// Fixpipe. Keeping it independent from ubU_ avoids a next-Vb WAR hazard.
 constexpr uint32_t kCUbVNew = 136 * kKiB;
 constexpr uint32_t kCUbRight = 144 * kKiB;
 constexpr uint32_t kCUbW = 152 * kKiB;
@@ -75,18 +75,23 @@ constexpr uint32_t kCUbV = 200 * kKiB;
 constexpr uint32_t kCUbEnd = 208 * kKiB;
 static_assert(kCUbEnd <= kUbBudget);
 
+// Consumer L1 uses chunk-parity slots for values whose next-chunk upload can
+// overlap the current Cube consumer. QHat, H, vNew, right and T keep their
+// existing lifetimes; H is already double-buffered.
+constexpr uint32_t kCL1Slot16 = 16 * kKiB;
 constexpr uint32_t kCL1W = 0;
-constexpr uint32_t kCL1U = 16 * kKiB;
-constexpr uint32_t kCL1QHat = 32 * kKiB;
-constexpr uint32_t kCL1QExp = 48 * kKiB;
-constexpr uint32_t kCL1K = 64 * kKiB;
-constexpr uint32_t kCL1H0 = 80 * kKiB;
-constexpr uint32_t kCL1H1 = 112 * kKiB;
-constexpr uint32_t kCL1VNew = 144 * kKiB;
-constexpr uint32_t kCL1Right = 160 * kKiB;
-constexpr uint32_t kCL1APrime = 176 * kKiB;
-constexpr uint32_t kCL1T = 184 * kKiB;
-constexpr uint32_t kCL1End = 192 * kKiB;
+constexpr uint32_t kCL1U = 32 * kKiB;
+constexpr uint32_t kCL1QHat = 64 * kKiB;
+constexpr uint32_t kCL1QExp = 80 * kKiB;
+constexpr uint32_t kCL1K = 112 * kKiB;
+constexpr uint32_t kCL1H0 = 144 * kKiB;
+constexpr uint32_t kCL1H1 = 176 * kKiB;
+constexpr uint32_t kCL1VNew = 208 * kKiB;
+constexpr uint32_t kCL1Right = 224 * kKiB;
+constexpr uint32_t kCL1APrime = 240 * kKiB;
+constexpr uint32_t kCL1APrimeSlotBytes = 8 * kKiB;
+constexpr uint32_t kCL1T = 256 * kKiB;
+constexpr uint32_t kCL1End = 264 * kKiB;
 static_assert(kCL1End <= 512 * kKiB);
 
 constexpr uint32_t kL0Bank0 = 0;

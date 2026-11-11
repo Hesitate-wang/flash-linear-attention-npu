@@ -27,6 +27,7 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     ConsumerRole role;
     role.Init(args, td);
     role.BeginChain(args, chain);
+    role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
     if ASCEND_IS_AIV {
         for (int64_t chunk = 0; chunk < chunks; ++chunk) {
@@ -67,6 +68,7 @@ __aicore__ inline void RunSerial(const PhaseArgs &args, const FusedTilingData &t
         }
         PublishChainInGroup();
         consumer.BeginChain(args, chain);
+        consumer.RunPrologue();
         for (int64_t chunk = 0; chunk < chunks; ++chunk) {
             consumer.RunChunk(chunk);
         }
