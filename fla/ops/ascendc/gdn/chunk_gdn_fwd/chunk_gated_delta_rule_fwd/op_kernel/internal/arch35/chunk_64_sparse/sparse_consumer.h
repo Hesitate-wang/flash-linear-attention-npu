@@ -97,9 +97,6 @@ public:
         if ASCEND_IS_AIV {
             RunAivPrepare(chunk);
         }
-        if ASCEND_IS_AIC {
-            RunCubePrepare(chunk);
-        }
     }
 
     __aicore__ inline void RunAfterWu(int64_t chunk)
@@ -234,18 +231,16 @@ private:
     {
         PrepareNextQK(0);
         PrepareNextQExpDecay(0);
+        BuildAPrime(0);
         PrepareNextKbg(0);
         PrepareNextVb(0);
-        BuildAPrime(0);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
-        if (chunk + 1 < loc_.chunks) {
-            PrepareNextQK(chunk + 1);
-        }
         PrepareCurrentState(chunk);
         if (chunk + 1 < loc_.chunks) {
+            PrepareNextQK(chunk + 1);
             PrepareNextQExpDecay(chunk + 1);
         }
     }
@@ -314,8 +309,11 @@ private:
         }
         AivPublish(kConsRight);
         if (chunk + 1 < loc_.chunks) {
-            // D uses the current right while the AIV prepares the next Kbg.
+            // The next QKT is published after the current O. Prepare its
+            // APrime and W/U before the current O writeback and StateAddD.
+            BuildAPrime(chunk + 1);
             PrepareNextKbg(chunk + 1);
+            PrepareNextVb(chunk + 1);
         }
 
         if (td_.reserved == 4) {
@@ -347,11 +345,6 @@ private:
         StateAddDVF(ubStateF_, ubStateB_, ubD_);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        if (chunk + 1 < loc_.chunks) {
-            // The next Vb and APrime overlap the following QKT/QS stages.
-            PrepareNextVb(chunk + 1);
-            BuildAPrime(chunk + 1);
-        }
     }
 
     __aicore__ inline void PrepareNextQK(int64_t chunk)
@@ -525,60 +518,48 @@ private:
         AicPublishToBoth(kConsQk);
     }
 
-    __aicore__ inline void RunCubePrepare(int64_t chunk)
-    {
-        if (chunk + 1 < loc_.chunks) {
-            RunCubeQkt(chunk + 1);
-        }
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        // QExp was prepared with the next-chunk inputs in the previous round;
-        // only the current S publication remains on the QS critical path.
-        AicWaitBoth(kConsS);
-        ComputeMm(l1QExp_[slot], l1H_[slot], l0A0_, l0B0_, l0C3_, 64, 128, 128,
-                  false, td_.stateVFirst == 0);
-        // No Fixpipe follows QS. This is only the FIX_M event priming required
-        // by the next independent L0C2 GEMM; the QS accumulator stays live.
-        ReleaseL0C();
-    }
-
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         LoadT();
         AicWaitBoth(kConsW);
-        // Kbg is negated, so W=T@Kbg=-trueW. Start W@S while the next Vb
-        // is still being prepared; B0 retains S from the early QS GEMM.
+        // Kbg is negated, so W=T@Kbg=-trueW. W@S loads S into B0 before
+        // T@Vb accumulates into the same L0C0 accumulator.
         ComputeMm(l1T_, l1W_[slot], l0A0_, l0B1_, l0C2_, 64, 128, 64, false, true);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
         ReleaseL0C();
-        ComputeMmReuseB(l1W_[slot], l0A0_, l0B0_, l0C0_, 64, 128, 128, false, true);
+        AicWaitBoth(kConsS);
+        ComputeMm(l1W_[slot], l1H_[slot], l0A0_, l0B0_, l0C0_, 64, 128, 128,
+                  false, td_.stateVFirst == 0, true);
 
-        // T@Vb accumulates into the existing W@S result, producing v_new.
         AicWaitBoth(kConsU);
         ComputeMm(l1T_, l1U_[slot], l0A0_, l0B1_, l0C0_, 64, 128, 64, false, true, false);
-        // O reads the AIC-local L1 copy. AIV reads only the independent UB copy
-        // to produce right=v_new_decay, leaving ubU_ free for the next Vb.
+        // Publish v_new through the independent O/right paths, then start QS.
         FixB16L1Matrix(l1VNew_, l0C0_, 64, 128, 64);
         FixB16Halves(ubVNew_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
+        // B0 still holds S from W@S and T@Vb used only B1, so QS reuses it.
+        ComputeMmReuseB(l1QExp_[slot], l0A0_, l0B0_, l0C3_, 64, 128, 128, false, true);
+
         AicWaitBoth(kConsAPrime);
-        // Cube-local publication of L1 vNew; kConsP is only the AIC->AIV
-        // publication of UB v_new and is not used as the O dependency.
+        // O reads the AIC-local L1 vNew. QS already consumed v_new's FIX_M
+        // event, while FIX_MTE1 makes the L1 copy visible to MTE1.
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
-        // Consume the v_new Fixpipe event before O's ReleaseL0C.
-        WaitFlag<HardEvent::FIX_M>(0);
         ComputeMm(l1APrime_[slot], l1VNew_, l0A1_, l0B1_, l0C3_, 64, 128, 64,
                   false, true, false);
         FixB16ScaledHalves(ubO_, l0C3_, 64, 128, td_.scale);
         ReleaseL0C();
         AicPublishToBoth(kConsOL);
 
-        // O overlaps the AIV right computation. Only D waits for right.
+        // Publish the next QKT after the current O and before the current D.
+        if (chunk + 1 < loc_.chunks) {
+            RunCubeQkt(chunk + 1);
+        }
         AicWaitBoth(kConsRight);
         if (td_.stateVFirst != 0) {
             ComputeMm(l1Right_, l1K_[slot], l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
