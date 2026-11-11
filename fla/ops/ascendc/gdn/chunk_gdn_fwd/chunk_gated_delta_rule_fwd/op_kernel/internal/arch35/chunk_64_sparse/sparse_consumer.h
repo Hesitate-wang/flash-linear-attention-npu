@@ -16,12 +16,13 @@ namespace GdnChunk64Sparse {
 constexpr uint16_t kConsQKInputs = 0;
 constexpr uint16_t kConsP = 1;
 constexpr uint16_t kConsRight = 2;
-constexpr uint16_t kConsWU = 3;
+constexpr uint16_t kConsW = 3;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsQk = 6;
 constexpr uint16_t kConsAPrime = 9;
 constexpr uint16_t kConsS = 10;
+constexpr uint16_t kConsU = 11;
 
 class ConsumerRole {
 public:
@@ -231,22 +232,21 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
-        PrepareNext(0);
-        PrepareNextVbKbg(0);
+        PrepareNextQK(0);
+        PrepareNextQExpDecay(0);
+        PrepareNextKbg(0);
+        PrepareNextVb(0);
         BuildAPrime(0);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
         if (chunk + 1 < loc_.chunks) {
-            PrepareNext(chunk + 1);
+            PrepareNextQK(chunk + 1);
         }
         PrepareCurrentState(chunk);
         if (chunk + 1 < loc_.chunks) {
-            // Place the next Vb/Kbg between the current S stage and the next
-            // APrime, overlapping the current QS/WU Cube work.
-            PrepareNextVbKbg(chunk + 1);
-            BuildAPrime(chunk + 1);
+            PrepareNextQExpDecay(chunk + 1);
         }
     }
 
@@ -313,6 +313,10 @@ private:
             UploadNdToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         }
         AivPublish(kConsRight);
+        if (chunk + 1 < loc_.chunks) {
+            // D uses the current right while the AIV prepares the next Kbg.
+            PrepareNextKbg(chunk + 1);
+        }
 
         if (td_.reserved == 4) {
             AivWait(kConsOL);
@@ -343,9 +347,14 @@ private:
         StateAddDVF(ubStateF_, ubStateB_, ubD_);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
+        if (chunk + 1 < loc_.chunks) {
+            // The next Vb and APrime overlap the following QKT/QS stages.
+            PrepareNextVb(chunk + 1);
+            BuildAPrime(chunk + 1);
+        }
     }
 
-    __aicore__ inline void PrepareNext(int64_t chunk)
+    __aicore__ inline void PrepareNextQK(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
@@ -356,11 +365,6 @@ private:
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        if (window_.rows < kChunk) {
-            Duplicate(ubG_, 0.0f, kChunk);
-            Duplicate(ubBeta_, 0.0f, kChunk);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
@@ -397,6 +401,27 @@ private:
             UploadNdToL1(l1K_[slot], ubKHat_, kHalfRows, kDim, kChunk, firstRow);
         }
         AivPublish(kConsQKInputs);
+    }
+
+    __aicore__ inline void PrepareNextQExpDecay(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        if (rows < static_cast<uint32_t>(kHalfRows)) {
+            Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+        }
+        if (window_.rows < kChunk) {
+            Duplicate(ubG_, 0.0f, kChunk);
+            Duplicate(ubBeta_, 0.0f, kChunk);
+        }
+        SetFlag<HardEvent::V_MTE2>(0);
+        WaitFlag<HardEvent::V_MTE2>(0);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
 
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens),
@@ -447,19 +472,29 @@ private:
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
     }
 
-    __aicore__ inline void PrepareNextVbKbg(int64_t chunk)
+    __aicore__ inline void PrepareNextKbg(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         ScaleKbgNzVF(ubK_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
+        AivPublish(kConsW);
+    }
+
+    __aicore__ inline void PrepareNextVb(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         WaitFlag<HardEvent::MTE2_V>(3);
         ScaleVbNzVF(ubV_, ubU_, ubBeta_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1U_[slot], ubU_, kHalfRows, kDim, kChunk, firstRow);
-        CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
-        AivPublish(kConsWU);
+        AivPublish(kConsU);
     }
 
     __aicore__ inline void LoadT()
@@ -510,16 +545,19 @@ private:
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         LoadT();
-        AicWaitBoth(kConsWU);
-        // Kbg is negated: W = -trueW. U starts in L0C and W@S accumulates
-        // into it, so the final accumulator is U - trueW@S = v_new.
+        AicWaitBoth(kConsW);
+        // Kbg is negated, so W=T@Kbg=-trueW. Start W@S while the next Vb
+        // is still being prepared; B0 retains S from the early QS GEMM.
         ComputeMm(l1T_, l1W_[slot], l0A0_, l0B1_, l0C2_, 64, 128, 64, false, true);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
+        SetFlag<HardEvent::FIX_MTE1>(0);
+        WaitFlag<HardEvent::FIX_MTE1>(0);
         ReleaseL0C();
+        ComputeMmReuseB(l1W_[slot], l0A0_, l0B0_, l0C0_, 64, 128, 128, false, true);
 
-        ComputeMm(l1T_, l1U_[slot], l0A0_, l0B1_, l0C0_, 64, 128, 64, false, true);
-        // B0 still holds S from the early QS GEMM; only W needs an MTE1 load.
-        ComputeMmReuseB(l1W_[slot], l0A0_, l0B0_, l0C0_, 64, 128, 128, false, false);
+        // T@Vb accumulates into the existing W@S result, producing v_new.
+        AicWaitBoth(kConsU);
+        ComputeMm(l1T_, l1U_[slot], l0A0_, l0B1_, l0C0_, 64, 128, 64, false, true, false);
         // O reads the AIC-local L1 copy. AIV reads only the independent UB copy
         // to produce right=v_new_decay, leaving ubU_ free for the next Vb.
         FixB16L1Matrix(l1VNew_, l0C0_, 64, 128, 64);
