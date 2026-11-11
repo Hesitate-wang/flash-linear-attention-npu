@@ -232,6 +232,7 @@ private:
     __aicore__ inline void RunAivPrologue()
     {
         PrepareNext(0);
+        PrepareNextVbKbg(0);
         BuildAPrime(0);
     }
 
@@ -242,6 +243,9 @@ private:
         }
         PrepareCurrentState(chunk);
         if (chunk + 1 < loc_.chunks) {
+            // Place the next Vb/Kbg between the current S stage and the next
+            // APrime, overlapping the current QS/WU Cube work.
+            PrepareNextVbKbg(chunk + 1);
             BuildAPrime(chunk + 1);
         }
     }
@@ -441,7 +445,13 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
+    }
 
+    __aicore__ inline void PrepareNextVbKbg(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         ScaleKbgNzVF(ubK_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
         WaitFlag<HardEvent::MTE2_V>(3);
         ScaleVbNzVF(ubV_, ubU_, ubBeta_, firstRow);
