@@ -876,19 +876,15 @@ __aicore__ inline void QExpNzVF(LocalTensor<bfloat16_t> &q,
 }
 
 template <bool UseExp2>
-__aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
-                                     LocalTensor<bfloat16_t> &u,
-                                     LocalTensor<bfloat16_t> &vNew,
-                                     LocalTensor<bfloat16_t> &right,
-                                     LocalTensor<float> &g,
-                                     LocalTensor<float> &energy,
-                                     float gLast, float lastEnergy,
-                                     bool useEnergyRatio, uint32_t firstRow,
-                                     bool directNz, bool subtractP)
+__aicore__ inline void RightNzVF(LocalTensor<bfloat16_t> &u,
+                                 LocalTensor<bfloat16_t> &right,
+                                 LocalTensor<float> &g,
+                                 LocalTensor<float> &energy,
+                                 float gLast, float lastEnergy,
+                                 bool useEnergyRatio, uint32_t firstRow,
+                                 bool directNz)
 {
-    __ubuf__ float *pAddr = reinterpret_cast<__ubuf__ float *>(p.GetPhyAddr());
     __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
-    __ubuf__ bfloat16_t *vAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(vNew.GetPhyAddr());
     __ubuf__ bfloat16_t *rAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(right.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
@@ -898,21 +894,11 @@ __aicore__ inline void VNewRightNzVF(LocalTensor<float> &p,
         MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
         uint32_t n128 = 128;
         MaskReg m128 = UpdateMask<bfloat16_t>(n128);
-        RegTensor<float> p0, p1, u0, u1, scale, last, diff;
+        RegTensor<float> u0, u1, scale, last, diff;
         Duplicate(last, useEnergyRatio ? lastEnergy : gLast, all);
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadAlign<float, LoadDist::DIST_DINTLV_B32>(p0, p1, pAddr + offset);
             GdnFwd32::LoadEvenOdd(uAddr + offset, u0, u1, m16);
-            if (subtractP) {
-                Sub(u0, u0, p0, all);
-                Sub(u1, u1, p1, all);
-            }
-            if (directNz) {
-                GdnFwd32::StoreNzEvenOdd(vAddr, row, u0, u1, m16, m128);
-            } else {
-                StoreNdEvenOdd(vAddr, row, u0, u1, m16, m128);
-            }
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, eAddr + firstRow + row);
                 Div(scale, last, scale, all);

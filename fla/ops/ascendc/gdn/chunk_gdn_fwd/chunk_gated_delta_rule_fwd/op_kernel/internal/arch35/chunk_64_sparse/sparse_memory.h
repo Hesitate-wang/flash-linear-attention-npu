@@ -59,6 +59,8 @@ constexpr uint32_t kCUbOS = 96 * kKiB;
 constexpr uint32_t kCUbQHat = 112 * kKiB;
 constexpr uint32_t kCUbKHat = 120 * kKiB;
 constexpr uint32_t kCUbU = 128 * kKiB;
+// v_new bypasses UB and is Fixpiped directly from L0C to L1. Keep this slot
+// reserved so the remaining Consumer UB offsets stay unchanged.
 constexpr uint32_t kCUbVNew = 136 * kKiB;
 constexpr uint32_t kCUbRight = 144 * kKiB;
 constexpr uint32_t kCUbW = 152 * kKiB;

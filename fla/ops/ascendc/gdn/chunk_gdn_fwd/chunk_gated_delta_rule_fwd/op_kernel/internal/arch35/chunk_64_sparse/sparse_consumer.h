@@ -15,11 +15,12 @@ namespace GdnChunk64Sparse {
 
 constexpr uint16_t kConsInputs = 0;
 constexpr uint16_t kConsP = 1;
-constexpr uint16_t kConsVn = 2;
+constexpr uint16_t kConsRight = 2;
 constexpr uint16_t kConsWU = 3;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsQk = 6;
+constexpr uint16_t kConsAPrime = 9;
 
 class ConsumerRole {
 public:
@@ -136,7 +137,6 @@ private:
         ubP_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbP);
         ubOSB_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbOS);
         ubU_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbU);
-        ubVNew_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbVNew);
         ubRight_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbRight);
         ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbW);
         ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQ);
@@ -246,6 +246,7 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1APrime_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
+        AivPublish(kConsAPrime);
     }
 
     __aicore__ inline void RunAivAfterWu(int64_t)
@@ -260,25 +261,23 @@ private:
         const int64_t lastIndex = window_.rows - 1;
         const float gLast = ubG_.GetValue(lastIndex);
         const float lastEnergy = ubEnergy_.GetValue(lastIndex);
-        const bool directVnRight = (td_.reserved & kSparseDebugNdVnRight) == 0;
+        const bool directRightNz = (td_.reserved & kSparseDebugNdVnRight) == 0;
         if (td_.useExp2 != 0) {
-            VNewRightNzVF<true>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                                gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight, false);
+            RightNzVF<true>(ubU_, ubRight_, ubG_, ubEnergy_, gLast, lastEnergy,
+                            gateRatioSafe_, firstRow, directRightNz);
         } else {
-            VNewRightNzVF<false>(ubP_, ubU_, ubVNew_, ubRight_, ubG_, ubEnergy_,
-                                 gLast, lastEnergy, gateRatioSafe_, firstRow, directVnRight, false);
+            RightNzVF<false>(ubU_, ubRight_, ubG_, ubEnergy_, gLast, lastEnergy,
+                             gateRatioSafe_, firstRow, directRightNz);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const int64_t token = window_.tokenStart + firstRow;
-        if (directVnRight) {
-            CopyNzToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
+        if (directRightNz) {
             CopyNzToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         } else {
-            UploadNdToL1(l1VNew_, ubVNew_, kHalfRows, kDim, kChunk, firstRow);
             UploadNdToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         }
-        AivPublish(kConsVn);
+        AivPublish(kConsRight);
 
         if (td_.reserved == 4) {
             AivWait(kConsOL);
@@ -453,13 +452,19 @@ private:
         ComputeMm(l1T_, l1U_, l0A0_, l0B1_, l0C0_, 64, 128, 64, false, true);
         // B0 still holds S from the early QS GEMM; only W needs an MTE1 load.
         ComputeMmReuseB(l1W_, l0A0_, l0B0_, l0C0_, 64, 128, 128, false, false);
+        // O reads the AIC-local L1 copy. AIV reads only the UB copy to produce
+        // right=v_new_decay, so these two consumers have independent waits.
+        FixB16L1Matrix(l1VNew_, l0C0_, 64, 128, 64);
         FixB16Halves(ubU_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
-        AicWaitBoth(kConsVn);
-        // Consume the v_new Fixpipe event before O's ReleaseL0C. The explicit
-        // wait replaces the one formerly provided by the late QS GEMM.
+        AicWaitBoth(kConsAPrime);
+        // Cube-local publication of L1 vNew; kConsP is only the AIC->AIV
+        // publication of UB v_new and is not used as the O dependency.
+        SetFlag<HardEvent::FIX_MTE1>(0);
+        WaitFlag<HardEvent::FIX_MTE1>(0);
+        // Consume the v_new Fixpipe event before O's ReleaseL0C.
         WaitFlag<HardEvent::FIX_M>(0);
         ComputeMm(l1APrime_, l1VNew_, l0A1_, l0B1_, l0C3_, 64, 128, 64,
                   false, true, false);
@@ -467,6 +472,8 @@ private:
         ReleaseL0C();
         AicPublishToBoth(kConsOL);
 
+        // O overlaps the AIV right computation. Only D waits for right.
+        AicWaitBoth(kConsRight);
         if (td_.stateVFirst != 0) {
             ComputeMm(l1Right_, l1K_, l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
         } else {
@@ -489,7 +496,7 @@ private:
     GlobalTensor<float> gmG_, gmBeta_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubQk_, ubQRstd_, ubKRstd_;
-    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
+    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubAPrime_, ubO_, ubInitB_, ubOSB_;
     LocalTensor<float> ubG_, ubEnergy_, ubBeta_;
     LocalTensor<uint32_t> ubShift_;
