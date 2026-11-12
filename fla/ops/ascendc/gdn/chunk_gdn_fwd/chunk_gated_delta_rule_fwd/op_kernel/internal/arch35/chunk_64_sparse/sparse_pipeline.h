@@ -44,6 +44,12 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             PublishIterationAic<PIPE_MTE2>(iteration);
             if (iteration < chunks) {
                 role.RunAfterWu(iteration);
+            } else {
+                // Shorter and empty chains still join every global mode-0
+                // generation; active chains publish at O inside LoadAPrime.
+                // No MTE2 load follows an idle iteration, so block MTE3 to
+                // prevent a later Set from reusing this flag before the wait.
+                PublishAPrimeAic<PIPE_MTE3>(iteration);
             }
         }
     }

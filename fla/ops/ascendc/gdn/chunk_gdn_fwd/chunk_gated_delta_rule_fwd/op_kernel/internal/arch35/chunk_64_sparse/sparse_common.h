@@ -85,6 +85,11 @@ __aicore__ inline int64_t TileIndex(const ChainLoc &loc, int64_t localChunk,
     return varlen ? loc.chunkBase + localChunk : loc.batch * chunksPerBatch + localChunk;
 }
 
+__aicore__ inline int64_t OffsetMatrixTile(int64_t tile, int64_t head, int64_t heads)
+{
+    return (tile * heads + head) * kMatrixElems;
+}
+
 __aicore__ inline int64_t OffsetStateTile(int64_t tile, int64_t head, int64_t heads)
 {
     return (tile * heads + head) * kStateElems;

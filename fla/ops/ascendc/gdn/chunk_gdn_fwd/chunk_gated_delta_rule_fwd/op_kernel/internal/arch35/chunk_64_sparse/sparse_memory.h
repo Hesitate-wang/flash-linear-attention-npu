@@ -31,8 +31,15 @@ constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
 constexpr uint32_t kPUbABf = kPUbX + 12 * kKiB;
 constexpr uint32_t kPUbZero = kPUbABf + 4 * kKiB;
 constexpr uint32_t kPUbGates = kPUbZero + 4 * kKiB;
-constexpr uint32_t kPUbShift = kPUbGates + 4 * kKiB;
-constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;
+// Three gate/beta slots keep the current inverse, previous QKMask and next
+// input loads live simultaneously. Q/QHat still use chunk-parity slots.
+constexpr uint32_t kPUbShift = kPUbGates + 6 * kKiB;
+// Producer-owned Q/QHat use chunk-parity slots. QKT/APrime are serialized per AIV.
+constexpr uint32_t kPUbQ = kPUbShift + 2 * kKiB;
+constexpr uint32_t kPUbQHat = kPUbQ + 16 * kKiB;
+constexpr uint32_t kPUbQk = kPUbQHat + 16 * kKiB;
+constexpr uint32_t kPUbAPrime = kPUbQk + 8 * kKiB;
+constexpr uint32_t kPUbEnd = kPUbAPrime + 4 * kKiB;
 static_assert(kPUbEnd <= kUbBudget);
 
 // Two K/Vb/Kbg slots and two sets of native-FP32 inverse/coupling records.
@@ -47,7 +54,9 @@ constexpr uint32_t kPL1InvX0 = kPL1A + 8 * kKiB;
 constexpr uint32_t kPL1InvX1 = kPL1InvX0 + 2 * kPL1InvSlotBytes;
 constexpr uint32_t kPL1InvL10 = kPL1InvX1 + 2 * kPL1InvSlotBytes;
 constexpr uint32_t kPL1InvT = kPL1InvL10 + 2 * kPL1InvSlotBytes;
-constexpr uint32_t kPL1End = kPL1InvT + 2 * kPL1InvSlotBytes;
+constexpr uint32_t kPL1QSlotBytes = 16 * kKiB;
+constexpr uint32_t kPL1QHat = kPL1InvT + 2 * kPL1InvSlotBytes;
+constexpr uint32_t kPL1End = kPL1QHat + 2 * kPL1QSlotBytes;
 static_assert(kPL1End <= 512 * kKiB);
 
 // Consumer UB, per AIV.
@@ -66,22 +75,20 @@ constexpr uint32_t kCUbRight = 144 * kKiB;
 constexpr uint32_t kCUbW = 152 * kKiB;
 constexpr uint32_t kCUbQ = 160 * kKiB;
 constexpr uint32_t kCUbK = 168 * kKiB;
-constexpr uint32_t kCUbAPrime = 176 * kKiB;
+constexpr uint32_t kCUbZero = 176 * kKiB;
 constexpr uint32_t kCUbO = 180 * kKiB;
 constexpr uint32_t kCUbGates = 188 * kKiB;
 constexpr uint32_t kCUbShift = 190 * kKiB;
-constexpr uint32_t kCUbQk = 192 * kKiB;
 constexpr uint32_t kCUbV = 200 * kKiB;
 constexpr uint32_t kCUbEnd = 208 * kKiB;
 static_assert(kCUbEnd <= kUbBudget);
 
 // Consumer L1 uses chunk-parity slots for values whose next-chunk upload can
-// overlap the current Cube consumer. QHat, H, vNew, right and T keep their
-// existing lifetimes; H is already double-buffered.
+// overlap the current Cube consumer. H, vNew, right and T keep their existing
+// lifetimes; H is already double-buffered.
 constexpr uint32_t kCL1Slot16 = 16 * kKiB;
 constexpr uint32_t kCL1W = 0;
 constexpr uint32_t kCL1U = 32 * kKiB;
-constexpr uint32_t kCL1QHat = 64 * kKiB;
 constexpr uint32_t kCL1QExp = 80 * kKiB;
 constexpr uint32_t kCL1K = 112 * kKiB;
 constexpr uint32_t kCL1H0 = 144 * kKiB;

@@ -263,10 +263,20 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         }
     }
 
-    // X0/X1/L10 and the intermediate coupling result stay in L1.
+    // X0/X1/L10 and the intermediate coupling result stay in L1. APrime is
+    // produced on the Producer groups and consumed through a separate GM buffer.
     uint64_t cursor = 0;
-    td.workspaceOffset = 0;
-    td.workspaceBytes = 0;
+    uint64_t aPrimeTiles = 0;
+    uint64_t aPrimeBytes = 0;
+    OP_CHECK_IF(!CheckedMulU64(chunkCount, static_cast<uint64_t>(hv), &aPrimeTiles) ||
+                    !CheckedMulU64(aPrimeTiles, 64 * 64 * sizeof(uint16_t), &aPrimeBytes),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace size overflow."),
+                return ge::GRAPH_FAILED);
+    td.workspaceOffset = cursor;
+    td.workspaceBytes = aPrimeBytes;
+    OP_CHECK_IF(!CheckedAddU64(cursor, aPrimeBytes, &cursor),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace allocation failed."),
+                return ge::GRAPH_FAILED);
 
     auto *raw = context->GetRawTilingData();
     auto *workspace = context->GetWorkspaceSizes(1);

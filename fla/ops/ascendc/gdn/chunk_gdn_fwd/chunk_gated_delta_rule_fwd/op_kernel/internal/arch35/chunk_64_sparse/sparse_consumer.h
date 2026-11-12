@@ -13,14 +13,11 @@
 
 namespace GdnChunk64Sparse {
 
-constexpr uint16_t kConsQKInputs = 0;
-constexpr uint16_t kConsP = 1;
+constexpr uint16_t kConsP = 6; // Continuous GM->L1 DataCopy reserves mode-4 flags 1/17.
 constexpr uint16_t kConsRight = 2;
 constexpr uint16_t kConsW = 3;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
-constexpr uint16_t kConsQk = 6;
-constexpr uint16_t kConsAPrime = 9;
 constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
 
@@ -34,6 +31,8 @@ public:
         gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
         gmV_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.v));
         gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
+        gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+            GetUserWorkspace(args.workspace) + td.workspaceOffset));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
@@ -93,7 +92,6 @@ public:
         }
         if ASCEND_IS_AIC {
             RunCubeQs(0);
-            RunCubeQkt(0);
         }
     }
 
@@ -139,9 +137,11 @@ public:
                 }
             }
             // Serial mode reuses this UB for the next chain's Producer. Do not
-            // let its Vector/MTE2 writes overtake the final-state MTE3 read.
+            // let its Vector or MTE2 writes overtake the final-state MTE3 read.
             SetFlag<HardEvent::MTE3_V>(0);
             WaitFlag<HardEvent::MTE3_V>(0);
+            SetFlag<HardEvent::MTE3_MTE2>(0);
+            WaitFlag<HardEvent::MTE3_MTE2>(0);
         }
     }
 
@@ -172,17 +172,13 @@ private:
             ubQHat_ = ubQ_;
             ubKHat_ = ubK_;
         }
-        ubQk_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbQk);
-        ubAPrime_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbAPrime);
+        ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbZero);
         ubO_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbO);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
         ubEnergy_ = ubG_[64];
-        ubQRstd_ = ubG_[256];
-        ubKRstd_ = ubG_[288];
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
         ubBeta_ = ubG_[128];
 
-        l1QHat_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1QHat);
         l1H_[0] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H0);
         l1H_[1] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H1);
         l1VNew_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1VNew);
@@ -201,7 +197,6 @@ private:
         l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
         l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
-        l0C1_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C1);
         l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
     }
@@ -265,6 +260,10 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
+        // In serial mode this AIV has just finished the Producer role. Its
+        // last MTE3 reads must complete before Consumer Vector work reuses UB.
+        SetFlag<HardEvent::MTE3_V>(0);
+        WaitFlag<HardEvent::MTE3_V>(0);
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
         PrepareNextGate(0, true);
@@ -281,9 +280,6 @@ private:
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
-        // QKT(chunk) was published in the previous round, and its gate/beta
-        // are still live until PrepareNextGate replaces them.
-        BuildAPrime(chunk);
         if (chunk + 1 < loc_.chunks) {
             PrepareNextGate(chunk + 1);
             PrepareNextQAndQExp(chunk + 1);
@@ -298,37 +294,23 @@ private:
         if (window_.rows < kChunk) {
             // LoadT reads only valid rows. Clear the padded L1 rows before the
             // kConsS publication, which precedes this chunk's mode-0/LoadT.
-            Duplicate(ubAPrime_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
+            Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
             SetFlag<HardEvent::V_MTE3>(0);
             WaitFlag<HardEvent::V_MTE3>(0);
-            CopyNzToL1(l1T_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
+            CopyNzToL1(l1T_, ubZeroBf_, kHalfRows, kChunk, kChunk, firstRow);
         }
         // Cube keeps using the old S in L1H, so the FP32 UB state can be
         // decayed immediately after this upload without changing QS/W@S.
         CopyNzToL1(l1H_[slot], ubStateB_, kHalfDim, kDim, kDim,
                    sub_ * static_cast<uint32_t>(kHalfDim));
+        // PrepareNextGate publishes gate/energy on V_S event 1. Consume it
+        // before the scalar read; PrepareRightDecay reuses the same values later.
+        WaitFlag<HardEvent::V_S>(1);
         chunkDecay_[slot] = ubEnergy_.GetValue(window_.rows - 1);
         AivPublish(kConsS);
         if (applyDecay) {
             StateDecayVF(ubStateF_, chunkDecay_[slot]);
         }
-    }
-
-    __aicore__ inline void BuildAPrime(int64_t chunk)
-    {
-        window_ = ResolveWindow(loc_, chunk);
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        AivWait(kConsQk);
-        if (td_.useExp2 != 0) {
-            APrimeBandNzVF<true>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
-        } else {
-            APrimeBandNzVF<false>(ubQk_, ubAPrime_, ubG_, ubEnergy_, gateRatioSafe_, firstRow);
-        }
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1APrime_[slot], ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
-        AivPublish(kConsAPrime);
     }
 
     __aicore__ inline void RunAivAfterWu(int64_t chunk)
@@ -339,8 +321,8 @@ private:
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         AivWait(kConsP);
-        SetFlag<HardEvent::V_S>(1);
-        WaitFlag<HardEvent::V_S>(1);
+        // PrepareRightDecay published ubDecay immediately after writing it.
+        WaitFlag<HardEvent::V_S>(2);
         const bool directRightNz = (td_.reserved & kSparseDebugNdVnRight) == 0;
         // decay was prepared with this chunk's QExp, so v_new only needs a
         // multiply and NZ store before the right upload.
@@ -386,6 +368,14 @@ private:
     __aicore__ inline void PrepareNextGate(int64_t chunk, bool includeInitial = false)
     {
         window_ = ResolveWindow(loc_, chunk);
+        if (td_.useNorm == 0) {
+            // Without Norm, ubKHat_ aliases ubK_ and UploadNdToL1 reads that
+            // raw UB asynchronously. Drain it before tail clearing or reloading.
+            SetFlag<HardEvent::MTE3_V>(0);
+            WaitFlag<HardEvent::MTE3_V>(0);
+            SetFlag<HardEvent::MTE3_MTE2>(0);
+            WaitFlag<HardEvent::MTE3_MTE2>(0);
+        }
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
@@ -456,15 +446,10 @@ private:
         } else {
             QExpNzVF(ubQ_, ubOSB_, ubEnergy_, firstRow);
         }
-        // QHat/QExp do not depend on right's decay. Upload them first so the
+        // QExp does not depend on right's decay. Upload it first so the
         // following scalar checks and decay work overlap this MTE3 transfer.
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        if (td_.useNorm != 0) {
-            CopyNzToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        } else {
-            UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        }
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
     }
 
@@ -474,8 +459,8 @@ private:
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         // This is needed only by the next steady right stage, so defer it
-        // after Q/K/Kbg/Vb and let it overlap the AIC's QKT/QS work.
-        WaitFlag<HardEvent::V_S>(1);
+        // after Q/K/Kbg/Vb and let it overlap the AIC's QS work. Gate/energy
+        // V_S event 1 was already consumed by PrepareCurrentState.
         gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window_.rows));
         const float gLast = ubG_.GetValue(window_.rows - 1);
         const float lastEnergy = chunkDecay_[slot];
@@ -486,6 +471,8 @@ private:
             DecayVF<false>(ubDecay_[slot], ubG_, ubEnergy_, gLast, lastEnergy,
                            gateRatioSafe_, firstRow);
         }
+        // Publish decay now rather than draining all Vector work at its use.
+        SetFlag<HardEvent::V_S>(2);
     }
 
     __aicore__ inline void PrepareNextKAndKbg(int64_t chunk)
@@ -507,7 +494,6 @@ private:
             UploadNdToL1(l1K_[slot], ubKHat_, kHalfRows, kDim, kChunk, firstRow);
         }
         CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
-        AivPublish(kConsQKInputs);
         AivPublish(kConsW);
     }
 
@@ -542,14 +528,21 @@ private:
         WaitFlag<HardEvent::MTE2_MTE1>(0);
     }
 
-    __aicore__ inline void RunCubeQkt(int64_t chunk)
+    __aicore__ inline void LoadAPrime(int64_t chunk)
     {
+        if (td_.schedule == kSparseSchedulePipeline) {
+            // Mode 0 requires every AIC to set as well as wait. Delay this
+            // publish until O so T, W and v_new do not wait for APrime.
+            PublishAPrimeAic<PIPE_MTE2>(chunk);
+        }
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        AicWaitBoth(kConsQKInputs);
-        ComputeMm(l1QHat_, l1K_[slot], l0A0_, l0B1_, l0C1_, 64, 64, 128, false, false);
-        FixF32Halves(ubQk_, l0C1_, 64, 64);
-        ReleaseL0C();
-        AicPublishToBoth(kConsQk);
+        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
+        const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads);
+        // The Producer writes a complete 64x64 NZ tile, so no ND conversion or
+        // per-half copies are needed here.
+        DataCopy(l1APrime_[slot], gmAPrime_[offset], kMatrixElems);
+        SetFlag<HardEvent::MTE2_MTE1>(0);
+        WaitFlag<HardEvent::MTE2_MTE1>(0);
     }
 
     __aicore__ inline void RunCubeQs(int64_t chunk)
@@ -584,8 +577,9 @@ private:
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
-        // O accumulates into the QS retained from the previous round.
-        AicWaitBoth(kConsAPrime);
+        // O accumulates into the QS retained from the previous round. APrime
+        // has an independent mode-0 publication and is loaded only here.
+        LoadAPrime(chunk);
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_M>(0);
@@ -605,10 +599,9 @@ private:
         ReleaseL0C();
         AicPublishToBoth(kConsD);
 
-        // The next QKMask consumes this QKT. The following QS is retained for
-        // the next O, while its B0 copy of S is reused by the next W@S.
+        // The following QS is retained for the next O, while its B0 copy of S
+        // is reused by the next W@S.
         if (chunk + 1 < loc_.chunks) {
-            RunCubeQkt(chunk + 1);
             RunCubeQs(chunk + 1);
         }
     }
@@ -621,20 +614,20 @@ private:
     bool gateRatioSafe_{false};
     float chunkDecay_[2]{};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmT_, gmO_;
+    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmT_, gmO_, gmAPrime_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
     GlobalTensor<float> gmG_, gmBeta_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
 
-    LocalTensor<float> ubStateF_, ubD_, ubP_, ubQk_, ubQRstd_, ubKRstd_, ubScratch_;
+    LocalTensor<float> ubStateF_, ubD_, ubP_, ubScratch_;
     LocalTensor<float> ubDecay_[2];
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
-    LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubAPrime_, ubO_, ubInitB_, ubOSB_;
+    LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubZeroBf_, ubO_, ubInitB_, ubOSB_;
     LocalTensor<float> ubG_, ubEnergy_, ubBeta_;
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QHat_, l1QExp_[2], l1K_[2], l1H_[2];
+    LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
-    LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
+    LocalTensor<float> l0C0_, l0C2_, l0C3_;
 };
 
 } // namespace GdnChunk64Sparse

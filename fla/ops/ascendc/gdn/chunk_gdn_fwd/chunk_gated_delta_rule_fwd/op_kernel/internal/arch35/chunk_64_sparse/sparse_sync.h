@@ -13,10 +13,39 @@ using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
 constexpr uint16_t kSparseBarrierFlagIdAlt = 12;
+constexpr uint16_t kSparseAPrimeBarrierFlagId = 13;
+constexpr uint16_t kSparseAPrimeBarrierFlagIdAlt = 14;
 
 __aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 {
     return (iteration & 1) != 0 ? kSparseBarrierFlagIdAlt : kSparseBarrierFlagId;
+}
+
+__aicore__ inline uint16_t IterationAPrimeFlag(int64_t iteration)
+{
+    return (iteration & 1) != 0 ? kSparseAPrimeBarrierFlagIdAlt : kSparseAPrimeBarrierFlagId;
+}
+
+__aicore__ inline void SetAPrimeAic(int64_t iteration)
+{
+    // if ASCEND_IS_AIC {
+    //     CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationAPrimeFlag(iteration));
+    // }
+}
+
+template <pipe_t WaitPipe>
+__aicore__ inline void WaitAPrimeAic(int64_t iteration)
+{
+    // if ASCEND_IS_AIC {
+    //     CrossCoreWaitFlag<0x0, WaitPipe>(IterationAPrimeFlag(iteration));
+    // }
+}
+
+template <pipe_t WaitPipe>
+__aicore__ inline void PublishAPrimeAic(int64_t iteration)
+{
+    SetAPrimeAic(iteration);
+    WaitAPrimeAic<WaitPipe>(iteration);
 }
 
 // Producer sets this after the current T is complete but delays the matching

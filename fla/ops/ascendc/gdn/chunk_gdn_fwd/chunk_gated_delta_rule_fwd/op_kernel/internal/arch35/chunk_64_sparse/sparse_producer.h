@@ -18,6 +18,9 @@ constexpr uint16_t kProdA = 3;
 constexpr uint16_t kProdW = 4;
 constexpr uint16_t kProdInverse = 5;
 constexpr uint16_t kProdK = 8;
+constexpr uint16_t kProdQ = 9;
+constexpr uint16_t kProdQK = 10;
+constexpr uint16_t kProdAPrime = 11;
 
 class ProducerRole {
 public:
@@ -26,9 +29,12 @@ public:
         td_ = td;
         sub_ = GetSubBlockIdx();
         gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
+        gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.q));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
         gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
+        gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+            GetUserWorkspace(args.workspace) + td.workspaceOffset));
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
         }
@@ -61,14 +67,28 @@ public:
             for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
                 window_ = ResolveWindow(loc_, chunk);
                 AivWait(kProdKkt);
-                BuildInverse(chunk);
                 if (chunk + 1 < loc_.chunks) {
-                    // Finish the current inverse before preparing the next K;
-                    // the next gate/beta work overlaps the next KKT.
+                    // Three gate slots keep next loads independent of both the
+                    // current inverse and the previous QKMask below.
                     window_ = ResolveWindow(loc_, chunk + 1);
-                    PrepareKInputs(chunk + 1);
-                    PrepareGateBeta(chunk + 1);
+                    LoadInputs(chunk + 1);
                 }
+                window_ = ResolveWindow(loc_, chunk);
+                BuildInverse(chunk);
+                if (chunk > 0) {
+                    BuildAPrime(chunk - 1);
+                }
+                if (chunk + 1 < loc_.chunks) {
+                    // Loads overlap the inverse; only completion events remain
+                    // before Norm/cumsum and the L1 uploads.
+                    window_ = ResolveWindow(loc_, chunk + 1);
+                    PrepareK(chunk + 1);
+                    PrepareGateBeta(chunk + 1);
+                    PrepareQInputs(chunk + 1);
+                }
+            }
+            if (loc_.chunks > 0) {
+                BuildAPrime(loc_.chunks - 1);
             }
             if (td_.schedule != kSparseSchedulePipeline && loc_.chunks > 0) {
                 AivWaitMte3(kProdW);
@@ -84,31 +104,56 @@ public:
                     // Drain iteration i-2 before reusing its parity flag and
                     // before consuming this iteration's inverse.
                     WaitIterationAic<PIPE_M>(iteration);
+                    WaitAPrimeAic<PIPE_MTE3>(iteration);
                 }
                 if (iteration < loc_.chunks) {
                     window_ = ResolveWindow(loc_, iteration);
                     RunCube(iteration);
                     if (td_.schedule != kSparseSchedulePipeline && iteration + 1 == loc_.chunks) {
                         AicPublishToBoth(kProdW);
+                        // The serial Consumer reads T through this AIC's MTE2.
+                        // Drain the Producer's FIX GM writes before that load.
+                        SetFlag<HardEvent::FIX_MTE2>(0);
+                        WaitFlag<HardEvent::FIX_MTE2>(0);
                     }
                 }
                 if (td_.schedule == kSparseSchedulePipeline) {
-                    // Publish the current T before starting the next KKT so the
-                    // Consumer can overlap this KKT with its current v_new/O/D.
+                    // Keep T on its original publication path, ahead of QK and
+                    // the next KKT. Padded iterations still join the mode-0 flag.
                     SetIterationAic(iteration);
+                }
+                if (iteration < loc_.chunks) {
+                    RunQK(iteration);
                 }
                 if (iteration < loc_.chunks && iteration + 1 < loc_.chunks) {
                     RunKkt(iteration + 1);
                 }
+                if (iteration < loc_.chunks) {
+                    // The AIV publication covers its GM MTE3 write. Pipeline
+                    // mode relays this through MTE3; serial mode must block the
+                    // Consumer's later GM->L1 MTE2 load in the same AIC stream.
+                    if (td_.schedule == kSparseSchedulePipeline) {
+                        AicWaitBoth<PIPE_MTE3>(kProdAPrime);
+                    } else {
+                        AicWaitBoth<PIPE_MTE2>(kProdAPrime);
+                    }
+                }
+                if (td_.schedule == kSparseSchedulePipeline) {
+                    // Every AIC participates once per global iteration, even
+                    // when this shorter chain has no APrime left to publish.
+                    SetAPrimeAic(iteration);
+                }
             }
             if (td_.schedule == kSparseSchedulePipeline) {
                 // The final two generations have no later iteration in which
-                // to drain them. Wait only for flags that were actually set.
+                // to drain them. Every iteration published both mode-0 flags.
                 if (iterations >= 2) {
                     WaitIterationAic<PIPE_M>(iterations - 2);
+                    WaitAPrimeAic<PIPE_MTE3>(iterations - 2);
                 }
                 if (iterations >= 1) {
                     WaitIterationAic<PIPE_M>(iterations - 1);
+                    WaitAPrimeAic<PIPE_MTE3>(iterations - 1);
                 }
             }
         }
@@ -126,12 +171,12 @@ private:
             ubPublicB16_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbPublic);
             ubVb_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbVb);
             ubKbg_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbKbg);
-            ubG_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbGates + slot * 2 * kKiB);
-            ubEnergy_[slot] = ubG_[slot][64];
-            ubBeta_[slot] = ubG_[slot][192];
-            ubKRstd_[slot] = ubG_[slot][288];
             ubKkt_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                 kPUbKkt + slot * kPUbKktSlotBytes);
+            ubQ_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
+                kPUbQ + slot * 8 * kKiB);
+            ubQHat_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
+                kPUbQHat + slot * 8 * kKiB);
 
             const uint32_t l1Base = slot * kPL1SlotBytes;
             l1K_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(l1Base + kPL1K);
@@ -145,7 +190,18 @@ private:
                 kPL1InvL10 + slot * kPL1InvSlotBytes);
             l1InvT_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, float>(
                 kPL1InvT + slot * kPL1InvSlotBytes);
+            l1QHat_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
+                kPL1QHat + slot * kPL1QSlotBytes);
         }
+        for (uint32_t gateSlot = 0; gateSlot < 3; ++gateSlot) {
+            ubG_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
+                kPUbGates + gateSlot * 2 * kKiB);
+            ubEnergy_[gateSlot] = ubG_[gateSlot][64];
+            ubBeta_[gateSlot] = ubG_[gateSlot][192];
+            ubKRstd_[gateSlot] = ubG_[gateSlot][288];
+        }
+        ubQk_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbQk);
+        ubAPrime_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbAPrime);
         ubL_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbL);
         ubX_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbX);
         ubABf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbABf);
@@ -157,6 +213,7 @@ private:
         l0Af_ = buf.GetBuffer<BufferType::ASCEND_L0A, float>(kL0Bank0);
         l0Bf_ = buf.GetBuffer<BufferType::ASCEND_L0B, float>(kL0Bank0);
         l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
+        l0C1_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C1);
         l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
         l0CKkt_[0] = l0C0_;
@@ -165,44 +222,58 @@ private:
 
     __aicore__ inline void PrepareGate(int64_t chunk)
     {
-        PrepareKInputs(chunk);
+        LoadInputs(chunk);
+        PrepareK(chunk);
         PrepareGateBeta(chunk);
+        PrepareQInputs(chunk);
     }
 
-    __aicore__ inline void PrepareKInputs(int64_t chunk)
+    __aicore__ inline void LoadInputs(int64_t chunk)
     {
+        if (td_.useNorm == 0) {
+            // UploadNdToL1 reads raw Q asynchronously. Drain the previous
+            // upload before tail clearing or reusing that UB for new MTE2 data.
+            SetFlag<HardEvent::MTE3_V>(0);
+            WaitFlag<HardEvent::MTE3_V>(0);
+            SetFlag<HardEvent::MTE3_MTE2>(0);
+            WaitFlag<HardEvent::MTE3_MTE2>(0);
+        }
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            Duplicate(ubQ_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
         if (window_.rows < kChunk) {
-            Duplicate(ubG_[slot], 0.0f, kChunk);
-            Duplicate(ubBeta_[slot], 0.0f, kChunk);
+            Duplicate(ubG_[gateSlot], 0.0f, kChunk);
+            Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        // K is a complete publication unit. Gate/beta are issued separately so
-        // the AIC can start this KKT before the remaining gate work finishes.
+        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                                             td_.valueHeads, td_.tokens);
+        // Issue G, K, BETA and Q without waiting. The matching MTE2_V events
+        // are consumed after the inverse, when each value is actually used.
+        CopyGmToUb(ubG_[gateSlot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
         CopyGmToUb(ubK_[slot], gmK_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(0);
-        PrepareK(chunk);
+        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
+        SetFlag<HardEvent::MTE2_V>(1);
+        CopyGmToUb(ubQ_[slot], gmQ_,
+                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
     }
 
     __aicore__ inline void PrepareGateBeta(int64_t chunk)
     {
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
-                                             td_.valueHeads, td_.tokens);
-        CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
-        CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
-        SetFlag<HardEvent::MTE2_V>(1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         WaitFlag<HardEvent::MTE2_V>(1);
         float aLog = 0.0f;
         float dtBias = 0.0f;
@@ -212,13 +283,33 @@ private:
         if (td_.hasDtBias != 0) {
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
-        PrepareGateBetaVF(ubG_[slot], ubBeta_[slot], aLog, dtBias, td_.gateSoftplus != 0,
+        PrepareGateBetaVF(ubG_[gateSlot], ubBeta_[gateSlot], aLog, dtBias, td_.gateSoftplus != 0,
                           td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_[slot], ubEnergy_[slot], ubShift_);
+            CumsumEnergyVF<true>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
         } else {
-            CumsumEnergyVF<false>(ubG_[slot], ubEnergy_[slot], ubShift_);
+            CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
         }
+        gateRatioSafe_[gateSlot] = GateRatioSafe(
+            ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
+    }
+
+    __aicore__ inline void PrepareQInputs(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        WaitFlag<HardEvent::MTE2_V>(2);
+        if (td_.useNorm != 0) {
+            NormalizeRowsNzVF<true, true>(ubQ_[slot], ubQHat_[slot], ubQ_[slot], ubKRstd_[slot]);
+        }
+        SetFlag<HardEvent::V_MTE3>(1);
+        WaitFlag<HardEvent::V_MTE3>(1);
+        if (td_.useNorm != 0) {
+            CopyNzToL1(l1QHat_[slot], ubQHat_[slot], kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1QHat_[slot], ubQ_[slot], kHalfRows, kDim, kChunk, firstRow);
+        }
+        AivPublish(kProdQ);
     }
 
     __aicore__ inline void PrepareK(int64_t chunk)
@@ -271,19 +362,20 @@ private:
     __aicore__ inline void BuildInverse(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         // The previous inverse/T copies must release ubX_/ubABf_ before reuse.
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
-        const bool useEnergyRatio = GateRatioSafe(ubG_[slot], ubL_, static_cast<uint32_t>(window_.rows));
+        const bool useEnergyRatio = GateRatioSafe(ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         if (td_.useExp2 != 0) {
-            Inverse32DiagonalVF<true>(ubKkt_[slot], ubL_, ubX_, ubG_[slot], ubBeta_[slot],
-                                      ubEnergy_[slot], useEnergyRatio, firstRow);
+            Inverse32DiagonalVF<true>(ubKkt_[slot], ubL_, ubX_, ubG_[gateSlot], ubBeta_[gateSlot],
+                                      ubEnergy_[gateSlot], useEnergyRatio, firstRow);
         } else {
-            Inverse32DiagonalVF<false>(ubKkt_[slot], ubL_, ubX_, ubG_[slot], ubBeta_[slot],
-                                       ubEnergy_[slot], useEnergyRatio, firstRow);
+            Inverse32DiagonalVF<false>(ubKkt_[slot], ubL_, ubX_, ubG_[gateSlot], ubBeta_[gateSlot],
+                                       ubEnergy_[gateSlot], useEnergyRatio, firstRow);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -331,6 +423,45 @@ private:
         ReleaseL0C();
     }
 
+    __aicore__ inline void RunQK(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        AicWaitBoth(kProdQ);
+        ComputeMm(l1QHat_[slot], l1K_[slot], l0A0_, l0B1_, l0C1_, 64, 64, 128,
+                  false, false);
+        FixF32Halves(ubQk_, l0C1_, 64, 64);
+        ReleaseL0C();
+        AicPublishToBoth(kProdQK);
+    }
+
+    __aicore__ inline void BuildAPrime(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        AivWait(kProdQK);
+        if (td_.useExp2 != 0) {
+            APrimeBandNzVF<true>(ubQk_, ubAPrime_, ubG_[gateSlot], ubEnergy_[gateSlot],
+                                 gateRatioSafe_[gateSlot], firstRow);
+        } else {
+            APrimeBandNzVF<false>(ubQk_, ubAPrime_, ubG_[gateSlot], ubEnergy_[gateSlot],
+                                  gateRatioSafe_[gateSlot], firstRow);
+        }
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        // Each AIV writes its 32-row NZ band into the full 64-row GM tile.
+        DataCopyExtParams params{};
+        params.blockCount = static_cast<uint16_t>(kChunk / 16);
+        params.blockLen = kHalfRows * 16 * sizeof(bfloat16_t);
+        params.srcStride = 0;
+        params.dstStride = (kChunk - kHalfRows) * 16 * sizeof(bfloat16_t);
+        params.rsv = 0;
+        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
+        const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads) + firstRow * 16;
+        DataCopyPad(gmAPrime_[offset], ubAPrime_, params);
+        AivPublish(kProdAPrime);
+    }
+
     __aicore__ inline void RunKkt(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
@@ -353,21 +484,23 @@ private:
     ChainLoc loc_{};
     ChunkWindow window_{};
     uint32_t sub_{0};
+    bool gateRatioSafe_[3]{};
 
-    GlobalTensor<bfloat16_t> gmK_, gmT_;
+    GlobalTensor<bfloat16_t> gmK_, gmQ_, gmT_, gmAPrime_;
     GlobalTensor<float> gmG_, gmBeta_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 
     LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubVb_[2], ubKbg_[2];
-    LocalTensor<float> ubKkt_[2], ubL_, ubX_;
+    LocalTensor<bfloat16_t> ubQ_[2], ubQHat_[2], ubAPrime_;
+    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_;
     LocalTensor<bfloat16_t> ubABf_, ubZeroBf_;
-    LocalTensor<float> ubG_[2], ubEnergy_[2], ubBeta_[2], ubKRstd_[2];
+    LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3];
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2];
+    LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2], l1QHat_[2];
     LocalTensor<float> l1InvX0_[2], l1InvX1_[2], l1InvL10_[2], l1InvT_[2];
     LocalTensor<bfloat16_t> l0A0_, l0B0_, l0B1_;
     LocalTensor<float> l0Af_, l0Bf_;
-    LocalTensor<float> l0C0_, l0C2_, l0C3_, l0CKkt_[2];
+    LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_, l0CKkt_[2];
 };
 
 } // namespace GdnChunk64Sparse
