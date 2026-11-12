@@ -87,8 +87,8 @@ public:
             RunAivPrologue();
         }
         if ASCEND_IS_AIC {
-            RunCubeQkt(0);
             RunCubeQs(0);
+            RunCubeQkt(0);
         }
     }
 
@@ -230,11 +230,13 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
+        // H is independent of Q/K/V preparation. Publish it first so QS can
+        // start immediately after QExp is ready, then overlap QKT with Vb.
+        PrepareCurrentState(0);
         PrepareNextGate(0);
         PrepareNextQAndQExp(0);
         PrepareNextKAndKbg(0);
         PrepareNextVb(0);
-        PrepareCurrentState(0);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
@@ -361,6 +363,8 @@ private:
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (rows < static_cast<uint32_t>(kHalfRows)) {
+            Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
         if (window_.rows < kChunk) {
@@ -395,7 +399,12 @@ private:
             CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
         }
 
-        // V overlaps the following Q/QExp work and the current right stage.
+        // Issue Q/K/V while gate/cumsum and the scalar-safe checks retire.
+        // Their consumers below only wait for the corresponding event.
+        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(1);
+        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
         CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(3);
         SetFlag<HardEvent::V_S>(1);
@@ -411,18 +420,6 @@ private:
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
-        const uint32_t rows = remaining <= 0 ? 0U
-            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(1);
         WaitFlag<HardEvent::MTE2_V>(1);
         if (td_.useNorm != 0) {
             QNormExpNzVF(ubQ_, ubQHat_, ubOSB_, ubEnergy_, firstRow);
@@ -453,18 +450,6 @@ private:
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
-        const uint32_t rows = remaining <= 0 ? 0U
-            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
         WaitFlag<HardEvent::MTE2_V>(2);
         if (td_.useNorm != 0) {
             KNormKbgNzVF(ubK_, ubKHat_, ubW_, ubBeta_, ubEnergy_, firstRow);
