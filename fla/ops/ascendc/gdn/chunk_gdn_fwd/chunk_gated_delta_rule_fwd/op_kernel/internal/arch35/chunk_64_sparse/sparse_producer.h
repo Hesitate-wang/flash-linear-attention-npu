@@ -61,33 +61,47 @@ public:
     {
         if ASCEND_IS_AIV {
             if (loc_.chunks > 0) {
+                const int64_t tailRows = ResolveWindow(loc_, loc_.chunks - 1).rows;
+                const int64_t fullChunks = loc_.chunks - (tailRows < kChunk ? 1 : 0);
                 window_ = ResolveWindow(loc_, 0);
-                PrepareGate(0);
-            }
-            for (int64_t chunk = 0; chunk < loc_.chunks; ++chunk) {
-                window_ = ResolveWindow(loc_, chunk);
-                AivWait(kProdKkt);
-                if (chunk + 1 < loc_.chunks) {
-                    // Three gate slots keep next loads independent of both the
-                    // current inverse and the previous QKMask below.
+                if (fullChunks == 0) {
+                    LoadTailInputs(0);
+                } else {
+                    LoadFullInputs(0);
+                }
+                PrepareLoadedInputs(0);
+
+                int64_t chunk = 0;
+                // Every iteration in this loop has another full chunk next.
+                // Its input path contains no tail checks or padding work.
+                for (; chunk + 1 < fullChunks; ++chunk) {
+                    window_ = ResolveWindow(loc_, chunk);
+                    AivWait(kProdKkt);
                     window_ = ResolveWindow(loc_, chunk + 1);
-                    LoadInputs(chunk + 1);
+                    LoadFullInputs(chunk + 1);
+                    BuildCurrentChunk(chunk);
+                    PrepareLoadedInputs(chunk + 1);
                 }
-                window_ = ResolveWindow(loc_, chunk);
-                BuildInverse(chunk);
-                if (chunk > 0) {
-                    BuildAPrime(chunk - 1);
+                if (chunk < fullChunks) {
+                    // Peel the last full chunk: only here can the next input be
+                    // the single tail chunk of this chain.
+                    window_ = ResolveWindow(loc_, chunk);
+                    AivWait(kProdKkt);
+                    if (fullChunks < loc_.chunks) {
+                        window_ = ResolveWindow(loc_, chunk + 1);
+                        LoadTailInputs(chunk + 1);
+                    }
+                    BuildCurrentChunk(chunk);
+                    if (fullChunks < loc_.chunks) {
+                        PrepareLoadedInputs(chunk + 1);
+                    }
+                    ++chunk;
                 }
-                if (chunk + 1 < loc_.chunks) {
-                    // Loads overlap the inverse; only completion events remain
-                    // before Norm/cumsum and the L1 uploads.
-                    window_ = ResolveWindow(loc_, chunk + 1);
-                    PrepareK(chunk + 1);
-                    PrepareGateBeta(chunk + 1);
-                    PrepareQInputs(chunk + 1);
+                if (chunk < loc_.chunks) {
+                    window_ = ResolveWindow(loc_, chunk);
+                    AivWait(kProdKkt);
+                    BuildCurrentChunk(chunk);
                 }
-            }
-            if (loc_.chunks > 0) {
                 BuildAPrime(loc_.chunks - 1);
             }
             if (td_.schedule != kSparseSchedulePipeline && loc_.chunks > 0) {
@@ -220,15 +234,24 @@ private:
         l0CKkt_[1] = l0C2_;
     }
 
-    __aicore__ inline void PrepareGate(int64_t chunk)
+    __aicore__ inline void BuildCurrentChunk(int64_t chunk)
     {
-        LoadInputs(chunk);
+        window_ = ResolveWindow(loc_, chunk);
+        BuildInverse(chunk);
+        if (chunk > 0) {
+            BuildAPrime(chunk - 1);
+        }
+    }
+
+    __aicore__ inline void PrepareLoadedInputs(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
         PrepareK(chunk);
         PrepareGateBeta(chunk);
         PrepareQInputs(chunk);
     }
 
-    __aicore__ inline void LoadInputs(int64_t chunk)
+    __aicore__ inline void DrainRawInputUpload()
     {
         if (td_.useNorm == 0) {
             // UploadNdToL1 reads raw Q asynchronously. Drain the previous
@@ -238,37 +261,58 @@ private:
             SetFlag<HardEvent::MTE3_MTE2>(0);
             WaitFlag<HardEvent::MTE3_MTE2>(0);
         }
+    }
+
+    __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                                             td_.valueHeads, td_.tokens);
+        // K, G/BETA and Q have independent completion events. Their consumers
+        // wait only after the overlapped inverse and QKMask work.
+        CopyGmToUb(ubK_[slot], gmK_,
+                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(0);
+        CopyGmToUb(ubG_[gateSlot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
+        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
+        SetFlag<HardEvent::MTE2_V>(1);
+        CopyGmToUb(ubQ_[slot], gmQ_,
+                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
+    }
+
+    __aicore__ inline void LoadFullInputs(int64_t chunk)
+    {
+        DrainRawInputUpload();
+        SetFlag<HardEvent::V_MTE2>(0);
+        WaitFlag<HardEvent::V_MTE2>(0);
+        IssueInputs(chunk, static_cast<uint32_t>(kHalfRows));
+    }
+
+    __aicore__ inline void LoadTailInputs(int64_t chunk)
+    {
+        DrainRawInputUpload();
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        // This path runs only for the chain's single tail chunk. K/Q are
+        // per-AIV 32-row halves; G/BETA remain global 64-row inputs.
         if (rows < static_cast<uint32_t>(kHalfRows)) {
             Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubQ_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
-        if (window_.rows < kChunk) {
-            Duplicate(ubG_[gateSlot], 0.0f, kChunk);
-            Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
-        }
+        Duplicate(ubG_[gateSlot], 0.0f, kChunk);
+        Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
-                                             td_.valueHeads, td_.tokens);
-        // Issue G, K, BETA and Q without waiting. The matching MTE2_V events
-        // are consumed after the inverse, when each value is actually used.
-        CopyGmToUb(ubG_[gateSlot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
-        CopyGmToUb(ubK_[slot], gmK_,
-                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(0);
-        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
-        SetFlag<HardEvent::MTE2_V>(1);
-        CopyGmToUb(ubQ_[slot], gmQ_,
-                   OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
+        IssueInputs(chunk, rows);
     }
 
     __aicore__ inline void PrepareGateBeta(int64_t chunk)
