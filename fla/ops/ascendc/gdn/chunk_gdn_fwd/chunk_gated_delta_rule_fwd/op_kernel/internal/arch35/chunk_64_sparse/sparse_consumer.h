@@ -67,8 +67,13 @@ public:
     __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain)
     {
         loc_ = ResolveChain(td_, args.cuSeqlens, chain);
+        // Non-empty chains stage initial-state load/conversion inside the
+        // prologue so it overlaps Q/K/V. Empty chains have no such pipeline,
+        // but EndChain still needs a valid initial/final state.
         if ASCEND_IS_AIV {
-            InitState();
+            if (loc_.chunks == 0) {
+                InitState();
+            }
         }
     }
 
@@ -228,12 +233,47 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
     }
 
+    __aicore__ inline void LoadInitialState()
+    {
+        if (hasInitial_) {
+            if (td_.stateFp32 != 0) {
+                DataCopy(ubStateF_, gmInitF_[StateOffset()], kStateElems / 2);
+            } else {
+                DataCopy(ubInitB_, gmInitB_[StateOffset()], kStateElems / 2);
+            }
+            // Initial-state MTE2 is independent of Q/K/V events 1/2/3.
+            SetFlag<HardEvent::MTE2_V>(4);
+        } else {
+            Duplicate(ubStateF_, 0.0f, kStateElems / 2);
+            Duplicate(ubStateB_, static_cast<bfloat16_t>(0), kStateElems / 2);
+        }
+    }
+
+    __aicore__ inline void ConvertInitialState()
+    {
+        if (hasInitial_) {
+            WaitFlag<HardEvent::MTE2_V>(4);
+            if (td_.stateFp32 != 0) {
+                StateMirrorVF(ubStateF_, ubStateB_);
+            } else {
+                StateWidenVF(ubInitB_, ubStateF_, ubStateB_);
+            }
+        }
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+    }
+
     __aicore__ inline void RunAivPrologue()
     {
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
-        PrepareCurrentState(0);
-        PrepareNextGate(0);
+        PrepareNextGate(0, true);
+        PrepareNextQAndQExp(0);
+        ConvertInitialState();
+        PrepareCurrentState(0, false);
+        // chunkDecay_ is produced by PrepareNextGate. H was already published,
+        // so this decay cannot change the S used by QS/W@S.
+        StateDecayVF(ubStateF_, chunkDecay_[0]);
         PrepareNextQAndQExp(0);
         PrepareNextKAndKbg(0);
         PrepareNextVb(0);
@@ -250,7 +290,7 @@ private:
         }
     }
 
-    __aicore__ inline void PrepareCurrentState(int64_t chunk)
+    __aicore__ inline void PrepareCurrentState(int64_t chunk, bool applyDecay = true)
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
@@ -262,15 +302,15 @@ private:
             SetFlag<HardEvent::V_MTE3>(0);
             WaitFlag<HardEvent::V_MTE3>(0);
             CopyNzToL1(l1T_, ubAPrime_, kHalfRows, kChunk, kChunk, firstRow);
-            SetFlag<HardEvent::MTE3_V>(0);
-            WaitFlag<HardEvent::MTE3_V>(0);
         }
         // Cube keeps using the old S in L1H, so the FP32 UB state can be
         // decayed immediately after this upload without changing QS/W@S.
         CopyNzToL1(l1H_[slot], ubStateB_, kHalfDim, kDim, kDim,
                    sub_ * static_cast<uint32_t>(kHalfDim));
         AivPublish(kConsS);
-        StateDecayVF(ubStateF_, chunkDecay_[slot]);
+        if (applyDecay) {
+            StateDecayVF(ubStateF_, chunkDecay_[slot]);
+        }
     }
 
     __aicore__ inline void BuildAPrime(int64_t chunk)
@@ -354,7 +394,7 @@ private:
         }
     }
 
-    __aicore__ inline void PrepareNextGate(int64_t chunk)
+    __aicore__ inline void PrepareNextGate(int64_t chunk, bool includeInitial = false)
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
@@ -407,6 +447,9 @@ private:
         SetFlag<HardEvent::MTE2_V>(2);
         CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(3);
+        if (includeInitial) {
+            LoadInitialState();
+        }
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window_.rows));
