@@ -88,6 +88,7 @@ public:
         }
         if ASCEND_IS_AIC {
             RunCubeQkt(0);
+            RunCubeQs(0);
         }
     }
 
@@ -229,19 +230,21 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
-        PrepareNextQK(0);
-        PrepareNextQExpDecay(0);
-        BuildAPrime(0);
-        PrepareNextKbg(0);
+        PrepareNextGate(0);
+        PrepareNextQAndQExp(0);
+        PrepareNextKAndKbg(0);
         PrepareNextVb(0);
+        PrepareCurrentState(0);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
-        PrepareCurrentState(chunk);
+        // QKT(chunk) was published in the previous round, and its gate/beta
+        // are still live until PrepareNextGate replaces them.
+        BuildAPrime(chunk);
         if (chunk + 1 < loc_.chunks) {
-            PrepareNextQK(chunk + 1);
-            PrepareNextQExpDecay(chunk + 1);
+            PrepareNextGate(chunk + 1);
+            PrepareNextQAndQExp(chunk + 1);
         }
     }
 
@@ -308,13 +311,6 @@ private:
             UploadNdToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         }
         AivPublish(kConsRight);
-        if (chunk + 1 < loc_.chunks) {
-            // The next QKT is published after the current O. Prepare its
-            // APrime and W/U before the current O writeback and StateAddD.
-            BuildAPrime(chunk + 1);
-            PrepareNextKbg(chunk + 1);
-            PrepareNextVb(chunk + 1);
-        }
 
         if (td_.reserved == 4) {
             AivWait(kConsOL);
@@ -341,62 +337,22 @@ private:
                         ubO_, params);
         }
 
+        if (chunk + 1 < loc_.chunks) {
+            PrepareNextKAndKbg(chunk + 1);
+        }
         AivWait(kConsD);
         StateAddDVF(ubStateF_, ubStateB_, ubD_);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
+        if (chunk + 1 < loc_.chunks) {
+            // Publish the next H before its QS, then leave Vb as the final
+            // independent Vector stage of this round.
+            PrepareCurrentState(chunk + 1);
+            PrepareNextVb(chunk + 1);
+        }
     }
 
-    __aicore__ inline void PrepareNextQK(int64_t chunk)
-    {
-        window_ = ResolveWindow(loc_, chunk);
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
-        const uint32_t rows = remaining <= 0 ? 0U
-            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
-            Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-        }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
-        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-
-        // Q/K are the first complete unit. Publish them before gate, QExp,
-        // decay and Vb/Kbg so the AIC can start QKT immediately.
-        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(1);
-        WaitFlag<HardEvent::MTE2_V>(1);
-        if (td_.useNorm != 0) {
-            NormalizeRowsNzVF<true, true>(ubQ_, ubQHat_, ubQ_, ubQRstd_);
-        }
-        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        if (td_.useNorm != 0) {
-            CopyNzToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        } else {
-            UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        }
-
-        WaitFlag<HardEvent::MTE2_V>(2);
-        if (td_.useNorm != 0) {
-            NormalizeRowsNzVF<true, true>(ubK_, ubKHat_, ubK_, ubKRstd_);
-        }
-        SetFlag<HardEvent::V_MTE3>(1);
-        WaitFlag<HardEvent::V_MTE3>(1);
-        if (td_.useNorm != 0) {
-            CopyNzToL1(l1K_[slot], ubKHat_, kHalfRows, kDim, kChunk, firstRow);
-        } else {
-            UploadNdToL1(l1K_[slot], ubKHat_, kHalfRows, kDim, kChunk, firstRow);
-        }
-        AivPublish(kConsQKInputs);
-    }
-
-    __aicore__ inline void PrepareNextQExpDecay(int64_t chunk)
+    __aicore__ inline void PrepareNextGate(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
@@ -415,7 +371,6 @@ private:
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-
         CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
                                           td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window_.rows));
@@ -440,18 +395,42 @@ private:
             CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
         }
 
-        // V overlaps gate/QExp/decay. Only Vb waits for its MTE2 event.
+        // V overlaps the following Q/QExp work and the current right stage.
         CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(3);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window_.rows));
-        const int64_t lastIndex = window_.rows - 1;
-        const float gLast = ubG_.GetValue(lastIndex);
-        const float lastEnergy = ubEnergy_.GetValue(lastIndex);
-        chunkDecay_[slot] = lastEnergy;
+        chunkDecay_[slot] = ubEnergy_.GetValue(window_.rows - 1);
         debugEnergy_[slot] = ubEnergy_.GetValue(firstRow);
         debugG_[slot] = ubG_.GetValue(firstRow);
+    }
+
+    __aicore__ inline void PrepareNextQAndQExp(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        if (rows < static_cast<uint32_t>(kHalfRows)) {
+            Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+        }
+        SetFlag<HardEvent::V_MTE2>(0);
+        WaitFlag<HardEvent::V_MTE2>(0);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(1);
+        WaitFlag<HardEvent::MTE2_V>(1);
+        if (td_.useNorm != 0) {
+            QNormExpNzVF(ubQ_, ubQHat_, ubOSB_, ubEnergy_, firstRow);
+        } else {
+            QExpNzVF(ubQ_, ubOSB_, ubEnergy_, firstRow);
+        }
+        const float gLast = ubG_.GetValue(window_.rows - 1);
+        const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {
             DecayVF<true>(ubDecay_[slot], ubG_, ubEnergy_, gLast, lastEnergy,
                           gateRatioSafe_, firstRow);
@@ -459,21 +438,48 @@ private:
             DecayVF<false>(ubDecay_[slot], ubG_, ubEnergy_, gLast, lastEnergy,
                            gateRatioSafe_, firstRow);
         }
-        QExpNzVF(ubQ_, ubOSB_, ubEnergy_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
+        if (td_.useNorm != 0) {
+            CopyNzToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        }
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
     }
 
-    __aicore__ inline void PrepareNextKbg(int64_t chunk)
+    __aicore__ inline void PrepareNextKAndKbg(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        ScaleKbgNzVF(ubK_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
+        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const uint32_t rows = remaining <= 0 ? 0U
+            : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
+        if (rows < static_cast<uint32_t>(kHalfRows)) {
+            Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+        }
+        SetFlag<HardEvent::V_MTE2>(0);
+        WaitFlag<HardEvent::V_MTE2>(0);
+        const int64_t token = window_.tokenStart + firstRow;
+        const uint32_t elems = rows * static_cast<uint32_t>(kDim);
+        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+        SetFlag<HardEvent::MTE2_V>(2);
+        WaitFlag<HardEvent::MTE2_V>(2);
+        if (td_.useNorm != 0) {
+            KNormKbgNzVF(ubK_, ubKHat_, ubW_, ubBeta_, ubEnergy_, firstRow);
+        } else {
+            ScaleKbgNzVF(ubK_, ubW_, ubBeta_, ubEnergy_, firstRow, true);
+        }
+        SetFlag<HardEvent::V_MTE3>(1);
+        WaitFlag<HardEvent::V_MTE3>(1);
+        if (td_.useNorm != 0) {
+            CopyNzToL1(l1K_[slot], ubKHat_, kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1K_[slot], ubKHat_, kHalfRows, kDim, kChunk, firstRow);
+        }
         CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
+        AivPublish(kConsQKInputs);
         AivPublish(kConsW);
     }
 
@@ -518,48 +524,49 @@ private:
         AicPublishToBoth(kConsQk);
     }
 
+    __aicore__ inline void RunCubeQs(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        AicWaitBoth(kConsS);
+        ComputeMm(l1QExp_[slot], l1H_[slot], l0A0_, l0B0_, l0C3_, 64, 128, 128,
+                  false, td_.stateVFirst == 0);
+        // Keep QS in L0C3 for the next O and S in B0 for the next W@S. This
+        // SetFlag only primes the next independent T@Kbg operation.
+        ReleaseL0C();
+    }
+
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         LoadT();
         AicWaitBoth(kConsW);
-        // Kbg is negated, so W=T@Kbg=-trueW. W@S loads S into B0 before
-        // T@Vb accumulates into the same L0C0 accumulator.
+        // Kbg is negated, so W=T@Kbg=-trueW. The previous QS already loaded
+        // this chunk's S into B0; T@Kbg uses B1 and preserves it.
         ComputeMm(l1T_, l1W_[slot], l0A0_, l0B1_, l0C2_, 64, 128, 64, false, true);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
         ReleaseL0C();
-        AicWaitBoth(kConsS);
-        ComputeMm(l1W_[slot], l1H_[slot], l0A0_, l0B0_, l0C0_, 64, 128, 128,
-                  false, td_.stateVFirst == 0, true);
+        ComputeMmReuseB(l1W_[slot], l0A0_, l0B0_, l0C0_, 64, 128, 128, false, true);
 
         AicWaitBoth(kConsU);
         ComputeMm(l1T_, l1U_[slot], l0A0_, l0B1_, l0C0_, 64, 128, 64, false, true, false);
-        // Publish v_new through the independent O/right paths, then start QS.
         FixB16L1Matrix(l1VNew_, l0C0_, 64, 128, 64);
         FixB16Halves(ubVNew_, l0C0_, 64, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsP);
 
-        // B0 still holds S from W@S and T@Vb used only B1, so QS reuses it.
-        ComputeMmReuseB(l1QExp_[slot], l0A0_, l0B0_, l0C3_, 64, 128, 128, false, true);
-
+        // O accumulates into the QS retained from the previous round.
         AicWaitBoth(kConsAPrime);
-        // O reads the AIC-local L1 vNew. QS already consumed v_new's FIX_M
-        // event, while FIX_MTE1 makes the L1 copy visible to MTE1.
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
+        WaitFlag<HardEvent::FIX_M>(0);
         ComputeMm(l1APrime_[slot], l1VNew_, l0A1_, l0B1_, l0C3_, 64, 128, 64,
                   false, true, false);
         FixB16ScaledHalves(ubO_, l0C3_, 64, 128, td_.scale);
         ReleaseL0C();
         AicPublishToBoth(kConsOL);
 
-        // Publish the next QKT after the current O and before the current D.
-        if (chunk + 1 < loc_.chunks) {
-            RunCubeQkt(chunk + 1);
-        }
         AicWaitBoth(kConsRight);
         if (td_.stateVFirst != 0) {
             ComputeMm(l1Right_, l1K_[slot], l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
@@ -569,6 +576,13 @@ private:
         FixF32Halves(ubD_, l0C3_, 128, 128);
         ReleaseL0C();
         AicPublishToBoth(kConsD);
+
+        // The next QKMask consumes this QKT. The following QS is retained for
+        // the next O, while its B0 copy of S is reused by the next W@S.
+        if (chunk + 1 < loc_.chunks) {
+            RunCubeQkt(chunk + 1);
+            RunCubeQs(chunk + 1);
+        }
     }
 
     FusedTilingData td_{};

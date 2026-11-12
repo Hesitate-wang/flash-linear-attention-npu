@@ -296,6 +296,152 @@ __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
     }
 }
 
+// Two-row software pipeline shared by Q/QExp and K/Kbg. Independent reduction
+// work from the next pair hides the current pair's Sqrt/Div latency.
+#define GDN64_L2_REDUCE(addr, base, ee0, oo0, ee1, oo1, m0, m1)                                                        \
+    GdnFwd32::LoadEvenOdd((addr) + static_cast<uint32_t>(base) * kPair, ee0, oo0, m16);                                         \
+    GdnFwd32::LoadEvenOdd((addr) + static_cast<uint32_t>(base) * kPair + kRow, ee1, oo1, m16);                                  \
+    Mul(s0, ee0, ee0, pregAll);                                                                                       \
+    Mul(s1, oo0, oo0, pregAll);                                                                                       \
+    Add(s0, s0, s1, pregAll);                                                                                         \
+    Mul(s1, ee1, ee1, pregAll);                                                                                       \
+    Mul(brc0, oo1, oo1, pregAll);                                                                                     \
+    Add(s1, s1, brc0, pregAll);                                                                                       \
+    Reduce<Reg::ReduceType::SUM>(m0, s0, pregAll);                                                                   \
+    Reduce<Reg::ReduceType::SUM>(m1, s1, pregAll);                                                                   \
+    Adds(m0, m0, kSparseEps, pregMerge);                                                                              \
+    Adds(m1, m1, kSparseEps, pregMerge);
+
+#define GDN64_L2_APPLY(ee0, oo0, ee1, oo1, m0, m1)                                                                    \
+    Div(r0, one, m0, pregMerge);                                                                                      \
+    Div(r1, one, m1, pregMerge);                                                                                      \
+    Duplicate(brc0, r0, pregAll);                                                                                     \
+    Duplicate(brc1, r1, pregAll);                                                                                     \
+    Mul(ee0, ee0, brc0, pregAll);                                                                                     \
+    Mul(oo0, oo0, brc0, pregAll);                                                                                     \
+    Mul(ee1, ee1, brc1, pregAll);                                                                                     \
+    Mul(oo1, oo1, brc1, pregAll);
+
+#define GDN64_L2_ROWS(xAddr, nzAddr)                                                                                   \
+    {                                                                                                                  \
+        RegTensor<float> e0, o0, e1, o1, e2, o2, e3, o3, s0, s1, mean0, mean1, mean2, mean3, r0, r1, brc0, brc1;      \
+        GDN64_L2_REDUCE(xAddr, 0, e0, o0, e1, o1, mean0, mean1)                                                        \
+        for (uint16_t i = 0; i < nEven - 1; ++i) {                                                                     \
+            Sqrt(mean0, mean0, pregMerge);                                                                             \
+            Sqrt(mean1, mean1, pregMerge);                                                                             \
+            GDN64_L2_REDUCE(xAddr, i + 1, e2, o2, e3, o3, mean2, mean3)                                                \
+            GDN64_L2_APPLY(e0, o0, e1, o1, mean0, mean1)                                                               \
+            GdnFwd32::StoreNzEvenOdd(nzAddr, static_cast<uint32_t>(i) * 2, e0, o0, m16, m128);                         \
+            GdnFwd32::StoreNzEvenOdd(nzAddr, static_cast<uint32_t>(i) * 2 + 1, e1, o1, m16, m128);                     \
+            GDN64_L2_TAIL                                                                                              \
+            e0 = e2;                                                                                                   \
+            o0 = o2;                                                                                                   \
+            e1 = e3;                                                                                                   \
+            o1 = o3;                                                                                                   \
+            mean0 = mean2;                                                                                             \
+            mean1 = mean3;                                                                                             \
+        }                                                                                                              \
+        {                                                                                                              \
+            uint16_t i = static_cast<uint16_t>(nEven - 1);                                                             \
+            Sqrt(mean0, mean0, pregMerge);                                                                             \
+            Sqrt(mean1, mean1, pregMerge);                                                                             \
+            GDN64_L2_APPLY(e0, o0, e1, o1, mean0, mean1)                                                               \
+            GdnFwd32::StoreNzEvenOdd(nzAddr, static_cast<uint32_t>(i) * 2, e0, o0, m16, m128);                         \
+            GdnFwd32::StoreNzEvenOdd(nzAddr, static_cast<uint32_t>(i) * 2 + 1, e1, o1, m16, m128);                     \
+            GDN64_L2_TAIL                                                                                              \
+        }                                                                                                              \
+    }
+
+__aicore__ inline void QNormExpNzVF(LocalTensor<bfloat16_t> &q,
+                                    LocalTensor<bfloat16_t> &qNz,
+                                    LocalTensor<bfloat16_t> &qExpNz,
+                                    LocalTensor<float> &energy,
+                                    uint32_t firstRow)
+{
+    constexpr uint32_t kRow = 128;
+    constexpr uint32_t kPair = 256;
+    __ubuf__ bfloat16_t *qAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(q.GetPhyAddr());
+    __ubuf__ bfloat16_t *nzAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(qNz.GetPhyAddr());
+    __ubuf__ bfloat16_t *qeAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(qExpNz.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    const uint16_t nEven = static_cast<uint16_t>(kHalfRows >> 1);
+    __VEC_SCOPE__
+    {
+        MaskReg pregAll = CreateMask<float, MaskPattern::ALL>();
+        MaskReg pregMerge = CreateMask<float, MaskPattern::VL1>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> one;
+        Duplicate(one, 1.0f, pregMerge);
+#define GDN64_L2_TAIL                                                                                                  \
+    {                                                                                                                  \
+        RegTensor<float> g0, g1;                                                                                       \
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(g0, eAddr + firstRow + i * 2);                                       \
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(g1, eAddr + firstRow + i * 2 + 1);                                   \
+        Mul(e0, e0, g0, pregAll);                                                                                     \
+        Mul(o0, o0, g0, pregAll);                                                                                     \
+        Mul(e1, e1, g1, pregAll);                                                                                     \
+        Mul(o1, o1, g1, pregAll);                                                                                     \
+        GdnFwd32::StoreNzEvenOdd(qeAddr, static_cast<uint32_t>(i) * 2, e0, o0, m16, m128);                             \
+        GdnFwd32::StoreNzEvenOdd(qeAddr, static_cast<uint32_t>(i) * 2 + 1, e1, o1, m16, m128);                         \
+    }
+        GDN64_L2_ROWS(qAddr, nzAddr)
+#undef GDN64_L2_TAIL
+    }
+}
+
+__aicore__ inline void KNormKbgNzVF(LocalTensor<bfloat16_t> &k,
+                                    LocalTensor<bfloat16_t> &kNz,
+                                    LocalTensor<bfloat16_t> &kbgNz,
+                                    LocalTensor<float> &beta,
+                                    LocalTensor<float> &energy,
+                                    uint32_t firstRow)
+{
+    constexpr uint32_t kRow = 128;
+    constexpr uint32_t kPair = 256;
+    __ubuf__ bfloat16_t *kAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(k.GetPhyAddr());
+    __ubuf__ bfloat16_t *nzAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(kNz.GetPhyAddr());
+    __ubuf__ bfloat16_t *kbgAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(kbgNz.GetPhyAddr());
+    __ubuf__ float *bAddr = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    const uint16_t nEven = static_cast<uint16_t>(kHalfRows >> 1);
+    __VEC_SCOPE__
+    {
+        MaskReg pregAll = CreateMask<float, MaskPattern::ALL>();
+        MaskReg pregMerge = CreateMask<float, MaskPattern::VL1>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> one;
+        Duplicate(one, 1.0f, pregMerge);
+#define GDN64_L2_TAIL                                                                                                  \
+    {                                                                                                                  \
+        RegTensor<float> g0, g1, be0, be1, sc0, sc1;                                                                  \
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(g0, eAddr + firstRow + i * 2);                                       \
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(g1, eAddr + firstRow + i * 2 + 1);                                   \
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(be0, bAddr + firstRow + i * 2);                                      \
+        LoadAlign<float, LoadDist::DIST_BRC_B32>(be1, bAddr + firstRow + i * 2 + 1);                                  \
+        Mul(sc0, be0, g0, pregAll);                                                                                   \
+        Mul(sc1, be1, g1, pregAll);                                                                                   \
+        Muls(sc0, sc0, -1.0f, pregAll);                                                                               \
+        Muls(sc1, sc1, -1.0f, pregAll);                                                                               \
+        Mul(e0, e0, sc0, pregAll);                                                                                    \
+        Mul(o0, o0, sc0, pregAll);                                                                                    \
+        Mul(e1, e1, sc1, pregAll);                                                                                    \
+        Mul(o1, o1, sc1, pregAll);                                                                                    \
+        GdnFwd32::StoreNzEvenOdd(kbgAddr, static_cast<uint32_t>(i) * 2, e0, o0, m16, m128);                            \
+        GdnFwd32::StoreNzEvenOdd(kbgAddr, static_cast<uint32_t>(i) * 2 + 1, e1, o1, m16, m128);                        \
+    }
+        GDN64_L2_ROWS(kAddr, nzAddr)
+#undef GDN64_L2_TAIL
+    }
+}
+
+#undef GDN64_L2_ROWS
+#undef GDN64_L2_APPLY
+#undef GDN64_L2_REDUCE
+
 __aicore__ inline void ScaleVbNzVF(LocalTensor<bfloat16_t> &v,
                                    LocalTensor<bfloat16_t> &out,
                                    LocalTensor<float> &beta,
