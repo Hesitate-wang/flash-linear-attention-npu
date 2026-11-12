@@ -269,14 +269,14 @@ private:
         // start immediately after QExp is ready, then overlap QKT with Vb.
         PrepareNextGate(0, true);
         PrepareNextQAndQExp(0);
-        ConvertInitialState();
+        ConvertInitialState(); //格式cast
         PrepareCurrentState(0, false);
-        // chunkDecay_ is produced by PrepareNextGate. H was already published,
+        // chunkDecay_ is produced by PrepareNextQAndQExp. H was already published,
         // so this decay cannot change the S used by QS/W@S.
         StateDecayVF(ubStateF_, chunkDecay_[0]);
-        PrepareNextQAndQExp(0);
         PrepareNextKAndKbg(0);
         PrepareNextVb(0);
+        PrepareRightDecay(0);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
@@ -307,6 +307,7 @@ private:
         // decayed immediately after this upload without changing QS/W@S.
         CopyNzToL1(l1H_[slot], ubStateB_, kHalfDim, kDim, kDim,
                    sub_ * static_cast<uint32_t>(kHalfDim));
+        chunkDecay_[slot] = ubEnergy_.GetValue(window_.rows - 1);
         AivPublish(kConsS);
         if (applyDecay) {
             StateDecayVF(ubStateF_, chunkDecay_[slot]);
@@ -354,20 +355,7 @@ private:
         }
         AivPublish(kConsRight);
 
-        if (td_.reserved == 4) {
-            AivWait(kConsOL);
-            ubScratch_.SetValue(0, debugEnergy_[slot]);
-            ubScratch_.SetValue(1, td_.scale);
-            ubScratch_.SetValue(2, debugG_[slot]);
-            ubScratch_.SetValue(3, chunkDecay_[slot]);
-            SetFlag<HardEvent::S_V>(0);
-            WaitFlag<HardEvent::S_V>(0);
-            Cast(ubO_, ubScratch_, RoundMode::CAST_RINT, 4);
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
-        } else {
-            AivWaitMte3(kConsOL);
-        }
+        AivWaitMte3(kConsOL);
         if (rows != 0) {
             DataCopyExtParams params{};
             params.blockCount = static_cast<uint16_t>(rows);
@@ -391,6 +379,7 @@ private:
             // independent Vector stage of this round.
             PrepareCurrentState(chunk + 1);
             PrepareNextVb(chunk + 1);
+            PrepareRightDecay(chunk + 1);
         }
     }
 
@@ -439,6 +428,10 @@ private:
             CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
         }
 
+        // Publish gate/energy completion without blocking the Vector pipeline.
+        // The matching wait is placed only when Scalar gate reads are needed.
+        SetFlag<HardEvent::V_S>(1);
+
         // Issue Q/K/V while gate/cumsum and the scalar-safe checks retire.
         // Their consumers below only wait for the corresponding event.
         CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
@@ -450,12 +443,6 @@ private:
         if (includeInitial) {
             LoadInitialState();
         }
-        SetFlag<HardEvent::V_S>(1);
-        WaitFlag<HardEvent::V_S>(1);
-        gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window_.rows));
-        chunkDecay_[slot] = ubEnergy_.GetValue(window_.rows - 1);
-        debugEnergy_[slot] = ubEnergy_.GetValue(firstRow);
-        debugG_[slot] = ubG_.GetValue(firstRow);
     }
 
     __aicore__ inline void PrepareNextQAndQExp(int64_t chunk)
@@ -469,6 +456,27 @@ private:
         } else {
             QExpNzVF(ubQ_, ubOSB_, ubEnergy_, firstRow);
         }
+        // QHat/QExp do not depend on right's decay. Upload them first so the
+        // following scalar checks and decay work overlap this MTE3 transfer.
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        if (td_.useNorm != 0) {
+            CopyNzToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        } else {
+            UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
+        }
+        CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
+    }
+
+    __aicore__ inline void PrepareRightDecay(int64_t chunk)
+    {
+        window_ = ResolveWindow(loc_, chunk);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        // This is needed only by the next steady right stage, so defer it
+        // after Q/K/Kbg/Vb and let it overlap the AIC's QKT/QS work.
+        WaitFlag<HardEvent::V_S>(1);
+        gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window_.rows));
         const float gLast = ubG_.GetValue(window_.rows - 1);
         const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {
@@ -478,14 +486,6 @@ private:
             DecayVF<false>(ubDecay_[slot], ubG_, ubEnergy_, gLast, lastEnergy,
                            gateRatioSafe_, firstRow);
         }
-        SetFlag<HardEvent::V_MTE3>(0);
-        WaitFlag<HardEvent::V_MTE3>(0);
-        if (td_.useNorm != 0) {
-            CopyNzToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        } else {
-            UploadNdToL1(l1QHat_, ubQHat_, kHalfRows, kDim, kChunk, firstRow);
-        }
-        CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
     }
 
     __aicore__ inline void PrepareNextKAndKbg(int64_t chunk)
@@ -620,8 +620,6 @@ private:
     bool hasInitial_{false};
     bool gateRatioSafe_{false};
     float chunkDecay_[2]{};
-    float debugEnergy_[2]{};
-    float debugG_[2]{};
 
     GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmT_, gmO_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
