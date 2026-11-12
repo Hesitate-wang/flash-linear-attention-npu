@@ -21,28 +21,28 @@ __aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 
 // Producer sets this after the current T is complete but delays the matching
 // wait until the same parity flag is reused two iterations later.
-// __aicore__ inline void SetIterationAic(int64_t iteration)
-// {
-//     if ASCEND_IS_AIC {
-//         CrossCoreSetFlag<0x0, PIPE_FIX>(IterationBarrierFlag(iteration));
-//     }
-// }
+__aicore__ inline void SetIterationAic(int64_t iteration)
+{
+    // if ASCEND_IS_AIC {
+    //     CrossCoreSetFlag<0x0, PIPE_FIX>(IterationBarrierFlag(iteration));
+    // }
+}
 
-// template <pipe_t WaitPipe>
-// __aicore__ inline void WaitIterationAic(int64_t iteration)
-// {
-//     if ASCEND_IS_AIC {
-//         CrossCoreWaitFlag<0x0, WaitPipe>(IterationBarrierFlag(iteration));
-//     }
-// }
+template <pipe_t WaitPipe>
+__aicore__ inline void WaitIterationAic(int64_t iteration)
+{
+    // if ASCEND_IS_AIC {
+    //     CrossCoreWaitFlag<0x0, WaitPipe>(IterationBarrierFlag(iteration));
+    // }
+}
 
 // // Consumer still publishes and drains each T generation immediately.
-// template <pipe_t WaitPipe>
-// __aicore__ inline void PublishIterationAic(int64_t iteration)
-// {
-//     SetIterationAic(iteration);
-//     WaitIterationAic<WaitPipe>(iteration);
-// }
+template <pipe_t WaitPipe>
+__aicore__ inline void PublishIterationAic(int64_t iteration)
+{
+    SetIterationAic(iteration);
+    WaitIterationAic<WaitPipe>(iteration);
+}
 
 __aicore__ inline void AivPublish(uint16_t id)
 {
