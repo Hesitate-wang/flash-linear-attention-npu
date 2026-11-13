@@ -590,7 +590,7 @@ __aicore__ inline void GateRatioBandVF(LocalTensor<float> &ratio,
                 Mul(value, gI, invJ, all);
             } else {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
-                Sub(diff, gI, gJ, all);
+                Sub(diff, gI, invJ, all);
                 if constexpr (UseExp2) {
                     Muls(diff, diff, kSparseLn2, all);
                 }
