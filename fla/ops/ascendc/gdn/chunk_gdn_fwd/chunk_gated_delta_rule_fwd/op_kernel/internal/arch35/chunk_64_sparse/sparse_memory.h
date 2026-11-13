@@ -44,6 +44,8 @@ constexpr uint32_t kPUbRatio = kPUbAPrime + 4 * kKiB;
 constexpr uint32_t kPUbRatioSlotBytes = 8 * kKiB;
 // The third ratio band reuses the otherwise unused Vb0 storage.
 constexpr uint32_t kPUbRatioThird = kPUbVb;
+// Reuse Vb1 for the 32x32 FP32 identity loaded by the inverse solver.
+constexpr uint32_t kPUbEye = kPUbVb + kPUbSlotBytes;
 constexpr uint32_t kPUbEnd = kPUbRatio + 2 * kPUbRatioSlotBytes;
 static_assert(kPUbEnd <= kUbBudget);
 

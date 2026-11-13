@@ -176,6 +176,7 @@ private:
         ubO_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbO);
         ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
         ubEnergy_ = ubG_[64];
+        ubEnergyRecip_ = ubG_[320];
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
         ubBeta_ = ubG_[128];
 
@@ -413,9 +414,9 @@ private:
         PrepareGateBetaVF(ubG_, ubBeta_, aLog, dtBias, td_.gateSoftplus != 0,
                           td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_, ubEnergy_, ubShift_);
+            CumsumEnergyVF<true>(ubG_, ubEnergy_, ubEnergyRecip_, ubShift_);
         } else {
-            CumsumEnergyVF<false>(ubG_, ubEnergy_, ubShift_);
+            CumsumEnergyVF<false>(ubG_, ubEnergy_, ubEnergyRecip_, ubShift_);
         }
 
         // Publish gate/energy completion without blocking the Vector pipeline.
@@ -465,10 +466,10 @@ private:
         const float gLast = ubG_.GetValue(window_.rows - 1);
         const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {
-            DecayVF<true>(ubDecay_[slot], ubG_, ubEnergy_, gLast, lastEnergy,
+            DecayVF<true>(ubDecay_[slot], ubG_, ubEnergyRecip_, gLast, lastEnergy,
                           gateRatioSafe_, firstRow);
         } else {
-            DecayVF<false>(ubDecay_[slot], ubG_, ubEnergy_, gLast, lastEnergy,
+            DecayVF<false>(ubDecay_[slot], ubG_, ubEnergyRecip_, gLast, lastEnergy,
                            gateRatioSafe_, firstRow);
         }
         // Publish decay now rather than draining all Vector work at its use.
@@ -622,7 +623,7 @@ private:
     LocalTensor<float> ubDecay_[2];
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubZeroBf_, ubO_, ubInitB_, ubOSB_;
-    LocalTensor<float> ubG_, ubEnergy_, ubBeta_;
+    LocalTensor<float> ubG_, ubEnergy_, ubBeta_, ubEnergyRecip_;
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_;

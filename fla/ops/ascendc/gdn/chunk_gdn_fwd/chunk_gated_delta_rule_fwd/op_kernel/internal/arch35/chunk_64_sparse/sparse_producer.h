@@ -44,6 +44,7 @@ public:
         InitBuffers();
         if ASCEND_IS_AIV {
             GenerateScanIndices(ubShift_);
+            InitIdentity32();
         }
     }
 
@@ -228,6 +229,7 @@ private:
             ubEnergy_[gateSlot] = ubG_[gateSlot][64];
             ubBeta_[gateSlot] = ubG_[gateSlot][192];
             ubKRstd_[gateSlot] = ubG_[gateSlot][288];
+            ubEnergyRecip_[gateSlot] = ubG_[gateSlot][320];
         }
         ubQk_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbQk);
         ubAPrime_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbAPrime);
@@ -236,6 +238,7 @@ private:
         ubABf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbABf);
         ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kPUbZero);
         ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kPUbShift);
+        ubEye_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbEye);
         l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
         l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
         l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
@@ -247,6 +250,18 @@ private:
         l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
         l0CKkt_[0] = l0C0_;
         l0CKkt_[1] = l0C2_;
+    }
+
+    __aicore__ inline void InitIdentity32()
+    {
+        Duplicate(ubEye_, 0.0f, kHalfRows * kHalfRows);
+        SetFlag<HardEvent::V_S>(0);
+        WaitFlag<HardEvent::V_S>(0);
+        for (uint32_t row = 0; row < kHalfRows; ++row) {
+            ubEye_.SetValue(row * (kHalfRows + 1), 1.0f);
+        }
+        SetFlag<HardEvent::S_V>(0);
+        WaitFlag<HardEvent::S_V>(0);
     }
 
     __aicore__ inline void BuildCurrentChunk(int64_t chunk)
@@ -350,17 +365,17 @@ private:
         PrepareGateBetaVF(ubG_[gateSlot], ubBeta_[gateSlot], aLog, dtBias, td_.gateSoftplus != 0,
                           td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
+            CumsumEnergyVF<true>(ubG_[gateSlot], ubEnergy_[gateSlot], ubEnergyRecip_[gateSlot], ubShift_);
             const bool useEnergyRatio = GateRatioSafe(
                 ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
             GateRatioBandVF<true>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
-                                  useEnergyRatio, firstRow);
+                                  ubEnergyRecip_[gateSlot], useEnergyRatio, firstRow);
         } else {
-            CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
+            CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubEnergyRecip_[gateSlot], ubShift_);
             const bool useEnergyRatio = GateRatioSafe(
                 ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
             GateRatioBandVF<false>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
-                                   useEnergyRatio, firstRow);
+                                   ubEnergyRecip_[gateSlot], useEnergyRatio, firstRow);
         }
     }
 
@@ -444,7 +459,7 @@ private:
         WaitFlag<HardEvent::V_S>(1);
         const uint32_t firstRow = sub_ * kHalfRows;
         Inverse32DiagonalVF(ubKkt_[slot], ubL_, ubX_, ubRatio_[ratioSlot],
-                            ubBeta_[ratioSlot], firstRow);
+                            ubBeta_[ratioSlot], ubEye_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         PublishInverse(chunk);
@@ -554,9 +569,9 @@ private:
 
     LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubKbg_[2];
     LocalTensor<bfloat16_t> ubQ_[2], ubQHat_[2], ubAPrime_;
-    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_, ubRatio_[3];
+    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_, ubRatio_[3], ubEye_;
     LocalTensor<bfloat16_t> ubABf_, ubZeroBf_;
-    LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3];
+    LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3], ubEnergyRecip_[3];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1K_[3], l1Vb_[2], l1Kbg_[2], l1QHat_[3];
     LocalTensor<float> l1InvX0_[2], l1InvX1_[2], l1InvL10_[2], l1InvT_[2];

@@ -127,10 +127,12 @@ __aicore__ inline void PrepareGateBetaVF(LocalTensor<float> &g,
 template <bool UseExp2>
 __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
                                       LocalTensor<float> &energy,
+                                      LocalTensor<float> &energyRecip,
                                       LocalTensor<uint32_t> &shift)
 {
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __ubuf__ float *rAddr = reinterpret_cast<__ubuf__ float *>(energyRecip.GetPhyAddr());
     __ubuf__ uint32_t *sAddr = reinterpret_cast<__ubuf__ uint32_t *>(shift.GetPhyAddr());
     __VEC_SCOPE__
     {
@@ -156,6 +158,10 @@ __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
         }
         Exp(value, value, all);
         StoreAlign(eAddr, value, all);
+        RegTensor<float> one, reciprocal;
+        Duplicate(one, 1.0f, all);
+        Div(reciprocal, one, value, all);
+        StoreAlign(rAddr, reciprocal, all);
     }
 }
 
@@ -560,26 +566,28 @@ template <bool UseExp2>
 __aicore__ inline void GateRatioBandVF(LocalTensor<float> &ratio,
                                        LocalTensor<float> &g,
                                        LocalTensor<float> &energy,
+                                       LocalTensor<float> &energyRecip,
                                        bool useEnergyRatio,
                                        uint32_t firstRow)
 {
     __ubuf__ float *r = reinterpret_cast<__ubuf__ float *>(ratio.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __ubuf__ float *rcpAddr = reinterpret_cast<__ubuf__ float *>(energyRecip.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        RegTensor<float> gJ, gI, diff, value;
+        RegTensor<float> invJ, gI, diff, value;
         if (useEnergyRatio) {
-            LoadAlign(gJ, eAddr);
+            LoadAlign(invJ, rcpAddr);
         } else {
-            LoadAlign(gJ, gAddr);
+            LoadAlign(invJ, gAddr);
         }
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t globalRow = firstRow + row;
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + globalRow);
-                Div(value, gI, gJ, all);
+                Mul(value, gI, invJ, all);
             } else {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
                 Sub(diff, gI, gJ, all);
@@ -600,6 +608,7 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
                                            LocalTensor<float> &a,
                                            LocalTensor<float> &ratio,
                                            LocalTensor<float> &beta,
+                                           LocalTensor<float> &eye,
                                            uint32_t firstRow)
 {
     __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
@@ -607,6 +616,7 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
     __ubuf__ float *x = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
     __ubuf__ float *r = reinterpret_cast<__ubuf__ float *>(ratio.GetPhyAddr());
     __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *eyeAddr = reinterpret_cast<__ubuf__ float *>(eye.GetPhyAddr());
     const uint32_t diagonalCol = firstRow;
     __VEC_SCOPE__
     {
@@ -652,28 +662,17 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
         {
             MaskReg all = CreateMask<float, MaskPattern::VL32>();
             RegTensor<float> y0, y1, y2, y3, y4, y5, y6, y7;
-            RegTensor<float> previous, coefficient, zero, one;
-            RegTensor<int32_t> lanes;
-            Duplicate(zero, 0.0f, all);
-            Duplicate(one, 1.0f, all);
-            Arange<int32_t, IndexOrder::INCREASE_ORDER>(lanes, 0);
-            MaskReg diagonal;
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 0), all);
-            Select(y0, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 1), all);
-            Select(y1, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 2), all);
-            Select(y2, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 3), all);
-            Select(y3, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 4), all);
-            Select(y4, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 5), all);
-            Select(y5, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 6), all);
-            Select(y6, one, zero, diagonal);
-            CompareScalar<int32_t, CMPMODE::EQ>(diagonal, lanes, static_cast<int32_t>(base + 7), all);
-            Select(y7, one, zero, diagonal);
+            RegTensor<float> previous, coefficient;
+            // Match chunk32: identity rows are prepared once in UB and loaded
+            // directly instead of rebuilding them with compares and selects.
+            LoadAlign(y0, eyeAddr + (base + 0) * 32);
+            LoadAlign(y1, eyeAddr + (base + 1) * 32);
+            LoadAlign(y2, eyeAddr + (base + 2) * 32);
+            LoadAlign(y3, eyeAddr + (base + 3) * 32);
+            LoadAlign(y4, eyeAddr + (base + 4) * 32);
+            LoadAlign(y5, eyeAddr + (base + 5) * 32);
+            LoadAlign(y6, eyeAddr + (base + 6) * 32);
+            LoadAlign(y7, eyeAddr + (base + 7) * 32);
             for (uint16_t col = 0; col < base; ++col) {
                 LoadAlign(previous, x + static_cast<uint32_t>(col) * 32);
                 SPARSE_SOLVE_PREV(y0, 0)
@@ -1023,13 +1022,13 @@ __aicore__ inline void QExpNzVF(LocalTensor<bfloat16_t> &q,
 template <bool UseExp2>
 __aicore__ inline void DecayVF(LocalTensor<float> &decay,
                                LocalTensor<float> &g,
-                               LocalTensor<float> &energy,
+                               LocalTensor<float> &energyRecip,
                                float gLast, float lastEnergy,
                                bool useEnergyRatio, uint32_t firstRow)
 {
     __ubuf__ float *dAddr = reinterpret_cast<__ubuf__ float *>(decay.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
-    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __ubuf__ float *rAddr = reinterpret_cast<__ubuf__ float *>(energyRecip.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
@@ -1038,8 +1037,8 @@ __aicore__ inline void DecayVF(LocalTensor<float> &decay,
         Duplicate(last, useEnergyRatio ? lastEnergy : gLast, all);
         for (uint16_t row = 0; row < 32; ++row) {
             if (useEnergyRatio) {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, eAddr + firstRow + row);
-                Div(scale, last, scale, all);
+                LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, rAddr + firstRow + row);
+                Mul(scale, last, scale, all);
             } else {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, gAddr + firstRow + row);
                 Sub(diff, last, scale, all);
