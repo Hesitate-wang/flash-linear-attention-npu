@@ -31,9 +31,9 @@ constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
 constexpr uint32_t kPUbABf = kPUbX + 12 * kKiB;
 constexpr uint32_t kPUbZero = kPUbABf + 4 * kKiB;
 constexpr uint32_t kPUbGates = kPUbZero + 4 * kKiB;
-// Two raw gate/beta slots cover the current inverse and next input loads.
-// QKMask consumes the shared ratio band rather than the previous raw gate.
-constexpr uint32_t kPUbShift = kPUbGates + 4 * kKiB;
+// Three raw gate/beta slots cover the current inverse, next preparation and
+// the load issued two chunks ahead. QKMask consumes the shared ratio band.
+constexpr uint32_t kPUbShift = kPUbGates + 6 * kKiB;
 // Producer-owned Q/QHat use chunk-parity slots. QKT/APrime are serialized per AIV.
 constexpr uint32_t kPUbQ = kPUbShift + 2 * kKiB;
 constexpr uint32_t kPUbQHat = kPUbQ + 16 * kKiB;
@@ -42,6 +42,8 @@ constexpr uint32_t kPUbAPrime = kPUbQk + 8 * kKiB;
 // Two FP32 ratio bands are shared by the current inverse and previous QKMask.
 constexpr uint32_t kPUbRatio = kPUbAPrime + 4 * kKiB;
 constexpr uint32_t kPUbRatioSlotBytes = 8 * kKiB;
+// The third ratio band reuses the otherwise unused Vb0 storage.
+constexpr uint32_t kPUbRatioThird = kPUbVb;
 constexpr uint32_t kPUbEnd = kPUbRatio + 2 * kPUbRatioSlotBytes;
 static_assert(kPUbEnd <= kUbBudget);
 
@@ -51,7 +53,7 @@ constexpr uint32_t kPL1SlotBytes = 48 * kKiB;
 constexpr uint32_t kPL1K = 0;
 constexpr uint32_t kPL1Vb = 16 * kKiB;
 constexpr uint32_t kPL1Kbg = 32 * kKiB;
-constexpr uint32_t kPL1A = 2 * kPL1SlotBytes;
+constexpr uint32_t kPL1A = 3 * kPL1SlotBytes;
 constexpr uint32_t kPL1InvSlotBytes = 4 * kKiB;
 constexpr uint32_t kPL1InvX0 = kPL1A + 8 * kKiB;
 constexpr uint32_t kPL1InvX1 = kPL1InvX0 + 2 * kPL1InvSlotBytes;
@@ -59,7 +61,7 @@ constexpr uint32_t kPL1InvL10 = kPL1InvX1 + 2 * kPL1InvSlotBytes;
 constexpr uint32_t kPL1InvT = kPL1InvL10 + 2 * kPL1InvSlotBytes;
 constexpr uint32_t kPL1QSlotBytes = 16 * kKiB;
 constexpr uint32_t kPL1QHat = kPL1InvT + 2 * kPL1InvSlotBytes;
-constexpr uint32_t kPL1End = kPL1QHat + 2 * kPL1QSlotBytes;
+constexpr uint32_t kPL1End = kPL1QHat + 3 * kPL1QSlotBytes;
 static_assert(kPL1End <= 512 * kKiB);
 
 // Consumer UB, per AIV.

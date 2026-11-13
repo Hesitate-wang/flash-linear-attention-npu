@@ -70,35 +70,35 @@ public:
                     LoadFullInputs(0);
                 }
                 PrepareLoadedInputs(0);
+                if (loc_.chunks > 1) {
+                    // Keep one prepared input and one in-flight input before
+                    // entering the load(i+2)/prepare(i+1) steady pipeline.
+                    window_ = ResolveWindow(loc_, 1);
+                    if (fullChunks > 1) {
+                        LoadFullInputs(1);
+                    } else {
+                        LoadTailInputs(1);
+                    }
+                }
 
                 int64_t chunk = 0;
-                // Every iteration in this loop has another full chunk next.
-                // Its input path contains no tail checks or padding work.
-                for (; chunk + 1 < fullChunks; ++chunk) {
-                    window_ = ResolveWindow(loc_, chunk);
-                    AivWait(kProdKkt);
-                    window_ = ResolveWindow(loc_, chunk + 1);
-                    LoadFullInputs(chunk + 1);
-                    BuildCurrentChunk(chunk);
+                for (; chunk + 2 < fullChunks; ++chunk) {
                     PrepareLoadedInputs(chunk + 1);
-                }
-                if (chunk < fullChunks) {
-                    // Peel the last full chunk: only here can the next input be
-                    // the single tail chunk of this chain.
-                    window_ = ResolveWindow(loc_, chunk);
+                    window_ = ResolveWindow(loc_, chunk + 2);
+                    LoadFullInputs(chunk + 2);
                     AivWait(kProdKkt);
-                    if (fullChunks < loc_.chunks) {
-                        window_ = ResolveWindow(loc_, chunk + 1);
-                        LoadTailInputs(chunk + 1);
-                    }
                     BuildCurrentChunk(chunk);
-                    if (fullChunks < loc_.chunks) {
+                }
+                // At most two chunks remain. Their next load, if any, is the
+                // chain's single tail chunk; full-chunk iterations stay above.
+                for (; chunk < loc_.chunks; ++chunk) {
+                    if (chunk + 1 < loc_.chunks) {
                         PrepareLoadedInputs(chunk + 1);
                     }
-                    ++chunk;
-                }
-                if (chunk < loc_.chunks) {
-                    window_ = ResolveWindow(loc_, chunk);
+                    if (chunk + 2 < loc_.chunks) {
+                        window_ = ResolveWindow(loc_, chunk + 2);
+                        LoadTailInputs(chunk + 2);
+                    }
                     AivWait(kProdKkt);
                     BuildCurrentChunk(chunk);
                 }
@@ -110,57 +110,67 @@ public:
         }
         if ASCEND_IS_AIC {
             const int64_t iterations = td_.schedule == kSparseSchedulePipeline ? td_.maxChunks : loc_.chunks;
-            if (loc_.chunks > 0) {
-                RunKkt(0);
-            }
             for (int64_t iteration = 0; iteration < iterations; ++iteration) {
                 if (td_.schedule == kSparseSchedulePipeline && iteration >= 2) {
-                    // Drain iteration i-2 before reusing its parity flag and
-                    // before consuming this iteration's inverse.
+                    // Drain generation i-2 before its parity is reused below.
                     WaitIterationAic<PIPE_M>(iteration);
                     WaitAPrimeAic<PIPE_MTE3>(iteration);
                 }
                 if (iteration < loc_.chunks) {
                     window_ = ResolveWindow(loc_, iteration);
-                    RunCube(iteration);
-                    if (td_.schedule != kSparseSchedulePipeline && iteration + 1 == loc_.chunks) {
-                        AicPublishToBoth(kProdW);
-                        // The serial Consumer reads T through this AIC's MTE2.
-                        // Drain the Producer's FIX GM writes before that load.
-                        SetFlag<HardEvent::FIX_MTE2>(0);
-                        WaitFlag<HardEvent::FIX_MTE2>(0);
-                    }
+                    RunKkt(iteration);
                 }
-                if (td_.schedule == kSparseSchedulePipeline) {
-                    // Keep T on its original publication path, ahead of QK and
-                    // the next KKT. Padded iterations still join the mode-0 flag.
-                    SetIterationAic(iteration);
+                const bool hasPrevious = iteration > 0 && iteration - 1 < loc_.chunks;
+                if (hasPrevious) {
+                    window_ = ResolveWindow(loc_, iteration - 1);
+                    RunCube(iteration - 1);
                 }
-                if (iteration < loc_.chunks) {
-                    RunQK(iteration);
+                if (td_.schedule == kSparseSchedulePipeline && iteration > 0) {
+                    SetIterationAic(iteration - 1);
                 }
-                if (iteration < loc_.chunks && iteration + 1 < loc_.chunks) {
-                    RunKkt(iteration + 1);
-                }
-                if (iteration < loc_.chunks) {
-                    // The AIV publication covers its GM MTE3 write. Pipeline
-                    // mode relays this through MTE3; serial mode must block the
-                    // Consumer's later GM->L1 MTE2 load in the same AIC stream.
+                if (hasPrevious) {
+                    RunQK(iteration - 1);
+                    // APrime(i-1) is generated by AIV after inverse(i).
                     if (td_.schedule == kSparseSchedulePipeline) {
                         AicWaitBoth<PIPE_MTE3>(kProdAPrime);
                     } else {
                         AicWaitBoth<PIPE_MTE2>(kProdAPrime);
                     }
                 }
+                if (td_.schedule == kSparseSchedulePipeline && iteration > 0) {
+                    // Shorter chains still join every shifted generation.
+                    SetAPrimeAic(iteration - 1);
+                }
+            }
+            if (loc_.chunks == iterations && loc_.chunks > 0) {
+                // The shifted loop closes coupling/QK at i-1. Only a chain that
+                // reaches the global iteration bound needs this final compute;
+                // shorter chains already closed their last chunk inside the loop.
+                const int64_t chunk = loc_.chunks - 1;
+                window_ = ResolveWindow(loc_, chunk);
+                RunCube(chunk);
                 if (td_.schedule == kSparseSchedulePipeline) {
-                    // Every AIC participates once per global iteration, even
-                    // when this shorter chain has no APrime left to publish.
-                    SetAPrimeAic(iteration);
+                    SetIterationAic(chunk);
+                } else {
+                    AicPublishToBoth(kProdW);
+                    // The serial Consumer reads T through this AIC's MTE2.
+                    SetFlag<HardEvent::FIX_MTE2>(0);
+                    WaitFlag<HardEvent::FIX_MTE2>(0);
+                }
+                RunQK(chunk);
+                if (td_.schedule == kSparseSchedulePipeline) {
+                    AicWaitBoth<PIPE_MTE3>(kProdAPrime);
+                } else {
+                    AicWaitBoth<PIPE_MTE2>(kProdAPrime);
                 }
             }
             if (td_.schedule == kSparseSchedulePipeline) {
-                // The final two generations have no later iteration in which
-                // to drain them. Every iteration published both mode-0 flags.
+                // Close the last global generation, using a dummy publication
+                // for shorter chains and the real final APrime for full chains.
+                if (loc_.chunks != iterations) {
+                    SetIterationAic(iterations - 1);
+                }
+                SetAPrimeAic(iterations - 1);
                 if (iterations >= 2) {
                     WaitIterationAic<PIPE_M>(iterations - 2);
                     WaitAPrimeAic<PIPE_MTE3>(iterations - 2);
@@ -183,7 +193,6 @@ private:
             ubV_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbV);
             ubKHat_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbKHat);
             ubPublicB16_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbPublic);
-            ubVb_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbVb);
             ubKbg_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(ubBase + kPUbKbg);
             ubKkt_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                 kPUbKkt + slot * kPUbKktSlotBytes);
@@ -209,7 +218,11 @@ private:
             l1QHat_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
                 kPL1QHat + slot * kPL1QSlotBytes);
         }
-        for (uint32_t gateSlot = 0; gateSlot < 2; ++gateSlot) {
+        l1K_[2] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(2 * kPL1SlotBytes + kPL1K);
+        l1QHat_[2] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
+            kPL1QHat + 2 * kPL1QSlotBytes);
+        ubRatio_[2] = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbRatioThird);
+        for (uint32_t gateSlot = 0; gateSlot < 3; ++gateSlot) {
             ubG_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                 kPUbGates + gateSlot * 2 * kKiB);
             ubEnergy_[gateSlot] = ubG_[gateSlot][64];
@@ -268,6 +281,8 @@ private:
     __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const int32_t eventBase = static_cast<int32_t>((chunk & 1) * 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
@@ -277,13 +292,13 @@ private:
         // wait only after the overlapped inverse and QKMask work.
         CopyGmToUb(ubK_[slot], gmK_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(0);
-        CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
-        CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
-        SetFlag<HardEvent::MTE2_V>(1);
+        SetFlag<HardEvent::MTE2_V>(eventBase);
+        CopyGmToUb(ubG_[gateSlot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
+        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
+        SetFlag<HardEvent::MTE2_V>(eventBase + 1);
         CopyGmToUb(ubQ_[slot], gmQ_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
+        SetFlag<HardEvent::MTE2_V>(eventBase + 2);
     }
 
     __aicore__ inline void LoadFullInputs(int64_t chunk)
@@ -299,6 +314,7 @@ private:
     {
         DrainRawInputUpload();
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
@@ -309,8 +325,8 @@ private:
             Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubQ_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
-        Duplicate(ubG_[slot], 0.0f, kChunk);
-        Duplicate(ubBeta_[slot], 0.0f, kChunk);
+        Duplicate(ubG_[gateSlot], 0.0f, kChunk);
+        Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
         IssueInputs(chunk, rows);
@@ -318,9 +334,11 @@ private:
 
     __aicore__ inline void PrepareGateBeta(int64_t chunk)
     {
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const uint32_t ratioSlot = static_cast<uint32_t>(chunk % 3);
+        const int32_t eventBase = static_cast<int32_t>((chunk & 1) * 3);
         const uint32_t firstRow = sub_ * kHalfRows;
-        WaitFlag<HardEvent::MTE2_V>(1);
+        WaitFlag<HardEvent::MTE2_V>(eventBase + 1);
         float aLog = 0.0f;
         float dtBias = 0.0f;
         if (td_.hasALog != 0) {
@@ -329,20 +347,19 @@ private:
         if (td_.hasDtBias != 0) {
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
-        PrepareGateBetaVF(ubG_[slot], ubBeta_[slot], aLog, dtBias, td_.gateSoftplus != 0,
+        PrepareGateBetaVF(ubG_[gateSlot], ubBeta_[gateSlot], aLog, dtBias, td_.gateSoftplus != 0,
                           td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_[slot], ubEnergy_[slot], ubShift_);
-        } else {
-            CumsumEnergyVF<false>(ubG_[slot], ubEnergy_[slot], ubShift_);
-        }
-        const bool useEnergyRatio = GateRatioSafe(
-            ubG_[slot], ubL_, static_cast<uint32_t>(window_.rows));
-        if (td_.useExp2 != 0) {
-            GateRatioBandVF<true>(ubRatio_[slot], ubG_[slot], ubEnergy_[slot],
+            CumsumEnergyVF<true>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
+            const bool useEnergyRatio = GateRatioSafe(
+                ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
+            GateRatioBandVF<true>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
                                   useEnergyRatio, firstRow);
         } else {
-            GateRatioBandVF<false>(ubRatio_[slot], ubG_[slot], ubEnergy_[slot],
+            CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
+            const bool useEnergyRatio = GateRatioSafe(
+                ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
+            GateRatioBandVF<false>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
                                    useEnergyRatio, firstRow);
         }
     }
@@ -350,17 +367,19 @@ private:
     __aicore__ inline void PrepareQInputs(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t l1Slot = static_cast<uint32_t>(chunk % 3);
+        const int32_t eventBase = static_cast<int32_t>((chunk & 1) * 3);
         const uint32_t firstRow = sub_ * kHalfRows;
-        WaitFlag<HardEvent::MTE2_V>(2);
+        WaitFlag<HardEvent::MTE2_V>(eventBase + 2);
         if (td_.useNorm != 0) {
             NormalizeRowsNzVF<true, true>(ubQ_[slot], ubQHat_[slot], ubQ_[slot], ubKRstd_[slot]);
         }
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
         if (td_.useNorm != 0) {
-            CopyNzToL1(l1QHat_[slot], ubQHat_[slot], kHalfRows, kDim, kChunk, firstRow);
+            CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], kHalfRows, kDim, kChunk, firstRow);
         } else {
-            UploadNdToL1(l1QHat_[slot], ubQ_[slot], kHalfRows, kDim, kChunk, firstRow);
+            UploadNdToL1(l1QHat_[l1Slot], ubQ_[slot], kHalfRows, kDim, kChunk, firstRow);
         }
         AivPublish(kProdQ);
     }
@@ -368,8 +387,10 @@ private:
     __aicore__ inline void PrepareK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t l1Slot = static_cast<uint32_t>(chunk % 3);
+        const int32_t eventBase = static_cast<int32_t>((chunk & 1) * 3);
         const uint32_t firstRow = sub_ * kHalfRows;
-        WaitFlag<HardEvent::MTE2_V>(0);
+        WaitFlag<HardEvent::MTE2_V>(eventBase);
         if (td_.useNorm != 0) {
             NormalizeRowsNzVF<true, true>(ubK_[slot], ubKHat_[slot], ubPublicB16_[slot], ubKRstd_[slot]);
         } else {
@@ -377,7 +398,7 @@ private:
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1K_[slot], ubKHat_[slot], kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], kHalfRows, kDim, kChunk, firstRow);
         AivPublish(kProdK);
     }
 
@@ -415,14 +436,15 @@ private:
     __aicore__ inline void BuildInverse(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t ratioSlot = static_cast<uint32_t>(chunk % 3);
         // The previous inverse/T copies must release ubX_/ubABf_ before reuse.
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
         const uint32_t firstRow = sub_ * kHalfRows;
-        Inverse32DiagonalVF(ubKkt_[slot], ubL_, ubX_, ubRatio_[slot],
-                            ubBeta_[slot], firstRow);
+        Inverse32DiagonalVF(ubKkt_[slot], ubL_, ubX_, ubRatio_[ratioSlot],
+                            ubBeta_[ratioSlot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         PublishInverse(chunk);
@@ -471,9 +493,9 @@ private:
 
     __aicore__ inline void RunQK(int64_t chunk)
     {
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t l1Slot = static_cast<uint32_t>(chunk % 3);
         AicWaitBoth(kProdQ);
-        ComputeMm(l1QHat_[slot], l1K_[slot], l0A0_, l0B1_, l0C1_, 64, 64, 128,
+        ComputeMm(l1QHat_[l1Slot], l1K_[l1Slot], l0A0_, l0B1_, l0C1_, 64, 64, 128,
                   false, false);
         FixF32Halves(ubQk_, l0C1_, 64, 64);
         ReleaseL0C();
@@ -483,10 +505,10 @@ private:
     __aicore__ inline void BuildAPrime(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t ratioSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         AivWait(kProdQK);
-        APrimeBandNzVF(ubQk_, ubAPrime_, ubRatio_[slot], firstRow);
+        APrimeBandNzVF(ubQk_, ubAPrime_, ubRatio_[ratioSlot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         // Each AIV writes its 32-row NZ band into the full 64-row GM tile.
@@ -505,8 +527,9 @@ private:
     __aicore__ inline void RunKkt(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t l1Slot = static_cast<uint32_t>(chunk % 3);
         AicWaitBoth(kProdK);
-        ComputeMm(l1K_[slot], l1K_[slot], l0A0_, l0B0_, l0CKkt_[slot], 64, 64, 128,
+        ComputeMm(l1K_[l1Slot], l1K_[l1Slot], l0A0_, l0B0_, l0CKkt_[slot], 64, 64, 128,
                   false, false);
         FixF32Halves(ubKkt_[slot], l0CKkt_[slot], 64, 64);
         ReleaseL0C();
@@ -529,13 +552,13 @@ private:
     GlobalTensor<float> gmG_, gmBeta_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 
-    LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubVb_[2], ubKbg_[2];
+    LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubKbg_[2];
     LocalTensor<bfloat16_t> ubQ_[2], ubQHat_[2], ubAPrime_;
-    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_, ubRatio_[2];
+    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_, ubRatio_[3];
     LocalTensor<bfloat16_t> ubABf_, ubZeroBf_;
-    LocalTensor<float> ubG_[2], ubEnergy_[2], ubBeta_[2], ubKRstd_[2];
+    LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3];
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2], l1QHat_[2];
+    LocalTensor<bfloat16_t> l1K_[3], l1Vb_[2], l1Kbg_[2], l1QHat_[3];
     LocalTensor<float> l1InvX0_[2], l1InvX1_[2], l1InvL10_[2], l1InvT_[2];
     LocalTensor<bfloat16_t> l0A0_, l0B0_, l0B1_;
     LocalTensor<float> l0Af_, l0Bf_;
