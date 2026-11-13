@@ -31,15 +31,18 @@ constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
 constexpr uint32_t kPUbABf = kPUbX + 12 * kKiB;
 constexpr uint32_t kPUbZero = kPUbABf + 4 * kKiB;
 constexpr uint32_t kPUbGates = kPUbZero + 4 * kKiB;
-// Three gate/beta slots keep the current inverse, previous QKMask and next
-// input loads live simultaneously. Q/QHat still use chunk-parity slots.
-constexpr uint32_t kPUbShift = kPUbGates + 6 * kKiB;
+// Two raw gate/beta slots cover the current inverse and next input loads.
+// QKMask consumes the shared ratio band rather than the previous raw gate.
+constexpr uint32_t kPUbShift = kPUbGates + 4 * kKiB;
 // Producer-owned Q/QHat use chunk-parity slots. QKT/APrime are serialized per AIV.
 constexpr uint32_t kPUbQ = kPUbShift + 2 * kKiB;
 constexpr uint32_t kPUbQHat = kPUbQ + 16 * kKiB;
 constexpr uint32_t kPUbQk = kPUbQHat + 16 * kKiB;
 constexpr uint32_t kPUbAPrime = kPUbQk + 8 * kKiB;
-constexpr uint32_t kPUbEnd = kPUbAPrime + 4 * kKiB;
+// Two FP32 ratio bands are shared by the current inverse and previous QKMask.
+constexpr uint32_t kPUbRatio = kPUbAPrime + 4 * kKiB;
+constexpr uint32_t kPUbRatioSlotBytes = 8 * kKiB;
+constexpr uint32_t kPUbEnd = kPUbRatio + 2 * kPUbRatioSlotBytes;
 static_assert(kPUbEnd <= kUbBudget);
 
 // Two K/Vb/Kbg slots and two sets of native-FP32 inverse/coupling records.

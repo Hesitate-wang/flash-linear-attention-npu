@@ -13,7 +13,7 @@ namespace GdnChunk64Sparse {
 using namespace AscendC;
 
 constexpr int64_t kChunk = 64;
-constexpr int64_t kHalfRows = 32;
+constexpr uint32_t kHalfRows = 32U;
 constexpr int64_t kDim = 128;
 constexpr int64_t kHalfDim = 64;
 constexpr int64_t kChunkElems = kChunk * kDim;

@@ -191,6 +191,8 @@ private:
                 kPUbQ + slot * 8 * kKiB);
             ubQHat_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
                 kPUbQHat + slot * 8 * kKiB);
+            ubRatio_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
+                kPUbRatio + slot * kPUbRatioSlotBytes);
 
             const uint32_t l1Base = slot * kPL1SlotBytes;
             l1K_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(l1Base + kPL1K);
@@ -207,7 +209,7 @@ private:
             l1QHat_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
                 kPL1QHat + slot * kPL1QSlotBytes);
         }
-        for (uint32_t gateSlot = 0; gateSlot < 3; ++gateSlot) {
+        for (uint32_t gateSlot = 0; gateSlot < 2; ++gateSlot) {
             ubG_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                 kPUbGates + gateSlot * 2 * kKiB);
             ubEnergy_[gateSlot] = ubG_[gateSlot][64];
@@ -266,8 +268,7 @@ private:
     __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t token = window_.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
         const int64_t gateOffset = OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
@@ -277,8 +278,8 @@ private:
         CopyGmToUb(ubK_[slot], gmK_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(0);
-        CopyGmToUb(ubG_[gateSlot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
-        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
+        CopyGmToUb(ubG_[slot], gmG_, gateOffset, static_cast<uint32_t>(window_.rows));
+        CopyGmToUb(ubBeta_[slot], gmBeta_, gateOffset, static_cast<uint32_t>(window_.rows));
         SetFlag<HardEvent::MTE2_V>(1);
         CopyGmToUb(ubQ_[slot], gmQ_,
                    OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
@@ -287,29 +288,29 @@ private:
 
     __aicore__ inline void LoadFullInputs(int64_t chunk)
     {
+        // K/Q slot reuse is already ordered by AivWait(kProdKkt), and QKMask
+        // consumes the ratio band rather than the previous raw gate. No extra
+        // Vector fence is needed on the full-chunk path.
         DrainRawInputUpload();
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
-        IssueInputs(chunk, static_cast<uint32_t>(kHalfRows));
+        IssueInputs(chunk, kHalfRows);
     }
 
     __aicore__ inline void LoadTailInputs(int64_t chunk)
     {
         DrainRawInputUpload();
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         // This path runs only for the chain's single tail chunk. K/Q are
         // per-AIV 32-row halves; G/BETA remain global 64-row inputs.
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
+        if (rows < kHalfRows) {
             Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubQ_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
-        Duplicate(ubG_[gateSlot], 0.0f, kChunk);
-        Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
+        Duplicate(ubG_[slot], 0.0f, kChunk);
+        Duplicate(ubBeta_[slot], 0.0f, kChunk);
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
         IssueInputs(chunk, rows);
@@ -317,7 +318,8 @@ private:
 
     __aicore__ inline void PrepareGateBeta(int64_t chunk)
     {
-        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(1);
         float aLog = 0.0f;
         float dtBias = 0.0f;
@@ -327,21 +329,28 @@ private:
         if (td_.hasDtBias != 0) {
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
-        PrepareGateBetaVF(ubG_[gateSlot], ubBeta_[gateSlot], aLog, dtBias, td_.gateSoftplus != 0,
+        PrepareGateBetaVF(ubG_[slot], ubBeta_[slot], aLog, dtBias, td_.gateSoftplus != 0,
                           td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
+            CumsumEnergyVF<true>(ubG_[slot], ubEnergy_[slot], ubShift_);
         } else {
-            CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubShift_);
+            CumsumEnergyVF<false>(ubG_[slot], ubEnergy_[slot], ubShift_);
         }
-        gateRatioSafe_[gateSlot] = GateRatioSafe(
-            ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
+        const bool useEnergyRatio = GateRatioSafe(
+            ubG_[slot], ubL_, static_cast<uint32_t>(window_.rows));
+        if (td_.useExp2 != 0) {
+            GateRatioBandVF<true>(ubRatio_[slot], ubG_[slot], ubEnergy_[slot],
+                                  useEnergyRatio, firstRow);
+        } else {
+            GateRatioBandVF<false>(ubRatio_[slot], ubG_[slot], ubEnergy_[slot],
+                                   useEnergyRatio, firstRow);
+        }
     }
 
     __aicore__ inline void PrepareQInputs(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(2);
         if (td_.useNorm != 0) {
             NormalizeRowsNzVF<true, true>(ubQ_[slot], ubQHat_[slot], ubQ_[slot], ubKRstd_[slot]);
@@ -359,7 +368,7 @@ private:
     __aicore__ inline void PrepareK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(0);
         if (td_.useNorm != 0) {
             NormalizeRowsNzVF<true, true>(ubK_[slot], ubKHat_[slot], ubPublicB16_[slot], ubKRstd_[slot]);
@@ -406,21 +415,14 @@ private:
     __aicore__ inline void BuildInverse(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         // The previous inverse/T copies must release ubX_/ubABf_ before reuse.
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);
         SetFlag<HardEvent::V_S>(1);
         WaitFlag<HardEvent::V_S>(1);
-        const bool useEnergyRatio = GateRatioSafe(ubG_[gateSlot], ubL_, static_cast<uint32_t>(window_.rows));
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
-        if (td_.useExp2 != 0) {
-            Inverse32DiagonalVF<true>(ubKkt_[slot], ubL_, ubX_, ubG_[gateSlot], ubBeta_[gateSlot],
-                                      ubEnergy_[gateSlot], useEnergyRatio, firstRow);
-        } else {
-            Inverse32DiagonalVF<false>(ubKkt_[slot], ubL_, ubX_, ubG_[gateSlot], ubBeta_[gateSlot],
-                                       ubEnergy_[gateSlot], useEnergyRatio, firstRow);
-        }
+        const uint32_t firstRow = sub_ * kHalfRows;
+        Inverse32DiagonalVF(ubKkt_[slot], ubL_, ubX_, ubRatio_[slot],
+                            ubBeta_[slot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         PublishInverse(chunk);
@@ -481,16 +483,10 @@ private:
     __aicore__ inline void BuildAPrime(int64_t chunk)
     {
         window_ = ResolveWindow(loc_, chunk);
-        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * kHalfRows;
         AivWait(kProdQK);
-        if (td_.useExp2 != 0) {
-            APrimeBandNzVF<true>(ubQk_, ubAPrime_, ubG_[gateSlot], ubEnergy_[gateSlot],
-                                 gateRatioSafe_[gateSlot], firstRow);
-        } else {
-            APrimeBandNzVF<false>(ubQk_, ubAPrime_, ubG_[gateSlot], ubEnergy_[gateSlot],
-                                  gateRatioSafe_[gateSlot], firstRow);
-        }
+        APrimeBandNzVF(ubQk_, ubAPrime_, ubRatio_[slot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         // Each AIV writes its 32-row NZ band into the full 64-row GM tile.
@@ -528,7 +524,6 @@ private:
     ChainLoc loc_{};
     ChunkWindow window_{};
     uint32_t sub_{0};
-    bool gateRatioSafe_[3]{};
 
     GlobalTensor<bfloat16_t> gmK_, gmQ_, gmT_, gmAPrime_;
     GlobalTensor<float> gmG_, gmBeta_;
@@ -536,9 +531,9 @@ private:
 
     LocalTensor<bfloat16_t> ubK_[2], ubV_[2], ubKHat_[2], ubPublicB16_[2], ubVb_[2], ubKbg_[2];
     LocalTensor<bfloat16_t> ubQ_[2], ubQHat_[2], ubAPrime_;
-    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_;
+    LocalTensor<float> ubKkt_[2], ubL_, ubX_, ubQk_, ubRatio_[2];
     LocalTensor<bfloat16_t> ubABf_, ubZeroBf_;
-    LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3];
+    LocalTensor<float> ubG_[2], ubEnergy_[2], ubBeta_[2], ubKRstd_[2];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1K_[2], l1Vb_[2], l1Kbg_[2], l1QHat_[2];
     LocalTensor<float> l1InvX0_[2], l1InvX1_[2], l1InvL10_[2], l1InvT_[2];

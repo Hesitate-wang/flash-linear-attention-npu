@@ -290,7 +290,7 @@ private:
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         if (window_.rows < kChunk) {
             // LoadT reads only valid rows. Clear the padded L1 rows before the
             // kConsS publication, which precedes this chunk's mode-0/LoadT.
@@ -316,7 +316,7 @@ private:
     __aicore__ inline void RunAivAfterWu(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
@@ -377,11 +377,11 @@ private:
             WaitFlag<HardEvent::MTE3_MTE2>(0);
         }
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < static_cast<uint32_t>(kHalfRows)) {
+        if (rows < kHalfRows) {
             Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
@@ -439,7 +439,7 @@ private:
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(1);
         if (td_.useNorm != 0) {
             QNormExpNzVF(ubQ_, ubQHat_, ubOSB_, ubEnergy_, firstRow);
@@ -457,7 +457,7 @@ private:
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         // This is needed only by the next steady right stage, so defer it
         // after Q/K/Kbg/Vb and let it overlap the AIC's QS work. Gate/energy
         // V_S event 1 was already consumed by PrepareCurrentState.
@@ -479,7 +479,7 @@ private:
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(2);
         if (td_.useNorm != 0) {
             KNormKbgNzVF(ubK_, ubKHat_, ubW_, ubBeta_, ubEnergy_, firstRow);
@@ -501,7 +501,7 @@ private:
     {
         window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const uint32_t firstRow = sub_ * static_cast<uint32_t>(kHalfRows);
+        const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(3);
         ScaleVbNzVF(ubV_, ubU_, ubBeta_, firstRow);
         SetFlag<HardEvent::V_MTE3>(0);

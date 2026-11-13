@@ -41,7 +41,7 @@ __aicore__ inline void StoreBf16(__ubuf__ bfloat16_t *dst, RegTensor<float> &src
 // does not perform DIST_PACK_B32 packing.
 __aicore__ inline void StoreBf16Nz64(__ubuf__ bfloat16_t *nz, uint32_t row,
                                      RegTensor<float> &src, MaskReg all, MaskReg m64,
-                                     uint32_t totalRows = static_cast<uint32_t>(kHalfRows))
+                                     uint32_t totalRows = kHalfRows)
 {
     RegTensor<bfloat16_t> packed, values, unused;
     Cast<bfloat16_t, float, kSparseCastF32B16>(packed, src, all);
@@ -554,35 +554,22 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
     }
 }
 
-// Each AIV owns one 32x32 diagonal inverse. The lower band still has 64
-// columns; AIV1 additionally keeps the complete 32x32 L10 leaf at a[2048].
+// Build the pairwise gate ratio once per 32-row band. The inverse applies its
+// own beta/clamping and QKMask multiplies QK, so both share this FP32 result.
 template <bool UseExp2>
-__aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
-                                           LocalTensor<float> &lower,
-                                           LocalTensor<float> &a,
-                                           LocalTensor<float> &g,
-                                           LocalTensor<float> &beta,
-                                           LocalTensor<float> &energy,
-                                           bool useEnergyRatio,
-                                           uint32_t firstRow)
+__aicore__ inline void GateRatioBandVF(LocalTensor<float> &ratio,
+                                       LocalTensor<float> &g,
+                                       LocalTensor<float> &energy,
+                                       bool useEnergyRatio,
+                                       uint32_t firstRow)
 {
-    __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
-    __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
-    __ubuf__ float *x = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
+    __ubuf__ float *r = reinterpret_cast<__ubuf__ float *>(ratio.GetPhyAddr());
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
-    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
     __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
-    const uint32_t diagonalCol = firstRow;
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        MaskReg half = CreateMask<float, MaskPattern::VL32>();
-        RegTensor<float> gJ, gI, bi, diff, gate, score, zero, clipLo, clipHi, expLo, expHi;
-        Duplicate(zero, 0.0f, all);
-        Duplicate(clipLo, -50.0f, all);
-        Duplicate(clipHi, 50.0f, all);
-        Duplicate(expLo, 1.92874985e-22f, all);
-        Duplicate(expHi, 5.18470553e21f, all);
+        RegTensor<float> gJ, gI, diff, value;
         if (useEnergyRatio) {
             LoadAlign(gJ, eAddr);
         } else {
@@ -590,22 +577,53 @@ __aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
         }
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t globalRow = firstRow + row;
-            LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + globalRow);
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + globalRow);
-                Div(gate, gI, gJ, all);
-                Max(gate, gate, expLo, all);
-                Min(gate, gate, expHi, all);
+                Div(value, gI, gJ, all);
             } else {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
                 Sub(diff, gI, gJ, all);
-                Max(diff, diff, clipLo, all);
-                Min(diff, diff, clipHi, all);
                 if constexpr (UseExp2) {
                     Muls(diff, diff, kSparseLn2, all);
                 }
-                Exp(gate, diff, all);
+                Exp(value, diff, all);
             }
+            StoreAlign(r + static_cast<uint32_t>(row) * 64, value, all);
+        }
+    }
+}
+
+// Each AIV owns one 32x32 diagonal inverse. The lower band still has 64
+// columns; AIV1 additionally keeps the complete 32x32 L10 leaf at a[2048].
+__aicore__ inline void Inverse32DiagonalVF(LocalTensor<float> &kkt,
+                                           LocalTensor<float> &lower,
+                                           LocalTensor<float> &a,
+                                           LocalTensor<float> &ratio,
+                                           LocalTensor<float> &beta,
+                                           uint32_t firstRow)
+{
+    __ubuf__ float *kk = reinterpret_cast<__ubuf__ float *>(kkt.GetPhyAddr());
+    __ubuf__ float *l = reinterpret_cast<__ubuf__ float *>(lower.GetPhyAddr());
+    __ubuf__ float *x = reinterpret_cast<__ubuf__ float *>(a.GetPhyAddr());
+    __ubuf__ float *r = reinterpret_cast<__ubuf__ float *>(ratio.GetPhyAddr());
+    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    const uint32_t diagonalCol = firstRow;
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg half = CreateMask<float, MaskPattern::VL32>();
+        RegTensor<float> bi, gate, score, zero, expLo, expHi;
+        Duplicate(zero, 0.0f, all);
+        Duplicate(expLo, 1.92874985e-22f, all);
+        Duplicate(expHi, 5.18470553e21f, all);
+        for (uint16_t row = 0; row < 32; ++row) {
+            const uint32_t globalRow = firstRow + row;
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + globalRow);
+            LoadAlign(gate, r + static_cast<uint32_t>(row) * 64);
+            // Clamping exp(g_i-g_j) is equivalent to clamping the exponent
+            // before Exp, and leaves the shared QKMask ratio unmodified.
+            Max(gate, gate, expLo, all);
+            Min(gate, gate, expHi, all);
             Mul(gate, gate, bi, all);
             Muls(gate, gate, -1.0f, all);
             LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
@@ -949,44 +967,25 @@ __aicore__ inline void BuildNeumannInputVF(LocalTensor<float> &kkt,
     }
 }
 
-template <bool UseExp2>
 __aicore__ inline void APrimeBandNzVF(LocalTensor<float> &qk,
                                       LocalTensor<bfloat16_t> &out,
-                                      LocalTensor<float> &g,
-                                      LocalTensor<float> &energy,
-                                      bool useEnergyRatio,
+                                      LocalTensor<float> &ratio,
                                       uint32_t firstRow)
 {
     __ubuf__ float *score = reinterpret_cast<__ubuf__ float *>(qk.GetPhyAddr());
     __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
-    __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
-    __ubuf__ float *eAddr = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __ubuf__ float *r = reinterpret_cast<__ubuf__ float *>(ratio.GetPhyAddr());
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
         uint32_t n64 = 64;
         MaskReg m64 = UpdateMask<bfloat16_t>(n64);
-        RegTensor<float> gJ, gI, diff, gate, raw, zero;
+        RegTensor<float> gate, raw, zero;
         Duplicate(zero, 0.0f, all);
-        if (useEnergyRatio) {
-            LoadAlign(gJ, eAddr);
-        } else {
-            LoadAlign(gJ, gAddr);
-        }
         for (uint16_t row = 0; row < 32; ++row) {
             const uint32_t globalRow = firstRow + row;
-            if (useEnergyRatio) {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + globalRow);
-                Div(gate, gI, gJ, all);
-            } else {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, gAddr + globalRow);
-                Sub(diff, gI, gJ, all);
-                if constexpr (UseExp2) {
-                    Muls(diff, diff, kSparseLn2, all);
-                }
-                Exp(gate, diff, all);
-            }
             LoadAlign(raw, score + static_cast<uint32_t>(row) * 64);
+            LoadAlign(gate, r + static_cast<uint32_t>(row) * 64);
             Mul(gate, gate, raw, all);
             uint32_t lowerCount = globalRow + 1U;
             MaskReg lower = UpdateMask<float>(lowerCount);
