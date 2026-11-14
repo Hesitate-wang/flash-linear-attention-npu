@@ -19,6 +19,8 @@ constexpr uint16_t kProdK = 8;
 constexpr uint16_t kProdQ = 9;
 constexpr uint16_t kProdQK = 10;
 constexpr uint16_t kProdAPrime = 11;
+constexpr int32_t kProdInputMte3EventBase = 0;
+constexpr int32_t kProdOutputMte3EventBase = 2;
 
 class ProducerRole {
 public:
@@ -80,6 +82,15 @@ public:
                     BuildInverse(chunk);
                     BuildAPrime(chunk);
                 }
+                const int64_t last = first + ((loc_.chunks - 1 - first) >> 1) * 2;
+                if (last - 2 >= first) {
+                    const uint32_t previousSlot = static_cast<uint32_t>(((last - 2) >> 1) & 1);
+                    WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + previousSlot);
+                }
+                const uint32_t lastSlot = static_cast<uint32_t>((last >> 1) & 1);
+                // At most the last two output events remain unconsumed. Earlier
+                // events were consumed by their same-slot preprocess.
+                WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + lastSlot);
             }
         }
         if ASCEND_IS_AIC {
@@ -210,13 +221,19 @@ private:
 
     __aicore__ inline void PrepareLoadedInputs(int64_t chunk)
     {
-        // Release the previous output/L1-copy sources before this pair reuses
-        // its normalized K/Q storage as inverse and QKMask workspace.
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
+        const int64_t pair = chunk >> 1;
+        const uint32_t slot = static_cast<uint32_t>(pair & 1);
+        if (pair >= 2) {
+            // Wait only for the output from pair-2 that owns this same slot.
+            // The opposite slot's preprocess/inverse remains independent.
+            WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
+        }
         PrepareK(chunk);
         PrepareGateBeta(chunk);
         PrepareQInputs(chunk);
+        // Publish this slot's K/Q L1 reads without draining them here. The
+        // matching inverse waits this event before reusing the UB as L/X.
+        SetFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
     }
 
     __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
@@ -364,9 +381,9 @@ private:
         const int64_t pair = chunk >> 1;
         const uint32_t slot = static_cast<uint32_t>(pair & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(pair % 3);
-        // Drain preprocess L1 uploads before their UB becomes the inverse input.
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
+        // Wait only for this chunk's preprocess L1 uploads before reusing its
+        // normalized K/Q UB as L/X. Do not drain the next pair's uploads.
+        WaitFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
         Inverse64VF(ubKkt_, ubL_[slot], ubX_[slot], ubRatio_[slot], ubBeta_[gateSlot], ubEye_);
         Cast(ubABf_[slot], ubX_[slot], RoundMode::CAST_RINT, kMatrixElems);
         SetFlag<HardEvent::V_MTE3>(0);
@@ -386,6 +403,9 @@ private:
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads);
         DataCopy(gmAPrime_[offset], ubAPrime_[slot], kMatrixElems);
+        // This MTE3 event covers both T and APrime in the slot. It is consumed
+        // by preprocess two pairs later, or by the chain-tail drain.
+        SetFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
         AivPublish(kProdAPrime);
     }
 

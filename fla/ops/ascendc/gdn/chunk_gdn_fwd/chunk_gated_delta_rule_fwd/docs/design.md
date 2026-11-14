@@ -44,7 +44,9 @@ Buffer indices use the owner-local pair index `chunk/2`, not global `chunk&1`:
 - Gate/beta records use three slots selected by `pair%3`: current inverse, next preprocess and the load for the following preprocess.
 - Full 64x64 FP32 gate ratios use two slots selected by `pair&1`; inverse and QKMask consume the current slot while preprocess fills the other.
 
-Normalized K/Q UB is reused as inverse workspace in the opposite pipeline phase. Preprocess fills slot `(i+1)&1`, while inverse and QKMask use slot `i&1`. The FP32 lower matrix occupies normalized-K storage and the inverse X occupies normalized-Q storage. After substitution, L is dead, so its two 8 KiB halves hold BF16 T and APrime. MTE3-to-Vector fences protect these aliases before reuse.
+Normalized K/Q UB is reused as inverse workspace in the opposite pipeline phase. Preprocess fills slot `(i+1)&1`, while inverse and QKMask use slot `i&1`. The FP32 lower matrix occupies normalized-K storage and the inverse X occupies normalized-Q storage. After substitution, L is dead, so its two 8 KiB halves hold BF16 T and APrime.
+
+MTE3-to-Vector events are slot-specific rather than full-pipe drains. Input events 0/1 are set after each preprocess's K/Q L1 uploads and consumed only by that chunk's inverse. Output events 2/3 are set after T/APrime stores and consumed by preprocess two pairs later, before the same slot is reused. A chain tail waits only the final one or two unconsumed output events. Consequently, inverse in one slot does not drain preprocess uploads in the other slot.
 
 Producer UB occupies 216 KiB per AIV, including the persistent 16 KiB identity matrix, within the 248 KiB budget. Producer L1 occupies 96 KiB for three full K slots and three full Q slots. No FP32 inverse records remain in L1.
 

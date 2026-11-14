@@ -20,6 +20,7 @@ The internal A/T buffer remains allocated at full `[B,Hv,T,64]` size, including 
 | Gate-ratio inverse and QKMask formulas | 20 random cases each for exp/exp2; inverse and inclusive causal mask references | Passed |
 | Parity buffer slot schedule | Both owners, chunk counts 1 through 64 | Current/preprocess ratio slots and current/preprocess/load gate slots passed |
 | Odd, short and empty chain schedule | Every chain length for each `maxChunks` from 1 through 64 | Each valid chunk executed once; global generations exactly covered `0..maxChunks-1` |
+| Slot-decoupled MTE3 events | Both owners, chunk counts 1 through 64, plus explicit chunk4/inverse2 boundary | No consecutive Set without Wait, no Wait without Set, no unconsumed tail event; opposite-slot preprocess remained in flight |
 | Lightweight test scripts | Python 3.12 `py_compile` | Passed |
 | CPU-only lightweight cases | `dense-tail`, `varlen`, `varlen-empty` | CPU golden generation and logging completed; no device DUT was run |
 | Comparison helper | `compare_contract.py` | Passed |
