@@ -86,7 +86,6 @@ public:
         if (loc_.chunks == 0) {
             return;
         }
-        window_ = ResolveWindow(loc_, 0);
         if ASCEND_IS_AIV {
             RunAivPrologue();
         }
@@ -97,7 +96,6 @@ public:
 
     __aicore__ inline void RunPrepare(int64_t chunk)
     {
-        window_ = ResolveWindow(loc_, chunk);
         if ASCEND_IS_AIV {
             RunAivPrepare(chunk);
         }
@@ -105,7 +103,6 @@ public:
 
     __aicore__ inline void RunAfterWu(int64_t chunk)
     {
-        window_ = ResolveWindow(loc_, chunk);
         if ASCEND_IS_AIV {
             RunAivAfterWu(chunk);
         }
@@ -149,36 +146,10 @@ private:
     __aicore__ inline void InitBuffers()
     {
         OnChipBuffer buf;
-        ubStateF_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbStateF);
-        ubStateB_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbStateB);
+        // These UB values cross the AIC Fixpipe/AIV Vector boundary.
         ubD_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbD);
-        ubInitB_ = ubD_.ReinterpretCast<bfloat16_t>();
-        ubP_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbP);
-        ubDecay_[0] = ubP_;
-        ubDecay_[1] = ubP_[64];
-        ubScratch_ = ubP_[256];
-        ubOSB_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbOS);
-        ubU_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbU);
         ubVNew_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbVNew);
-        ubRight_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbRight);
-        ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbW);
-        ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQ);
-        ubK_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbK);
-        ubV_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbV);
-        if (td_.useNorm != 0) {
-            ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
-            ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
-        } else {
-            ubQHat_ = ubQ_;
-            ubKHat_ = ubK_;
-        }
-        ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbZero);
         ubO_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbO);
-        ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
-        ubEnergy_ = ubG_[64];
-        ubEnergyRecip_ = ubG_[320];
-        ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
-        ubBeta_ = ubG_[128];
 
         l1H_[0] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H0);
         l1H_[1] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H1);
@@ -193,13 +164,46 @@ private:
             l1APrime_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
                 kCL1APrime + slot * kCL1APrimeSlotBytes);
         }
-        l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
-        l0A1_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank1);
-        l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
-        l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
-        l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
-        l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
-        l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
+
+        if ASCEND_IS_AIV {
+            ubStateF_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbStateF);
+            ubStateB_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbStateB);
+            ubInitB_ = ubD_.ReinterpretCast<bfloat16_t>();
+            ubP_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbP);
+            ubDecay_[0] = ubP_;
+            ubDecay_[1] = ubP_[64];
+            ubScratch_ = ubP_[256];
+            ubOSB_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbOS);
+            ubU_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbU);
+            ubRight_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbRight);
+            ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbW);
+            ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQ);
+            ubK_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbK);
+            ubV_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbV);
+            if (td_.useNorm != 0) {
+                ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
+                ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
+            } else {
+                ubQHat_ = ubQ_;
+                ubKHat_ = ubK_;
+            }
+            ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbZero);
+            ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
+            ubEnergy_ = ubG_[64];
+            ubEnergyRecip_ = ubG_[320];
+            ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
+            ubBeta_ = ubG_[128];
+        }
+
+        if ASCEND_IS_AIC {
+            l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
+            l0A1_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank1);
+            l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
+            l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
+            l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
+            l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
+            l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
+        }
     }
 
     __aicore__ inline int64_t StateOffset() const
@@ -289,10 +293,10 @@ private:
 
     __aicore__ inline void PrepareCurrentState(int64_t chunk, bool applyDecay = true)
     {
-        window_ = ResolveWindow(loc_, chunk);
+        const ChunkWindow window = WindowOf(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
-        if (window_.rows < kChunk) {
+        if (window.rows < kChunk) {
             // LoadT reads only valid rows. Clear the padded L1 rows before the
             // kConsS publication, which precedes this chunk's mode-0/LoadT.
             Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
@@ -307,7 +311,7 @@ private:
         // PrepareNextGate publishes gate/energy on V_S event 1. Consume it
         // before the scalar read; PrepareRightDecay reuses the same values later.
         WaitFlag<HardEvent::V_S>(1);
-        chunkDecay_[slot] = ubEnergy_.GetValue(window_.rows - 1);
+        chunkDecay_[slot] = ubEnergy_.GetValue(window.rows - 1);
         AivPublish(kConsS);
         if (applyDecay) {
             StateDecayVF(ubStateF_, chunkDecay_[slot]);
@@ -316,9 +320,10 @@ private:
 
     __aicore__ inline void RunAivAfterWu(int64_t chunk)
     {
+        const ChunkWindow window = WindowOf(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const int64_t remaining = window.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         AivWait(kConsP);
@@ -330,7 +335,7 @@ private:
         RightNzVF(ubVNew_, ubRight_, ubDecay_[slot], firstRow, directRightNz);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        const int64_t token = window_.tokenStart + firstRow;
+        const int64_t token = window.tokenStart + firstRow;
         if (directRightNz) {
             CopyNzToL1(l1Right_, ubRight_, kHalfRows, kDim, kChunk, firstRow);
         } else {
@@ -368,7 +373,7 @@ private:
 
     __aicore__ inline void PrepareNextGate(int64_t chunk, bool includeInitial = false)
     {
-        window_ = ResolveWindow(loc_, chunk);
+        const ChunkWindow window = WindowOf(loc_, chunk);
         if (td_.useNorm == 0) {
             // Without Norm, ubKHat_ aliases ubK_ and UploadNdToL1 reads that
             // raw UB asynchronously. Drain it before tail clearing or reloading.
@@ -379,7 +384,7 @@ private:
         }
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
-        const int64_t remaining = window_.rows - static_cast<int64_t>(firstRow);
+        const int64_t remaining = window.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (rows < kHalfRows) {
@@ -387,20 +392,20 @@ private:
             Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
             Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
-        if (window_.rows < kChunk) {
+        if (window.rows < kChunk) {
             Duplicate(ubG_, 0.0f, kChunk);
             Duplicate(ubBeta_, 0.0f, kChunk);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
-        const int64_t token = window_.tokenStart + firstRow;
+        const int64_t token = window.tokenStart + firstRow;
         const uint32_t elems = rows * static_cast<uint32_t>(kDim);
-        CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+        CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
                                           td_.valueHeads, td_.tokens),
-                   static_cast<uint32_t>(window_.rows));
-        CopyGmToUb(ubBeta_, gmBeta_, OffsetBht(loc_.batch, loc_.hv, window_.tokenStart,
+                   static_cast<uint32_t>(window.rows));
+        CopyGmToUb(ubBeta_, gmBeta_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
                                                td_.valueHeads, td_.tokens),
-                   static_cast<uint32_t>(window_.rows));
+                   static_cast<uint32_t>(window.rows));
         SetFlag<HardEvent::MTE2_V>(0);
         WaitFlag<HardEvent::MTE2_V>(0);
         float aLog = 0.0f;
@@ -411,8 +416,10 @@ private:
         if (td_.hasDtBias != 0) {
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
-        PrepareGateBetaVF(ubG_, ubBeta_, aLog, dtBias, td_.gateSoftplus != 0,
-                          td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
+        if (td_.gateSoftplus != 0 || td_.betaSigmoid != 0) {
+            PrepareGateBetaVF(ubG_, ubBeta_, aLog, dtBias, td_.gateSoftplus != 0,
+                              td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
+        }
         if (td_.useExp2 != 0) {
             CumsumEnergyVF<true>(ubG_, ubEnergy_, ubEnergyRecip_, ubShift_);
         } else {
@@ -438,7 +445,6 @@ private:
 
     __aicore__ inline void PrepareNextQAndQExp(int64_t chunk)
     {
-        window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(1);
@@ -456,14 +462,14 @@ private:
 
     __aicore__ inline void PrepareRightDecay(int64_t chunk)
     {
-        window_ = ResolveWindow(loc_, chunk);
+        const ChunkWindow window = WindowOf(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
         // This is needed only by the next steady right stage, so defer it
         // after Q/K/Kbg/Vb and let it overlap the AIC's QS work. Gate/energy
         // V_S event 1 was already consumed by PrepareCurrentState.
-        gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window_.rows));
-        const float gLast = ubG_.GetValue(window_.rows - 1);
+        gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window.rows));
+        const float gLast = ubG_.GetValue(window.rows - 1);
         const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {
             DecayVF<true>(ubDecay_[slot], ubG_, ubEnergyRecip_, gLast, lastEnergy,
@@ -478,7 +484,6 @@ private:
 
     __aicore__ inline void PrepareNextKAndKbg(int64_t chunk)
     {
-        window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(2);
@@ -500,7 +505,6 @@ private:
 
     __aicore__ inline void PrepareNextVb(int64_t chunk)
     {
-        window_ = ResolveWindow(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(3);
@@ -511,18 +515,19 @@ private:
         AivPublish(kConsU);
     }
 
-    __aicore__ inline void LoadT()
+    __aicore__ inline void LoadT(int64_t chunk)
     {
+        const ChunkWindow window = WindowOf(loc_, chunk);
         Nd2NzParams params{};
         params.ndNum = 1;
-        params.nValue = static_cast<uint32_t>(window_.rows);
+        params.nValue = static_cast<uint32_t>(window.rows);
         params.dValue = 64;
         params.srcDValue = 64;
         params.srcNdMatrixStride = 0;
         params.dstNzC0Stride = 64;
         params.dstNzNStride = 1;
         params.dstNzMatrixStride = 0;
-        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window_.tokenStart,
+        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window.tokenStart,
                                           td_.valueHeads, td_.tokens, kChunk);
         DataCopy(l1T_, gmT_[offset], params);
         SetFlag<HardEvent::MTE2_MTE1>(0);
@@ -560,7 +565,7 @@ private:
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        LoadT();
+        LoadT(chunk);
         AicWaitBoth(kConsW);
         // Kbg is negated, so W=T@Kbg=-trueW. The previous QS already loaded
         // this chunk's S into B0; T@Kbg uses B1 and preserves it.
@@ -609,7 +614,6 @@ private:
 
     FusedTilingData td_{};
     ChainLoc loc_{};
-    ChunkWindow window_{};
     uint32_t sub_{0};
     bool hasInitial_{false};
     bool gateRatioSafe_{false};

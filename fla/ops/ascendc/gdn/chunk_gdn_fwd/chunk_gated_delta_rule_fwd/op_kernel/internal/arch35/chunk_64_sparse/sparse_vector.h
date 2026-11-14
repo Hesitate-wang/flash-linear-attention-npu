@@ -94,8 +94,8 @@ __aicore__ inline void PrepareGateBetaVF(LocalTensor<float> &g,
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
         RegTensor<float> x, ax, e, one, out;
-        LoadAlign(x, gAddr);
         if (softplus) {
+            LoadAlign(x, gAddr);
             Adds(x, x, dtBias, all);
             Abs(ax, x, all);
             Muls(ax, ax, -1.0f, all);
@@ -260,15 +260,13 @@ __aicore__ inline void StoreNdEvenOdd(__ubuf__ bfloat16_t *dst, uint32_t row,
     StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(dst + row * 128, lo, 1, m128);
 }
 
-template <bool Normalize, bool WriteNd = false>
+template <bool Normalize>
 __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
                                          LocalTensor<bfloat16_t> &nzOutput,
-                                         LocalTensor<bfloat16_t> &ndOutput,
                                          LocalTensor<float> &rstd)
 {
     __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(input.GetPhyAddr());
     __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(nzOutput.GetPhyAddr());
-    __ubuf__ bfloat16_t *nd = reinterpret_cast<__ubuf__ bfloat16_t *>(ndOutput.GetPhyAddr());
     __ubuf__ float *norm = reinterpret_cast<__ubuf__ float *>(rstd.GetPhyAddr());
     __VEC_SCOPE__
     {
@@ -295,9 +293,6 @@ __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
                 StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, sum0, scalar);
             }
             GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
-            if constexpr (WriteNd) {
-                StoreNdEvenOdd(nd, row, even, odd, m16, m128);
-            }
         }
     }
 }

@@ -60,6 +60,7 @@ struct ChainLoc {
     int64_t chunks;
     int64_t tokenBegin;
     int64_t tokenEnd;
+    int64_t tailRows;
 };
 
 struct ChunkWindow {
@@ -131,15 +132,16 @@ __aicore__ inline ChainLoc ResolveChain(const FusedTilingData &td, GM_ADDR cuSeq
         loc.tokenBegin = 0;
         loc.tokenEnd = td.tokens;
     }
+    const int64_t length = loc.tokenEnd > loc.tokenBegin ? loc.tokenEnd - loc.tokenBegin : 0;
+    loc.tailRows = length == 0 ? 0 : (length - 1) % kChunk + 1;
     return loc;
 }
 
-__aicore__ inline ChunkWindow ResolveWindow(const ChainLoc &loc, int64_t localChunk)
+__aicore__ inline ChunkWindow WindowOf(const ChainLoc &loc, int64_t localChunk)
 {
     ChunkWindow window{};
     window.tokenStart = loc.tokenBegin + localChunk * kChunk;
-    const int64_t remain = loc.tokenEnd - window.tokenStart;
-    window.rows = remain <= 0 ? 0 : (remain < kChunk ? remain : kChunk);
+    window.rows = loc.chunks == 0 ? 0 : (localChunk == loc.chunks - 1 ? loc.tailRows : kChunk);
     return window;
 }
 
