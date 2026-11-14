@@ -2,45 +2,40 @@
 
 ## Current implementation
 
-Producer computes KKT, two independent 32x32 VCS diagonal inverses and native-FP32 lower-left coupling, then publishes only the complete inverse T. L10 is retained as a complete 32x32 leaf without a local triangular mask. X0/X1/L10 move directly from FP32 ND UB to FP32 NZ L1, and the intermediate coupling result stays in L1; no inverse workspace is used. Producer no longer computes Kbg/Vb or W/U. Consumer preloads negative Kbg and Vb into L1, then computes W/U and `U-W@S` directly in L0C, followed by O and D.
+Producer AIV0/AIV1 own complete even/odd 64-row chunks. Each round preprocesses the owner's next chunk, issues independent MTE2 loads for the following round, performs one complete FP32 64x64 Vector inverse and executes QKMask. Producer AIC executes KKT and QKT for the even/odd pair. There are no 32x32 diagonal solves, Cube coupling operations or serial scheduling paths.
 
-The internal A/T buffer is always allocated at full `[B,Hv,T,64]` size, including when `aOutOptional` is null. It is not a public output. Public A/g_cumsum/KHat/KRstd/H/qHat/qRstd are not written; only the internal T, final O and final_state are used.
+A persistent 64x64 identity matrix is built once during Producer initialization and loaded by every inverse group. Preprocess and inverse use opposite local-pair buffer slots. The Producer UB layout occupies 216 KiB per AIV within a 248 KiB budget; Producer L1 occupies 96 KiB. Consumer behavior is unchanged: it prepares negative Kbg/Vb, recomputes W/U, fuses `U-W@S`, then computes O and the recurrent state update.
 
-The development host is macOS without `ccec`, `ascendc++`, an Ascend toolkit, or a visible NPU. Device compilation, correctness and the 30 us Producer target remain unverified here.
+The internal A/T buffer remains allocated at full `[B,Hv,T,64]` size, including when `aOutOptional` is null. Only valid T rows are written for tails; APrime uses a complete 64x64 NZ workspace tile.
 
-## Checks completed
+## Checks completed on the development host
 
 | Check | Method | Result |
 |---|---|---|
-| Host POD and pipeline helpers | C++17 `-Wall -Wextra -Werror`: `sparse_tiling_contract.cpp` | Compiled and ran successfully |
-| Public ACLNN ABI | `aclnn_abi_contract.py` | Passed; 29 public parameters |
-| Internal OpDef/device argument order | `sparse_entry_contract.py` | Passed |
-| Split VCS and lower-left coupling | Independent X0/X1 substitution and `X1@L10@X0` versus the complete inverse; full 32x32 L10 retention | NumPy checks passed |
-| FP32 ND-to-NZ layout | Four C0=8 panels reconstructed from the 32x32 ND source; all source blocks 32-byte aligned | NumPy address-mapping check passed |
-| Tail T memory bounds | T=65: the former 64-row read exceeded the 65-row allocation; valid-row loading ends exactly at the allocation boundary | Static address check passed |
-| Producer copy spans | New UB regions plus four-panel UB→L1 and two-panel L0C→L1 FP32 copies | Static span checks passed |
-| Negative-Kbg identity | `U + (-trueW)@S` equals `U - trueW@S` | Same L0C accumulation semantics |
+| Producer UB/L1 offsets and capacity | C++17 `-Wall -Wextra -Werror` static assertions | Passed; 216 KiB UB, 96 KiB L1, 248 KiB UB budget |
+| Host/device tiling POD alignment | Same C++ static contract | Passed |
+| Undeclared-identifier static audit | All Producer member references, 75 Producer/L1/UB constants, new local call targets and deleted-symbol references | No missing declaration or deleted-symbol use found; not a substitute for device compilation |
+| Pipeline host plan | C++ dense/varlen plans, odd tails, excessive chains and empty input | Passed; eligible plans formed two groups per chain and ineligible plans returned false |
+| Complete grouped 64x64 forward substitution | 100 random strict-lower matrices versus `numpy.linalg.inv(I-L)` | Passed; maximum absolute error `1.388e-16` in FP64 reference evaluation |
+| Gate-ratio inverse and QKMask formulas | 20 random cases each for exp/exp2; inverse and inclusive causal mask references | Passed |
+| Parity buffer slot schedule | Both owners, chunk counts 1 through 64 | Current/preprocess ratio slots and current/preprocess/load gate slots passed |
+| Odd, short and empty chain schedule | Every chain length for each `maxChunks` from 1 through 64 | Each valid chunk executed once; global generations exactly covered `0..maxChunks-1` |
+| Lightweight test scripts | Python 3.12 `py_compile` | Passed |
+| CPU-only lightweight cases | `dense-tail`, `varlen`, `varlen-empty` | CPU golden generation and logging completed; no device DUT was run |
+| Comparison helper | `compare_contract.py` | Passed |
 | Source whitespace | `git diff --check` | Passed |
-| Test scripts | `py_compile` and lightweight `--cpu-only` | Passed |
 
-These checks do not validate Ascend instruction behavior or device performance.
+These checks validate the host layout, reference algorithm and existing CPU utilities. They do not validate Ascend instruction behavior, generated device code, cross-core synchronization, numerical output or performance.
 
-## Resource and lifetime checks
+## Environment limitation
 
-- Ascend 950 L1 capacity confirmed from the platform knowledge cards: **512 KiB per AI Core**.
-- Producer L1 holds X0/X1/L10/P as four native-FP32 NZ records; inverse GM workspace bytes are zero.
-- Consumer UB: 208 KiB per AIV, within the 208 KiB regbase budget.
-- Consumer L1: 192 KiB per MIX group, within the 512 KiB hardware budget.
-- Kbg and Vb are prepared in L1 while Producer computes the inverse.
-- U remains in L0C while W@S accumulates, producing vnew without a separate UB subtraction.
-- QExp@S and A'@vnew accumulate in L0C before the final output Fixpipe.
-- Serial publishes only the final T. Pipeline uses paired AIC mode-0 calls on every iteration.
+The development host is macOS without `ccec`, `ascendc++`, an Ascend toolkit or a visible NPU. Device compilation, correctness and the Producer performance target remain unverified here.
 
 ## Required Ascend 950 validation
 
 1. Build with `bash build.sh --pkg --soc=ascend950 --vendor_name=fla_npu --ops=chunk_gated_delta_rule_fwd` and fix any CANN-version diagnostics.
-2. Measure Producer and Consumer separately with the original workload, warmup 5 and 20 samples. Record all Task Duration samples and min/median/mean/max. The Producer target is **median <=30 us**, but Consumer and full-pipeline time must also be reported.
-3. Restore normal AIC mode-0 and run lightweight `o/final_state` and ATK cases 348/187. Include T=64/640, a non-64-aligned tail and strongly negative gates.
-4. Cover varlen empty sequences, norm on/off, exp/exp2, beta sigmoid, stateVFirst and FP32/BF16 states.
-5. Run synchronization stress and MSS, focusing on T readiness, inverse L1 MTE3→MTE1 publication, intermediate-P FIX→MTE1 ordering, negative Kbg/Vb L1 lifetime, U-W@S accumulation, vnew/right hand-off and serial final-T publication.
-6. Regress high-chain serial shapes and T=16384. Full-pipeline results do not replace the standalone Producer target.
+2. Run lightweight `o/final_state` comparisons for dense T=64/65/128/129/640 and varlen with empty sequences. Include an odd `maxChunks`, a single-chunk chain and chains of different lengths in one launch.
+3. Cover norm on/off, exp/exp2, beta sigmoid, strongly negative gates, stateVFirst and FP32/BF16 initial states.
+4. Run synchronization stress and MSS, focusing on owner-specific mode-4 flag routing, single KKT/QK UB backpressure, complete T readiness, APrime completion, preprocess/inverse UB aliases, three-slot gate/L1 lifetimes and odd-pair generation counts.
+5. Verify that key-64 tiling launches exactly `2*chainCount` groups and rejects shapes that cannot form the pipeline; no serial fallback should remain.
+6. Measure Producer and Consumer separately with warmup 5 and 20 samples. Record min/median/mean/max and compare against the previous implementation without treating host-side checks as performance evidence.

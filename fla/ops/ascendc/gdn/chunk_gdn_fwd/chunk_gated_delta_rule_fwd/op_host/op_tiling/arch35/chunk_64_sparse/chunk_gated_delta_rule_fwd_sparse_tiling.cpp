@@ -197,11 +197,15 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         static_cast<uint64_t>(batch), static_cast<uint64_t>(hv),
         static_cast<uint64_t>(tokens), static_cast<uint64_t>(sequenceCount),
         chunkCount, varlen, static_cast<uint64_t>(groups), 512, &plan);
+    OP_CHECK_IF(!pipeline,
+                OP_LOGE("ChunkGatedDeltaRuleFwd",
+                        "Sparse key64 requires one producer and one consumer group per chain."),
+                return ge::GRAPH_FAILED);
     uint64_t totalChains = 0;
     OP_CHECK_IF(!CheckedMulU64(static_cast<uint64_t>(varlen ? sequenceCount : batch),
                                static_cast<uint64_t>(hv), &totalChains) ||
                     totalChains == 0 || totalChains > std::numeric_limits<uint32_t>::max() ||
-                    (pipeline && totalChains > groups / 2),
+                    totalChains > groups / 2,
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid chain count."),
                 return ge::GRAPH_FAILED);
 
@@ -214,10 +218,8 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.totalChunks = static_cast<int64_t>(chunkCount);
     td.chunksPerBatch = varlen ? 0 : (tokens + 63) / 64;
     td.chainCount = static_cast<uint32_t>(totalChains);
-    td.maxChunks = pipeline ? plan.maxChunks : 0;
-    td.launchGroups = pipeline ? 2U * td.chainCount : groups;
-    td.schedule = pipeline ? GdnChunk64Sparse::kSparseSchedulePipeline
-                           : GdnChunk64Sparse::kSparseScheduleSerial;
+    td.maxChunks = plan.maxChunks;
+    td.launchGroups = 2U * td.chainCount;
     td.useNorm = norm;
     td.gateSoftplus = context->GetOptionalInputShape(10) != nullptr ||
                       context->GetOptionalInputShape(11) != nullptr;
@@ -247,7 +249,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 return ge::GRAPH_FAILED);
     td.stateFp32 = initialDesc == nullptr || initialDesc->GetDataType() == ge::DT_FLOAT;
 
-    if (pipeline && varlen) {
+    if (varlen) {
         const auto *cuTensor = context->GetOptionalInputTensor(8);
         const int64_t *cuData = cuTensor == nullptr ? nullptr : cuTensor->GetData<int64_t>();
         if (cuData != nullptr) {
@@ -263,8 +265,8 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         }
     }
 
-    // X0/X1/L10 and the intermediate coupling result stay in L1. APrime is
-    // produced on the Producer groups and consumed through a separate GM buffer.
+    // The owner AIV writes the complete inverse T. APrime is produced on the
+    // Producer groups and consumed through a separate GM buffer.
     uint64_t cursor = 0;
     uint64_t aPrimeTiles = 0;
     uint64_t aPrimeBytes = 0;

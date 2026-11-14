@@ -9,60 +9,41 @@
 
 namespace GdnChunk64Sparse {
 constexpr uint32_t kKiB = 1024;
-constexpr uint32_t kUbBudget = 208 * kKiB;
+constexpr uint32_t kUbBudget = 248 * kKiB;
 
-// Two input slots per AIV. Normalized K is uploaded to L1 for Cube; each AIV
-// also keeps its own ND half and gate/beta copy for the later scaling pass.
-constexpr uint32_t kPUbSlotBytes = 48 * kKiB;
+// Each AIV owns one full 64-row chunk per pair iteration. Raw K/Q and their
+// normalized NZ forms use local-pair double buffering. The normalized buffers
+// are reused by inverse/QKMask in the opposite phase: preprocess fills slot
+// (i+1)&1 while inverse and QKMask consume slot i&1.
+constexpr uint32_t kPUbInputSlotBytes = 16 * kKiB;
 constexpr uint32_t kPUbK = 0;
-constexpr uint32_t kPUbV = 8 * kKiB;
-constexpr uint32_t kPUbKHat = 16 * kKiB;
-constexpr uint32_t kPUbPublic = 24 * kKiB;
-constexpr uint32_t kPUbVb = 32 * kKiB;
-constexpr uint32_t kPUbKbg = 40 * kKiB;
+constexpr uint32_t kPUbQ = kPUbK + 2 * kPUbInputSlotBytes;
+constexpr uint32_t kPUbKHat = kPUbQ + 2 * kPUbInputSlotBytes;
+constexpr uint32_t kPUbQHat = kPUbKHat + 2 * kPUbInputSlotBytes;
+constexpr uint32_t kPUbKkt = kPUbQHat + 2 * kPUbInputSlotBytes;
+constexpr uint32_t kPUbKktBytes = 16 * kKiB;
+constexpr uint32_t kPUbQk = kPUbKkt + kPUbKktBytes;
+constexpr uint32_t kPUbQkBytes = 16 * kKiB;
+constexpr uint32_t kPUbRatio = kPUbQk + kPUbQkBytes;
+constexpr uint32_t kPUbRatioSlotBytes = 16 * kKiB;
+constexpr uint32_t kPUbGates = kPUbRatio + 2 * kPUbRatioSlotBytes;
+// Three gate slots cover the current inverse, next preprocess and the load
+// issued for the following preprocess. Each slot holds 64 G/energy/beta/rstd
+// values plus 64 reciprocal-energy values.
+constexpr uint32_t kPUbGateSlotBytes = 2 * kKiB;
+constexpr uint32_t kPUbShift = kPUbGates + 3 * kPUbGateSlotBytes;
+constexpr uint32_t kPUbScratch = kPUbShift + 6 * 64 * sizeof(uint32_t);
+constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;
+constexpr uint32_t kPUbEye = kPUbEnd;
+constexpr uint32_t kPUbEndWithEye = kPUbEye + 16 * kKiB;
+static_assert(kPUbEndWithEye <= kUbBudget);
 
-// Each AIV receives its 32x64 KKT row band and solves one 32x32 diagonal
-// inverse. KKT is double-buffered so the next KKT can overlap the current
-// inverse. AIV1 appends the complete 32x32 L10 leaf after its inverse storage.
-constexpr uint32_t kPUbKkt = 2 * kPUbSlotBytes;
-constexpr uint32_t kPUbKktSlotBytes = 8 * kKiB;
-constexpr uint32_t kPUbL = kPUbKkt + 2 * kPUbKktSlotBytes;
-constexpr uint32_t kPUbX = kPUbL + 8 * kKiB;
-constexpr uint32_t kPUbABf = kPUbX + 12 * kKiB;
-constexpr uint32_t kPUbZero = kPUbABf + 4 * kKiB;
-constexpr uint32_t kPUbGates = kPUbZero + 4 * kKiB;
-// Three raw gate/beta slots cover the current inverse, next preparation and
-// the load issued two chunks ahead. QKMask consumes the shared ratio band.
-constexpr uint32_t kPUbShift = kPUbGates + 6 * kKiB;
-// Producer-owned Q/QHat use chunk-parity slots. QKT/APrime are serialized per AIV.
-constexpr uint32_t kPUbQ = kPUbShift + 2 * kKiB;
-constexpr uint32_t kPUbQHat = kPUbQ + 16 * kKiB;
-constexpr uint32_t kPUbQk = kPUbQHat + 16 * kKiB;
-constexpr uint32_t kPUbAPrime = kPUbQk + 8 * kKiB;
-// Two FP32 ratio bands are shared by the current inverse and previous QKMask.
-constexpr uint32_t kPUbRatio = kPUbAPrime + 4 * kKiB;
-constexpr uint32_t kPUbRatioSlotBytes = 8 * kKiB;
-// The third ratio band reuses the otherwise unused Vb0 storage.
-constexpr uint32_t kPUbRatioThird = kPUbVb;
-// Reuse Vb1 for the 32x32 FP32 identity loaded by the inverse solver.
-constexpr uint32_t kPUbEye = kPUbVb + kPUbSlotBytes;
-constexpr uint32_t kPUbEnd = kPUbRatio + 2 * kPUbRatioSlotBytes;
-static_assert(kPUbEnd <= kUbBudget);
-
-// Two K/Vb/Kbg slots and two sets of native-FP32 inverse/coupling records.
-// The next inverse cannot overwrite the L1 inputs of the current coupling.
-constexpr uint32_t kPL1SlotBytes = 48 * kKiB;
+// Three full-chunk K/Q L1 slots protect the current KKT/QKT pair from the next
+// preprocess. No FP32 inverse or coupling records remain in L1.
+constexpr uint32_t kPL1SlotBytes = 16 * kKiB;
 constexpr uint32_t kPL1K = 0;
-constexpr uint32_t kPL1Vb = 16 * kKiB;
-constexpr uint32_t kPL1Kbg = 32 * kKiB;
-constexpr uint32_t kPL1A = 3 * kPL1SlotBytes;
-constexpr uint32_t kPL1InvSlotBytes = 4 * kKiB;
-constexpr uint32_t kPL1InvX0 = kPL1A + 8 * kKiB;
-constexpr uint32_t kPL1InvX1 = kPL1InvX0 + 2 * kPL1InvSlotBytes;
-constexpr uint32_t kPL1InvL10 = kPL1InvX1 + 2 * kPL1InvSlotBytes;
-constexpr uint32_t kPL1InvT = kPL1InvL10 + 2 * kPL1InvSlotBytes;
-constexpr uint32_t kPL1QSlotBytes = 16 * kKiB;
-constexpr uint32_t kPL1QHat = kPL1InvT + 2 * kPL1InvSlotBytes;
+constexpr uint32_t kPL1QHat = kPL1K + 3 * kPL1SlotBytes;
+constexpr uint32_t kPL1QSlotBytes = kPL1SlotBytes;
 constexpr uint32_t kPL1End = kPL1QHat + 3 * kPL1QSlotBytes;
 static_assert(kPL1End <= 512 * kKiB);
 

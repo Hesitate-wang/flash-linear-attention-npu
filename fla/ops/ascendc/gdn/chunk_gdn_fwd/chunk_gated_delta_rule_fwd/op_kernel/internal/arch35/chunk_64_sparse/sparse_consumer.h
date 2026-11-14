@@ -133,8 +133,7 @@ public:
                     DataCopy(gmFinalB_[offset], ubInitB_, kStateElems / 2);
                 }
             }
-            // Serial mode reuses this UB for the next chain's Producer. Do not
-            // let its Vector or MTE2 writes overtake the final-state MTE3 read.
+            // Drain the final-state source before the kernel exits.
             SetFlag<HardEvent::MTE3_V>(0);
             WaitFlag<HardEvent::MTE3_V>(0);
             SetFlag<HardEvent::MTE3_MTE2>(0);
@@ -265,8 +264,7 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
-        // In serial mode this AIV has just finished the Producer role. Its
-        // last MTE3 reads must complete before Consumer Vector work reuses UB.
+        // Establish a clean MTE3-to-Vector boundary before Consumer prologue.
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);
         // H is independent of Q/K/V preparation. Publish it first so QS can
@@ -536,11 +534,9 @@ private:
 
     __aicore__ inline void LoadAPrime(int64_t chunk)
     {
-        if (td_.schedule == kSparseSchedulePipeline) {
-            // Mode 0 requires every AIC to set as well as wait. Delay this
-            // publish until O so T, W and v_new do not wait for APrime.
-            PublishAPrimeAic<PIPE_MTE2>(chunk);
-        }
+        // Mode 0 requires every AIC to set as well as wait. Delay this
+        // publish until O so T, W and v_new do not wait for APrime.
+        PublishAPrimeAic<PIPE_MTE2>(chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads);

@@ -93,15 +93,17 @@ __aicore__ inline void AivWaitMte3(uint16_t id)
     CrossCoreWaitFlag<0x4, PIPE_MTE3>(id);
 }
 
-__aicore__ inline void AicRelayAiv0ToAiv1(uint16_t id)
+__aicore__ inline void AicPublishToOwner(int64_t chunk, uint16_t id)
 {
-    CrossCoreWaitFlag<0x4, PIPE_MTE2>(id);
-    CrossCoreSetFlag<0x4, PIPE_FIX>(static_cast<uint16_t>(id + kAiv1FlagOffset));
+    const bool odd = (chunk & 1) != 0;
+    CrossCoreSetFlag<0x4, PIPE_FIX>(static_cast<uint16_t>(id + (odd ? kAiv1FlagOffset : 0)));
 }
 
-__aicore__ inline void AicPublishToAiv0(uint16_t id)
+template <pipe_t WaitPipe = PIPE_MTE1>
+__aicore__ inline void AicWaitOwner(int64_t chunk, uint16_t id)
 {
-    CrossCoreSetFlag<0x4, PIPE_FIX>(id);
+    const bool odd = (chunk & 1) != 0;
+    CrossCoreWaitFlag<0x4, WaitPipe>(static_cast<uint16_t>(id + (odd ? kAiv1FlagOffset : 0)));
 }
 
 __aicore__ inline void AicPublishToBoth(uint16_t id)
@@ -115,14 +117,6 @@ __aicore__ inline void AicWaitBoth(uint16_t id)
 {
     CrossCoreWaitFlag<0x4, WaitPipe>(id);
     CrossCoreWaitFlag<0x4, WaitPipe>(static_cast<uint16_t>(id + kAiv1FlagOffset));
-}
-
-__aicore__ inline void PublishChainInGroup()
-{
-    if ASCEND_IS_AIV {
-        CrossCoreSetFlag<0x1, PIPE_MTE3>(15);
-        CrossCoreWaitFlag<0x1, PIPE_MTE2>(15);
-    }
 }
 
 } // namespace GdnChunk64Sparse

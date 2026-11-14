@@ -11,11 +11,7 @@
 
 namespace GdnChunk64Sparse {
 
-constexpr uint32_t kSparseScheduleSerial = 0;
-constexpr uint32_t kSparseSchedulePipeline = 1;
 constexpr uint32_t kSparseBarrierFlagId = 7;
-// Legacy source-level contract only; on-chip coupling allocates no inverse GM workspace.
-constexpr uint32_t kSparseInverseBytesPerTile = 4 * 32 * 32 * sizeof(float);
 // Temporary A/B bit: preserve math and scheduling, but use ND v_new/right.
 constexpr uint32_t kSparseDebugNdVnRight = 0x100U;
 
@@ -33,7 +29,6 @@ struct FusedTilingData {
     uint32_t chainCount;
     uint32_t maxChunks;
     uint32_t launchGroups;
-    uint32_t schedule;
     uint32_t useNorm;
     uint32_t gateSoftplus;
     uint32_t betaSigmoid;

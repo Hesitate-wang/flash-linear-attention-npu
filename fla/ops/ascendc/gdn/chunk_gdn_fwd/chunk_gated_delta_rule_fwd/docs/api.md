@@ -2,7 +2,7 @@
 
 ## Status
 
-Source-level two-group producer/consumer implementation. The public ACLNN ABI, stable Python signature and ten-element return tuple are unchanged. The internal OpDef adds Prepare inputs, intermediate outputs and attributes; host/device integration uses key 64. For eligible low-parallelism calls (`B*Hv <= AIC/2`), exactly `2*chainCount` MIX groups are launched. Producer groups compute coefficients and W/U; consumer groups compute QK/A' before the W/U rendezvous and H/O after it, on the same chunk. One mode-0 all-AIV barrier per chunk is placed after consumer QK/A' and before its W/U loads. The producer inverse uses two FP32 diagonal solves on AIV0/AIV1 and a native FP32 Cube coupling GEMM pair on AIC. Prepare publishes K ready immediately after K normalization so KKT overlaps the remaining gate and post-inverse K/V work; producer Q is removed and public q_hat/q_rstd are written asynchronously after consumer H/O. Calls above the bound use the same self-contained roles in group-serial mode. The dual-AIV inverse and revised consumer W/U schedule have no Ascend build, accuracy, synchronization or performance validation yet, so their benefits must not be treated as proven.
+Source-level two-group producer/consumer implementation. The public ACLNN ABI, stable Python signature and ten-element return tuple are unchanged. The internal OpDef adds Prepare inputs, intermediate outputs and attributes; host/device integration uses key 64. For eligible low-parallelism calls (`B*Hv <= AIC/2`), exactly `2*chainCount` MIX groups are launched. Producer AIV0/AIV1 independently own even/odd full chunks, while Producer AIC executes the paired KKT/QKT GEMMs. Each owner performs a complete FP32 64x64 Vector inverse and QKMask; there is no diagonal split or Cube coupling. Consumer recomputes W/U and executes H/O. No serial scheduling mode remains. The revised producer and consumer schedules have no Ascend build, accuracy, synchronization or performance validation yet, so their benefits must not be treated as proven.
 
 ## Entry and selector
 
@@ -15,7 +15,7 @@ The route is considered only by the existing `npu_chunk_gated_delta_rule_fwd` en
 - `K == V == 128`, `Hv % Hk == 0`, `Hv/Hk <= 4`
 - no optional output or supported mode may be silently ignored
 
-Native low-precision Prepare inputs are cast to FP32 by the existing wrapper before entering key 64. `B * Hv <= AICcores / 2` selects the two-group pipeline; other eligible key-64 shapes use group-serial execution. The host obtains real AIC cores from the platform API. Internal additions are append-only, and legacy calls use `fused_prepare=false`.
+Native low-precision Prepare inputs are cast to FP32 by the existing wrapper before entering key 64. `B * Hv <= AICcores / 2` selects the two-group pipeline; shapes above that bound are rejected by key-64 tiling rather than entering a serial fallback. The host obtains real AIC cores from the platform API. Internal additions are append-only, and legacy calls use `fused_prepare=false`.
 
 The stable Python API already exposes `use_qk_l2norm_in_kernel` and `use_beta_sigmoid_in_kernel`. They remain the selectors for those semantics; no new public argument is proposed. Existing ACLNN behavior ties beta sigmoid in Prepare to a non-null `betaEffOutOptional`; `allowNegEigval=true` requires that optional output. The fused route must preserve this coupling and produce beta_eff when requested. It must not change behavior based on chunk size.
 

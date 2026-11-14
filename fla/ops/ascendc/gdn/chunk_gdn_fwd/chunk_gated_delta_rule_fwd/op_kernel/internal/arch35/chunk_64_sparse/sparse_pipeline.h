@@ -56,32 +56,6 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     role.EndChain();
 }
 
-__aicore__ inline void RunSerial(const PhaseArgs &args, const FusedTilingData &td,
-                                 uint32_t group)
-{
-    ProducerRole producer;
-    ConsumerRole consumer;
-    producer.Init(args, td);
-    consumer.Init(args, td);
-    for (uint32_t chain = group; chain < td.chainCount; chain += td.launchGroups) {
-        producer.BeginChain(args, chain);
-        const int64_t chunks = producer.ChunkCount();
-        producer.Run();
-        if (chunks == 0) {
-            consumer.BeginChain(args, chain);
-            consumer.EndChain();
-            continue;
-        }
-        PublishChainInGroup();
-        consumer.BeginChain(args, chain);
-        consumer.RunPrologue();
-        for (int64_t chunk = 0; chunk < chunks; ++chunk) {
-            consumer.RunChunk(chunk);
-        }
-        consumer.EndChain();
-    }
-}
-
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
 {
     if ASCEND_IS_AIC {
@@ -90,15 +64,10 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
         SetFlag<HardEvent::FIX_M>(0);
     }
     const uint32_t group = GroupIndex();
-    if (td.schedule == kSparseSchedulePipeline && td.chainCount != 0 &&
-        td.maxChunks != 0 && td.launchGroups == 2U * td.chainCount) {
-        if (group < td.chainCount) {
-            RunProducer(args, td, group);
-        } else if (group < td.launchGroups) {
-            RunConsumer(args, td, group - td.chainCount);
-        }
+    if (group < td.chainCount) {
+        RunProducer(args, td, group);
     } else {
-        RunSerial(args, td, group);
+        RunConsumer(args, td, group - td.chainCount);
     }
     if ASCEND_IS_AIV {
         SetFlag<HardEvent::MTE3_V>(0);
