@@ -265,7 +265,7 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
     }
 
-    __aicore__ inline void LoadInitialState(int32_t eventId = 4)
+    __aicore__ inline void LoadInitialState(int32_t eventId = 2)
     {
         if (hasInitial_) {
             if (td_.stateFp32 != 0) {
@@ -273,7 +273,8 @@ private:
             } else {
                 DataCopy(ubInitB_, gmInitB_[StateOffset()], kStateElems / 2);
             }
-            // Initial-state MTE2 is independent of Q/K/V events 1/2/3.
+            // Initial-state MTE2 uses event 2; Q/K/V and gate use 0/1, 4/5,
+            // 3 and 0 respectively.
             SetFlag<HardEvent::MTE2_V>(eventId);
         } else {
             Duplicate(ubStateF_, 0.0f, kStateElems / 2);
@@ -281,7 +282,7 @@ private:
         }
     }
 
-    __aicore__ inline void ConvertInitialState(int32_t eventId = 4)
+    __aicore__ inline void ConvertInitialState(int32_t eventId = 2)
     {
         if (hasInitial_) {
             WaitFlag<HardEvent::MTE2_V>(eventId);
@@ -297,9 +298,7 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
-        // Establish a clean MTE3-to-Vector boundary before Consumer prologue.
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
+        // H preparation starts after the previous chain's EndChain drain.
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
         PrepareNextGate(0, true);
@@ -436,9 +435,9 @@ private:
         SetFlag<HardEvent::MTE2_MTE3>(slot);
         SetFlag<HardEvent::MTE2_V>(slot);
         CopyNormalizedGmToUb(qBuffer, gmNormQ_, offset, firstRow);
-        // K and Q have independent Vector readiness events. Q uses 5/6 to
-        // avoid the gate, V and initial-state events used by the prologue.
-        SetFlag<HardEvent::MTE2_V>(5 + slot);
+        // K and Q have independent Vector readiness events. Q uses 4/5;
+        // initial-state loading uses 2 and V uses 3.
+        SetFlag<HardEvent::MTE2_V>(4 + slot);
     }
 
     __aicore__ inline void ConsumeNormalizedQK(int64_t chunk)
@@ -462,7 +461,7 @@ private:
         SetUbRelease(ubWArmed_, 2);
         AivPublish(kConsW);
 
-        WaitFlag<HardEvent::MTE2_V>(5 + slot);
+        WaitFlag<HardEvent::MTE2_V>(4 + slot);
         WaitUbRelease(ubOSBArmed_, 1);
         QHatExpNzVF(qBuffer, ubOSB_, ubEnergy_, firstRow);
         SetFlag<HardEvent::V_MTE3>(1);
