@@ -5,6 +5,7 @@
 #include "chunk_gated_delta_rule_fwd_arch35_struct.h"
 #include "ho_pipeline_context.h"
 #include "chunk_64_sparse/sparse_pipeline.h"
+#include "chunk_gated_delta_rule_fwd_chunk32/chunk_gated_delta_rule_fwd_32.h"
 #include <type_traits>
 
 #include "../gated_delta_rule_state_update_output/chunk_gated_delta_rule_state_update_output.cpp"
@@ -494,12 +495,12 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
         GdnChunk64Sparse::RunSparsePipeline(args, fusedTiling);
     } else if (TILING_KEY_IS(32)) {
         KERNEL_TASK_TYPE(32, KERNEL_TYPE_MIX_AIC_1_2);
-        GET_TILING_DATA_WITH_STRUCT(GdnChunk64Sparse::FusedTilingData, fusedTiling, tiling);
-        const GdnChunk64Sparse::PhaseArgs args{
-            q, k, v, raw_g, a_storage, a_log, dt_bias, cu_seqlens, chunk_indices,
-            g_cumsum_bht, w, u, A, q_hat, k_hat, q_rstd, k_rstd, beta_eff,
-            h, v_new, o, initial_state, final_state, workspace};
-        GdnChunk64Sparse::RunProducerOnly32Pipeline(args, fusedTiling);
+        GET_TILING_DATA_WITH_STRUCT(
+            ChunkGatedDeltaRuleFwd32TilingData, chunk32Tiling, tiling);
+        GdnFwd32::Kernel op;
+        op.Init(q, k, v, raw_g, a_storage, initial_state, cu_seqlens,
+                o, final_state, chunk32Tiling);
+        op.Process();
     } else if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
         GDN::RunPhase6<DTYPE_Q, Catlass::Gemm::Kernel::GDNFwdHTileShapes128>(

@@ -12,8 +12,6 @@
 namespace GdnChunk64Sparse {
 
 constexpr uint32_t kSparseBarrierFlagId = 7;
-// Temporary A/B bit: preserve math and scheduling, but use ND v_new/right.
-constexpr uint32_t kSparseDebugNdVnRight = 0x100U;
 
 struct FusedTilingData {
     int64_t batch;
@@ -25,14 +23,11 @@ struct FusedTilingData {
     int64_t chunksPerBatch;
     int64_t workspaceOffset;
     int64_t normalizedQKOffset;
-    int64_t internalTOffset;
     int64_t workspaceBytes;
     float scale;
     uint32_t chainCount;
     uint32_t maxChunks;
     uint32_t launchGroups;
-    uint32_t chunkSize;
-    uint32_t useNorm;
     uint32_t gateSoftplus;
     uint32_t betaSigmoid;
     uint32_t allowNegEigval;
@@ -46,6 +41,7 @@ struct FusedTilingData {
     uint32_t hasDtBias;
     uint32_t reserved;
     uint32_t writeH;
+    uint32_t alignmentPadding;
 };
 
 static_assert(sizeof(FusedTilingData) % sizeof(uint64_t) == 0,

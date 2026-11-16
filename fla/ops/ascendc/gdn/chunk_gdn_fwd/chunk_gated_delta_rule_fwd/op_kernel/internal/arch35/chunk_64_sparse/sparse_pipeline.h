@@ -12,11 +12,10 @@
 
 namespace GdnChunk64Sparse {
 
-template <int64_t ChunkSize = 64, typename BetaT = float>
 __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData &td,
                                    uint32_t chain)
 {
-    ProducerRole<ChunkSize, BetaT> role;
+    ProducerRole role;
     role.Init(args, td);
     role.BeginChain(args, chain);
     role.Run();
@@ -74,28 +73,6 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
     } else {
         RunConsumer(args, td, group - td.chainCount);
     }
-    if ASCEND_IS_AIV {
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
-    }
-    if ASCEND_IS_AIC {
-        WaitFlag<HardEvent::M_MTE1>(0);
-        WaitFlag<HardEvent::FIX_M>(0);
-    }
-}
-
-__aicore__ inline void RunProducerOnly32Pipeline(const PhaseArgs &args, const FusedTilingData &td)
-{
-    if ASCEND_IS_AIC {
-        SetHF32Mode(false);
-        SetFlag<HardEvent::M_MTE1>(0);
-        SetFlag<HardEvent::FIX_M>(0);
-    }
-    const uint32_t group = GroupIndex();
-    if (group < td.chainCount) {
-        RunProducer<32, bfloat16_t>(args, td, group);
-    }
-    // Consumer groups intentionally stay idle in this Producer-only benchmark.
     if ASCEND_IS_AIV {
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);

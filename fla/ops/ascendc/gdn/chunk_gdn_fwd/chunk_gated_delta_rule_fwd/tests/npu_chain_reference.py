@@ -41,7 +41,7 @@ def run_npu_chain(ascendc, inputs: dict, config: dict,
 
     prepared = stage("chunk_gated_delta_rule_fwd_prepare", lambda: ascendc.chunk_gated_delta_rule_fwd_prepare(
         q, k, v, g, beta, chunk_size=64,
-        use_qk_l2norm_in_kernel=config["l2norm"], use_gate_in_kernel=False,
+        use_qk_l2norm_in_kernel=True, use_gate_in_kernel=False,
         use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
         allow_neg_eigval=config["allow_neg_eigval"], use_exp2=config["use_exp2"],
         cu_seqlens=cu_list, chunk_indices=chunk_indices, output_a=False))
@@ -66,8 +66,7 @@ def run_npu_chain(ascendc, inputs: dict, config: dict,
         result["final_state"] = final_state
     if config["beta_sigmoid"]:
         result["beta_eff"] = beta_eff.transpose(1, 2).contiguous()
-    if config["l2norm"]:
-        result.update({"q_hat": q_hat, "k_hat": k_hat,
-                       "q_rstd": q_rstd, "k_rstd": k_rstd})
+    result.update({"q_hat": q_hat, "k_hat": k_hat,
+                   "q_rstd": q_rstd, "k_rstd": k_rstd})
     result["_timings"] = timings
     return result

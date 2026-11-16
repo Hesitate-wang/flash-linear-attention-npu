@@ -10,7 +10,6 @@
 #include "sparse_memory.h"
 #include "sparse_sync.h"
 #include "sparse_vector.h"
-#include <type_traits>
 
 namespace GdnChunk64Sparse {
 
@@ -23,12 +22,7 @@ constexpr uint16_t kProdAPrime = 11;
 constexpr int32_t kProdInputMte3EventBase = 0;
 constexpr int32_t kProdOutputMte3EventBase = 2;
 
-template <int64_t ChunkSize = 64, typename BetaT = float>
 class ProducerRole {
-    static_assert(ChunkSize == 32 || ChunkSize == 64, "Producer supports only chunk32/chunk64");
-    static constexpr int64_t ChunkSizeMatrix = ChunkSize * ChunkSize;
-    static constexpr int64_t ChunkSizeElems = ChunkSize * kDim;
-
 public:
     __aicore__ inline void Init(const PhaseArgs &args, const FusedTilingData &td)
     {
@@ -37,22 +31,15 @@ public:
         gmK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.k));
         gmQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.q));
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
-        gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ BetaT *>(args.beta));
-        if constexpr (ChunkSize == 64) {
-            gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
-        } else {
-            gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-                GetUserWorkspace(args.workspace) + td.internalTOffset));
-        }
+        gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
+        gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
             GetUserWorkspace(args.workspace) + td.workspaceOffset));
-        if (td.useNorm != 0) {
-            gmNormQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-                GetUserWorkspace(args.workspace) + td.normalizedQKOffset));
-            gmNormK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
-                GetUserWorkspace(args.workspace) + td.normalizedQKOffset +
-                td.totalChunks * td.keyHeads * ChunkSizeElems * sizeof(bfloat16_t)));
-        }
+        gmNormQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+            GetUserWorkspace(args.workspace) + td.normalizedQKOffset));
+        gmNormK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+            GetUserWorkspace(args.workspace) + td.normalizedQKOffset +
+            td.totalChunks * td.keyHeads * kChunkElems * sizeof(bfloat16_t)));
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
         }
@@ -62,7 +49,7 @@ public:
         InitBuffers();
         if ASCEND_IS_AIV {
             GenerateScanIndices(ubShift_);
-            InitIdentityChunk();
+            InitIdentity64();
         }
     }
 
@@ -110,9 +97,7 @@ public:
                 // events were consumed by their same-slot preprocess.
                 WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + lastSlot);
             }
-            if (td_.useNorm != 0) {
-                CompleteNormalizedQK(first);
-            }
+            CompleteNormalizedQK(first);
         }
         if ASCEND_IS_AIC {
             const int64_t iterations = td_.maxChunks;
@@ -215,12 +200,6 @@ private:
                 ubBeta_[gateSlot] = ubG_[gateSlot][192];
                 ubKRstd_[gateSlot] = ubG_[gateSlot][256];
                 ubEnergyRecip_[gateSlot] = ubG_[gateSlot][320];
-                if constexpr (std::is_same<BetaT, bfloat16_t>::value) {
-                    ubBetaInput_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
-                        kPUbGates + gateSlot * kPUbGateSlotBytes + 1536);
-                } else {
-                    ubBetaInput_[gateSlot] = ubBeta_[gateSlot];
-                }
             }
             ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kPUbShift);
             ubScratch_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbScratch);
@@ -236,37 +215,31 @@ private:
         }
     }
 
-    __aicore__ inline void InitIdentityChunk()
+    __aicore__ inline void InitIdentity64()
     {
-        Duplicate(ubEye_, 0.0f, ChunkSizeMatrix);
+        Duplicate(ubEye_, 0.0f, kMatrixElems);
         SetFlag<HardEvent::V_S>(0);
         WaitFlag<HardEvent::V_S>(0);
-        for (uint32_t row = 0; row < ChunkSize; ++row) {
-            ubEye_.SetValue(row * (ChunkSize + 1), 1.0f);
+        for (uint32_t row = 0; row < kChunk; ++row) {
+            ubEye_.SetValue(row * (kChunk + 1), 1.0f);
         }
-    }
-
-    __aicore__ inline int64_t MatrixOffset(int64_t chunk) const
-    {
-        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        return (tile * td_.valueHeads + loc_.hv) * ChunkSizeMatrix;
     }
 
     __aicore__ inline int64_t NormalizedQKChunkOffset(int64_t chunk) const
     {
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-        return (tile * td_.keyHeads + loc_.kh) * ChunkSizeElems;
+        return (tile * td_.keyHeads + loc_.kh) * kChunkElems;
     }
 
     __aicore__ inline void PublishNormalizedQKPair(int64_t pair)
     {
         if (pair >= 2) {
             // Reuse this parity only after the pair-2 generation was consumed.
-            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(pair - 2));
+            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair - 2));
         }
         // The two Producer AIVs set the same mode-0 generation once per pair.
         // No immediate wait: Consumer reads are synchronized independently.
-        SetMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(pair));
+        CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair));
     }
 
     __aicore__ inline void CompleteNormalizedQK(int64_t first)
@@ -282,10 +255,10 @@ private:
         }
         // Only the final two local generations can remain unconsumed here.
         if (globalPairs >= 2) {
-            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 2));
+            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 2));
         }
         if (globalPairs >= 1) {
-            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 1));
+            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 1));
         }
     }
 
@@ -304,9 +277,7 @@ private:
         // Publish this slot's K/Q L1 reads without draining them here. The
         // matching inverse waits this event before reusing the UB as L/X.
         SetFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
-        if (td_.useNorm != 0) {
-            PublishNormalizedQKPair(pair);
-        }
+        PublishNormalizedQKPair(pair);
     }
 
     __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
@@ -324,7 +295,7 @@ private:
                               td_.keyHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(eventBase);
         CopyGmToUb(ubG_[gateSlot], gmG_, gateOffset, rows);
-        CopyGmToUb(ubBetaInput_[gateSlot], gmBeta_, gateOffset, rows);
+        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, gateOffset, rows);
         SetFlag<HardEvent::MTE2_V>(eventBase + 1);
         CopyGmToUb(ubQ_[slot], gmQ_,
                    OffsetBhtd(loc_.batch, loc_.kh, window.tokenStart,
@@ -339,11 +310,11 @@ private:
         const uint32_t slot = static_cast<uint32_t>(pair & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(pair % 3);
         const uint32_t rows = static_cast<uint32_t>(window.rows);
-        if (rows < ChunkSize) {
-            Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), ChunkSizeElems);
-            Duplicate(ubQ_[slot], static_cast<bfloat16_t>(0), ChunkSizeElems);
-            Duplicate(ubG_[gateSlot], 0.0f, ChunkSize);
-            Duplicate(ubBetaInput_[gateSlot], static_cast<BetaT>(0), ChunkSize);
+        if (rows < kChunk) {
+            Duplicate(ubK_[slot], static_cast<bfloat16_t>(0), kChunkElems);
+            Duplicate(ubQ_[slot], static_cast<bfloat16_t>(0), kChunkElems);
+            Duplicate(ubG_[gateSlot], 0.0f, kChunk);
+            Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
             SetFlag<HardEvent::V_MTE2>(0);
             WaitFlag<HardEvent::V_MTE2>(0);
         }
@@ -366,9 +337,6 @@ private:
         if (td_.hasDtBias != 0) {
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
-        if constexpr (std::is_same<BetaT, bfloat16_t>::value) {
-            Cast(ubBeta_[gateSlot], ubBetaInput_[gateSlot], RoundMode::CAST_NONE, ChunkSize);
-        }
         if (td_.gateSoftplus != 0 || td_.betaSigmoid != 0) {
             PrepareGateBetaVF(ubG_[gateSlot], ubBeta_[gateSlot], aLog, dtBias,
                               td_.gateSoftplus != 0, td_.betaSigmoid != 0,
@@ -378,10 +346,10 @@ private:
             ? PrepareCumsumAndCheckRatio<true>(gateSlot, window.rows)
             : PrepareCumsumAndCheckRatio<false>(gateSlot, window.rows);
         if (td_.useExp2 != 0) {
-            GateRatioVF<true, ChunkSize>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
+            GateRatioVF<true>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
                               ubEnergyRecip_[gateSlot], useEnergyRatio);
         } else {
-            GateRatioVF<false, ChunkSize>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
+            GateRatioVF<false>(ubRatio_[ratioSlot], ubG_[gateSlot], ubEnergy_[gateSlot],
                                ubEnergyRecip_[gateSlot], useEnergyRatio);
         }
     }
@@ -389,7 +357,7 @@ private:
     template <bool UseExp2>
     __aicore__ inline bool PrepareCumsumAndCheckRatio(uint32_t gateSlot, int64_t rows)
     {
-        CumsumEnergyVF<UseExp2, ChunkSize>(ubG_[gateSlot], ubEnergy_[gateSlot],
+        CumsumEnergyVF<UseExp2>(ubG_[gateSlot], ubEnergy_[gateSlot],
                                 ubEnergyRecip_[gateSlot], ubShift_);
         return GateRatioSafe(ubG_[gateSlot], ubScratch_, static_cast<uint32_t>(rows));
     }
@@ -402,17 +370,11 @@ private:
         const uint32_t l1Slot = static_cast<uint32_t>(pair % 3);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
         WaitFlag<HardEvent::MTE2_V>(eventBase + 2);
-        if (td_.useNorm != 0) {
-            NormalizeRowsNzVF<true, ChunkSize>(ubQ_[slot], ubQHat_[slot], ubKRstd_[gateSlot]);
-        }
+        NormalizeRowsNzVF(ubQ_[slot], ubQHat_[slot], ubKRstd_[gateSlot]);
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
-        if (td_.useNorm != 0) {
-            CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], ChunkSize, kDim, ChunkSize, 0);
-            DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], ChunkSizeElems);
-        } else {
-            UploadNdToL1(l1QHat_[l1Slot], ubQ_[slot], ChunkSize, kDim, ChunkSize, 0);
-        }
+        CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], kChunk, kDim, kChunk, 0);
+        DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], kChunkElems);
         AivPublish(kProdQ);
     }
 
@@ -424,17 +386,11 @@ private:
         const uint32_t l1Slot = static_cast<uint32_t>(pair % 3);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
         WaitFlag<HardEvent::MTE2_V>(eventBase);
-        if (td_.useNorm != 0) {
-            NormalizeRowsNzVF<true, ChunkSize>(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot]);
-        } else {
-            NormalizeRowsNzVF<false, ChunkSize>(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot]);
-        }
+        NormalizeRowsNzVF(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot]);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], ChunkSize, kDim, ChunkSize, 0);
-        if (td_.useNorm != 0) {
-            DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], ChunkSizeElems);
-        }
+        CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], kChunk, kDim, kChunk, 0);
+        DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], kChunkElems);
         AivPublish(kProdK);
     }
 
@@ -446,17 +402,12 @@ private:
         const ChunkWindow window = WindowOf(loc_, chunk);
         DataCopyExtParams params{};
         params.blockCount = static_cast<uint16_t>(rows);
-        params.blockLen = ChunkSize * sizeof(bfloat16_t);
+        params.blockLen = kChunk * sizeof(bfloat16_t);
         params.srcStride = 0;
         params.dstStride = 0;
         params.rsv = 0;
-        int64_t offset = 0;
-        if constexpr (ChunkSize == 64) {
-            offset = OffsetBhtd(loc_.batch, loc_.hv, window.tokenStart,
-                                td_.valueHeads, td_.tokens, ChunkSize);
-        } else {
-            offset = MatrixOffset(chunk);
-        }
+        const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window.tokenStart,
+                                          td_.valueHeads, td_.tokens, kChunk);
         DataCopyPad(gmT_[offset], src, params);
     }
 
@@ -469,8 +420,8 @@ private:
         // Wait only for this chunk's preprocess L1 uploads before reusing its
         // normalized K/Q UB as L/X. Do not drain the next pair's uploads.
         WaitFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
-        InverseChunkVF<ChunkSize>(ubKkt_, ubL_[slot], ubX_[slot], ubRatio_[slot], ubBeta_[gateSlot], ubEye_);
-        Cast(ubABf_[slot], ubX_[slot], RoundMode::CAST_RINT, ChunkSizeMatrix);
+        Inverse64VF(ubKkt_, ubL_[slot], ubX_[slot], ubRatio_[slot], ubBeta_[gateSlot], ubEye_);
+        Cast(ubABf_[slot], ubX_[slot], RoundMode::CAST_RINT, kMatrixElems);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         WriteT(chunk, static_cast<uint32_t>(window.rows), ubABf_[slot]);
@@ -482,11 +433,12 @@ private:
         const int64_t pair = chunk >> 1;
         const uint32_t slot = static_cast<uint32_t>(pair & 1);
         AivWait(kProdQK);
-        APrimeNzVF<ChunkSize>(ubQk_, ubAPrime_[slot], ubRatio_[slot]);
+        APrimeNzVF(ubQk_, ubAPrime_[slot], ubRatio_[slot]);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        const int64_t offset = MatrixOffset(chunk);
-        DataCopy(gmAPrime_[offset], ubAPrime_[slot], ChunkSizeMatrix);
+        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
+        const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads);
+        DataCopy(gmAPrime_[offset], ubAPrime_[slot], kMatrixElems);
         // This MTE3 event covers both T and APrime in the slot. It is consumed
         // by preprocess two pairs later, or by the chain-tail drain.
         SetFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
@@ -497,9 +449,9 @@ private:
     {
         const uint32_t l1Slot = static_cast<uint32_t>((chunk >> 1) % 3);
         AicWaitOwner(chunk, kProdQ);
-        ComputeMm(l1QHat_[l1Slot], l1K_[l1Slot], l0A0_, l0B1_, l0C1_, ChunkSize, ChunkSize, kDim,
+        ComputeMm(l1QHat_[l1Slot], l1K_[l1Slot], l0A0_, l0B1_, l0C1_, 64, 64, 128,
                   false, false);
-        FixF32(ubQk_, l0C1_, ChunkSize, ChunkSize, (chunk & 1) != 0);
+        FixF32(ubQk_, l0C1_, 64, 64, (chunk & 1) != 0);
         ReleaseL0C();
         AicPublishToOwner(chunk, kProdQK);
     }
@@ -508,9 +460,9 @@ private:
     {
         const uint32_t l1Slot = static_cast<uint32_t>((chunk >> 1) % 3);
         AicWaitOwner(chunk, kProdK);
-        ComputeMm(l1K_[l1Slot], l1K_[l1Slot], l0A0_, l0B0_, l0C0_, ChunkSize, ChunkSize, kDim,
+        ComputeMm(l1K_[l1Slot], l1K_[l1Slot], l0A0_, l0B0_, l0C0_, 64, 64, 128,
                   false, false);
-        FixF32(ubKkt_, l0C0_, ChunkSize, ChunkSize, (chunk & 1) != 0);
+        FixF32(ubKkt_, l0C0_, 64, 64, (chunk & 1) != 0);
         ReleaseL0C();
         AicPublishToOwner(chunk, kProdKkt);
     }
@@ -520,14 +472,12 @@ private:
     uint32_t sub_{0};
 
     GlobalTensor<bfloat16_t> gmK_, gmQ_, gmT_, gmAPrime_, gmNormQ_, gmNormK_;
-    GlobalTensor<float> gmG_;
-    GlobalTensor<BetaT> gmBeta_;
+    GlobalTensor<float> gmG_, gmBeta_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 
     LocalTensor<bfloat16_t> ubK_[2], ubKHat_[2];
     LocalTensor<bfloat16_t> ubQ_[2], ubQHat_[2];
     LocalTensor<bfloat16_t> ubABf_[2], ubAPrime_[2];
-    LocalTensor<BetaT> ubBetaInput_[3];
     LocalTensor<float> ubKkt_, ubQk_, ubL_[2], ubX_[2], ubRatio_[2];
     LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3], ubEnergyRecip_[3];
     LocalTensor<float> ubScratch_, ubEye_;

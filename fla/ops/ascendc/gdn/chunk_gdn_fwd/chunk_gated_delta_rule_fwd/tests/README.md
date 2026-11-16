@@ -33,11 +33,10 @@ bash tests/run_lightweight.sh --compare-chain --device 0
 # DUT、CPU golden、NPU 拼接三路对齐
 bash tests/run_lightweight.sh --compare-cpu --compare-chain --device 0
 
-# chunk32 Producer-only benchmark：与 chunk64 共用 ProducerRole 模板，Consumer 空跑
-# 不比较 O/final_state，仅记录初始化和执行耗时
-bash tests/run_lightweight.sh --chunk-size 32 --performance --device 0
+# chunk32 DUT + CPU golden
+bash tests/run_lightweight.sh --chunk-size 32 --device 0
 
-# chunk32 指定 warmup/repeat
+# chunk32 仅性能：跳过所有比较，执行 warmup + repeat
 bash tests/run_lightweight.sh \
   --chunk-size 32 --performance --warmup 5 --repeat 20 --device 0
 
@@ -63,13 +62,13 @@ bash tests/run_lightweight.sh \
   --repeat 3 --warmup 1 --save-tensors --device 0
 ```
 
-- `--no-l2norm`：关闭默认开启的核内 Q/K L2Norm。
+- 核内 Q/K L2Norm 固定开启，不提供关闭选项。
 - `--no-initial-state` / `--no-final-state`：关闭初始/最终状态。
 - `--initial-dtype bf16`：使用 BF16 初态和末态。
 - `--allow-neg-eigval`：要求同时指定 `--beta-sigmoid`。
 - `--cu-seqlens 0,31,96,129`：覆盖自定义变长边界。
 - `--diff-thd/--pct-thd/--max-diff-hd`：混合容差，默认 `0.001/0.0001/0.1`，即绝对误差小于 `0.001` 直接通过、相对误差阈值为 `0.001`、至少 99.99% 元素通过、最大混合误差小于 0.1。
-- `--chunk-size 32`：Producer-only benchmark，与 chunk64 共用 `ProducerRole<ChunkSize,BetaT>`，仅改变 chunk 大小和必要的 BF16 beta 输入转换，Consumer 空跑。不会比较 O/final_state，即使未显式指定 `--performance` 也禁用 CPU/NPU-chain 比较；建议始终搭配 `--performance`。不支持 `--compare-chain`、`--use-exp2`、`--no-l2norm` 和 chunk64 调试 dump 选项。
+- `--chunk-size 32`：测试 chunk32 DUT+CPU 路径；自动启用 L2Norm 和 beta sigmoid，设置 `disable_recompute=false`、`return_intermediate_states=false`，并跳过未导出的 `g_cumsum/A/h`。chunk32 不支持 `--compare-chain`、`--use-exp2` 和 chunk64 调试 dump 选项。
 - `--performance`：跳过 CPU golden 和所有比较，只记录 DUT 初始化、warmup/repeat、同步和耗时。
 - `--seed`：固定输入随机种子，默认 19。
 - `--gate-scale`：负 gate 的幅值，默认 0.05；设为 100 可覆盖累积极负时的 exp 下溢场景。

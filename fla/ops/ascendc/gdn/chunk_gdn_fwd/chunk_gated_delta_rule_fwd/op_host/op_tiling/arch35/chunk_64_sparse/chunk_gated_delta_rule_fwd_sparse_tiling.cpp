@@ -164,7 +164,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Sparse key64 requires AIC cores."),
                 return ge::GRAPH_FAILED);
 
-    const bool norm = SparseBool(attrs, 10);
     const bool betaSigmoid = SparseBool(attrs, 12);
     const bool writeH = SparseBool(attrs, 14);
     for (size_t index : {size_t(9), size_t(10), size_t(11), size_t(12), size_t(13)}) {
@@ -183,14 +182,12 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid h output shape."),
                 return ge::GRAPH_FAILED);
-    if (norm) {
-        OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(4), {batch, hk, tokens, 128}) ||
-                        !SparseShapeTolerant(context->GetOutputShape(5), {batch, hk, tokens, 128}) ||
-                        !SparseShapeTolerant(context->GetOutputShape(6), {batch, hk, tokens}) ||
-                        !SparseShapeTolerant(context->GetOutputShape(7), {batch, hk, tokens}),
-                    OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid norm output shape."),
-                    return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(4), {batch, hk, tokens, 128}) ||
+                    !SparseShapeTolerant(context->GetOutputShape(5), {batch, hk, tokens, 128}) ||
+                    !SparseShapeTolerant(context->GetOutputShape(6), {batch, hk, tokens}) ||
+                    !SparseShapeTolerant(context->GetOutputShape(7), {batch, hk, tokens}),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid norm output shape."),
+                return ge::GRAPH_FAILED);
 
     ChunkGatedDeltaRuleFwdPipelinePlan plan{};
     const bool pipeline = BuildChunkGatedDeltaRuleFwdPipelinePlan(
@@ -220,8 +217,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.chainCount = static_cast<uint32_t>(totalChains);
     td.maxChunks = plan.maxChunks;
     td.launchGroups = 2U * td.chainCount;
-    td.chunkSize = 64;
-    td.useNorm = norm;
     td.gateSoftplus = context->GetOptionalInputShape(10) != nullptr ||
                       context->GetOptionalInputShape(11) != nullptr;
     td.betaSigmoid = betaSigmoid;
@@ -238,9 +233,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                   : (std::getenv("GDN_SPARSE_DEBUG_OL") != nullptr ? 2U
                   : (std::getenv("GDN_SPARSE_DEBUG_OS") != nullptr ? 3U
                   : (std::getenv("GDN_SPARSE_DEBUG_SCALARS") != nullptr ? 4U : 0U)));
-    if (std::getenv("GDN_SPARSE_DEBUG_ND_VNRIGHT") != nullptr) {
-        td.reserved |= GdnChunk64Sparse::kSparseDebugNdVnRight;
-    }
     const double *scale = attrs->GetAttrPointer<double>(2);
     td.scale = scale == nullptr ? 1.0f : static_cast<float>(*scale);
     const auto *initialDesc = context->GetOptionalInputDesc(7);
@@ -276,7 +268,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace size overflow."),
                 return ge::GRAPH_FAILED);
     td.workspaceOffset = cursor;
-    td.internalTOffset = 0;
     OP_CHECK_IF(!CheckedAddU64(cursor, aPrimeBytes, &cursor),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace allocation failed."),
                 return ge::GRAPH_FAILED);

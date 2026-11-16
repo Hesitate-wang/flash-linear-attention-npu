@@ -52,13 +52,13 @@ Producer UB occupies 216 KiB per AIV, including the persistent 16 KiB identity m
 
 ## 5. Normalized Q/K exchange
 
-For `useNorm=1`, Producer preprocess writes each full 64x128 normalized Q/K tile to independent BF16 NZ GM workspace records at `normalizedQKOffset`; K storage follows Q storage. There is one record per global chunk and key head, so no Consumer acknowledgement is required before Producer reuses its on-chip slots.
+Producer preprocess always performs L2Norm and writes each full 64x128 normalized Q/K tile to independent BF16 NZ GM workspace records at `normalizedQKOffset`; K storage follows Q storage. There is one record per global chunk and key head, so no Consumer acknowledgement is required before Producer reuses its on-chip slots.
 
 Readiness is an AIV mode-0 generation per pair. Both Producer AIVs set the same flag after their even/odd Q/K GM stores, using alternating flag IDs 14 and 15. Producer waits only before reusing the pair-2 flag generation and drains at most the final two generations. Short and empty chains publish dummy generations.
 
-Consumer first prepares G/Beta and Vb. At each even chunk, both Consumer AIVs join and wait for that pair, then issue the even and odd QHat/KHat GM transfers back-to-back into two UB slots with distinct MTE2 completion events. The even chunk is consumed first; the following odd chunk consumes its already-issued transfer without another pair wait or GM issue. Invalid even chunks join without loading. `useNorm=0` bypasses this entire exchange and retains the original raw-input path.
+Consumer first prepares G/Beta and Vb. At each even chunk, both Consumer AIVs join and wait for that pair, then issue the even and odd QHat/KHat GM transfers back-to-back into two UB slots with distinct MTE2 completion events. The even chunk is consumed first; the following odd chunk consumes its already-issued transfer without another pair wait or GM issue. Invalid even chunks join without loading. Consumer never repeats L2Norm; it only applies gate energy and beta to the normalized inputs.
 
-After the GM-to-UB transfer, K's UB-to-L1 MTE3 is issued before Kbg and QExp Vector scaling. These operations only read the same UB, so there is no immediate MTE3-to-Vector drain. The K upload is awaited only before that UB is overwritten or at chain teardown.
+K and Q have independent MTE2-to-Vector readiness events. K's UB-to-L1 MTE3 is issued before Kbg without waiting for Q. Kbg and QExp use separate V_MTE3 events for their W/QExp uploads, and W/OSB releases are tracked separately. K's input upload is awaited only before that UB is overwritten or at chain teardown.
 
 ## 6. Consumer: prepare in L1, then fuse W/U and FwdO
 
@@ -95,11 +95,3 @@ Short and empty Producer chains still join every valid global AIC generation. Wh
 ## 8. Numeric order
 
 KKT, QKT, gate processing, gate ratios and the complete inverse remain FP32. Inverse clamping is applied only while constructing L; the shared QKMask ratio remains unmodified. T and APrime are BF16. Consumer W/U and subsequent Cube operations use BF16 inputs with FP32 accumulation. Kbg's negation changes only representation: `U + (-trueW)@S` is algebraically identical to `U - trueW@S`.
-
-## 9. Chunk32 Producer-only benchmark
-
-The chunk32 host path serializes the same `FusedTilingData` and launches `2*chainCount` MIX groups, but device dispatch calls `RunProducerOnly32Pipeline`. Consumer groups remain idle, so public O/final_state are intentionally not validated.
-
-Both chunk sizes instantiate the same `ProducerRole<ChunkSize,BetaT>` and the same normalize, cumsum, safe gate-ratio, forward-substitution, QKMask, buffer-slot and synchronization implementations. `ChunkSize` changes only matrix dimensions, row counts, strides and the number of eight-row inverse groups. On-chip buffer offsets and capacities remain identical to isolate size-related work from layout changes.
-
-Chunk64 uses `ProducerRole<64,float>`. Chunk32 uses `ProducerRole<32,bfloat16_t>` because its public beta input is BF16; beta is converted to the same FP32 gate buffer before the shared beta/gate processing. Chunk32 T uses `internalTOffset` instead of the chunk64 internal `args.a` allocation. APrime and normalized Q/K use the same workspace layout with 32-row dimensions.

@@ -52,7 +52,6 @@ def parse_args() -> argparse.Namespace:
                         help="Magnitude of negative raw gates; large values stress exp underflow")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=0)
-    parser.add_argument("--no-l2norm", action="store_true")
     parser.add_argument("--use-exp2", action="store_true")
     parser.add_argument("--beta-sigmoid", action="store_true")
     parser.add_argument("--allow-neg-eigval", action="store_true")
@@ -110,8 +109,8 @@ def parse_args() -> argparse.Namespace:
     if args.chunk_size == 32:
         if args.compare_chain:
             parser.error("chunk_size=32 does not support the Prepare reference chain")
-        if args.use_exp2 or args.no_l2norm:
-            parser.error("chunk_size=32 requires use_exp2=false and kernel L2Norm")
+        if args.use_exp2:
+            parser.error("chunk_size=32 requires use_exp2=false")
         if args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars:
             parser.error("chunk64 debug dump modes are unavailable for chunk_size=32")
     return args
@@ -148,13 +147,8 @@ def case_config(args: argparse.Namespace, name: str) -> dict:
     else:
         config["compare_cpu"] = args.compare_cpu
         config["compare_chain"] = args.compare_chain
-    config["l2norm"] = not args.no_l2norm
     if config["chunk_size"] == 32:
         config["beta_sigmoid"] = True
-        # Chunk32 is a Producer-only benchmark path; Consumer groups are idle,
-        # so public O/final_state are intentionally not compared.
-        config["compare_cpu"] = False
-        config["compare_chain"] = False
     config["initial_state"] = not args.no_initial_state
     config["final_state"] = not args.no_final_state
     return config
@@ -210,14 +204,10 @@ def make_inputs(config: dict, cu: tuple[int, ...] | None) -> dict:
 
 def effective_inputs(inputs: dict, config: dict) -> dict:
     q, k = inputs["q"], inputs["k"]
-    if config["l2norm"]:
-        q_rstd = torch.rsqrt(q.float().square().sum(dim=-1) + 1e-6)
-        k_rstd = torch.rsqrt(k.float().square().sum(dim=-1) + 1e-6)
-        q_hat = (q.float() * q_rstd.unsqueeze(-1)).to(torch.bfloat16)
-        k_hat = (k.float() * k_rstd.unsqueeze(-1)).to(torch.bfloat16)
-    else:
-        q_rstd = k_rstd = None
-        q_hat, k_hat = q, k
+    q_rstd = torch.rsqrt(q.float().square().sum(dim=-1) + 1e-6)
+    k_rstd = torch.rsqrt(k.float().square().sum(dim=-1) + 1e-6)
+    q_hat = (q.float() * q_rstd.unsqueeze(-1)).to(torch.bfloat16)
+    k_hat = (k.float() * k_rstd.unsqueeze(-1)).to(torch.bfloat16)
     beta = inputs["beta"].float()
     if config["beta_sigmoid"]:
         beta = torch.sigmoid(beta)
@@ -317,9 +307,8 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
         result["final_state"] = final.to(DTYPES[config["initial_dtype"]] if initial is not None else torch.float32)
     if config["beta_sigmoid"]:
         result["beta_eff"] = effective["beta"].float()
-    if config["l2norm"]:
-        result.update({"q_hat": effective["q"], "k_hat": effective["k"],
-                       "q_rstd": effective["q_rstd"], "k_rstd": effective["k_rstd"]})
+    result.update({"q_hat": effective["q"], "k_hat": effective["k"],
+                   "q_rstd": effective["q_rstd"], "k_rstd": effective["k_rstd"]})
     return result
 
 
@@ -479,7 +468,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 npu_inputs["q"], npu_inputs["k"], npu_inputs["v"],
                 npu_inputs["g"], npu_inputs["beta"],
                 chunk_size=64, use_exp2=config["use_exp2"],
-                use_qk_l2norm_in_kernel=config["l2norm"],
+                use_qk_l2norm_in_kernel=True,
                 use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
                 disable_recompute=False, **common)
 

@@ -33,7 +33,7 @@ No output ABI change. Stable Python continues returning `(o, final_state, g_cums
 
 ## Compatibility
 
-- Chunk32 key 32 is a Producer-only benchmark: it launches the same Producer/Consumer group layout but instantiates the shared `ProducerRole<32,bfloat16_t>`; Consumer groups stay idle and public O/final_state are not validated. Chunk64 behavior is unchanged.
+- Chunk32 key 32 and its constraints are unchanged.
 - Phase6 keys 1, 2, and 301 and their workspace layout are unchanged.
 - All calls not matching the complete new predicate retain existing dispatch and validation.
 - The new route requires a private tiling key and POD, with host/device predicate parity.
