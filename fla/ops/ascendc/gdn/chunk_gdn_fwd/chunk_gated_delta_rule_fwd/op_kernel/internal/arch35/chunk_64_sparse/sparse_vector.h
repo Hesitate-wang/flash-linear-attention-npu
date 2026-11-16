@@ -124,7 +124,7 @@ __aicore__ inline void PrepareGateBetaVF(LocalTensor<float> &g,
     }
 }
 
-template <bool UseExp2>
+template <bool UseExp2, uint32_t ChunkSize = 64>
 __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
                                       LocalTensor<float> &energy,
                                       LocalTensor<float> &energyRecip,
@@ -136,32 +136,33 @@ __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
     __ubuf__ uint32_t *sAddr = reinterpret_cast<__ubuf__ uint32_t *>(shift.GetPhyAddr());
     __VEC_SCOPE__
     {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t chunkCount = ChunkSize;
+        MaskReg chunkMask = UpdateMask<float>(chunkCount);
         RegTensor<float> value, gathered;
         RegTensor<uint32_t> index;
-        LoadAlign(value, gAddr);
+        LoadAlign(value, gAddr, chunkMask);
         if constexpr (UseExp2) {
-            Muls(value, value, kSparseRcpLn2, all);
+            Muls(value, value, kSparseRcpLn2, chunkMask);
         }
-        for (uint16_t stage = 0; stage < 6; ++stage) {
+        for (uint16_t stage = 0; stage < (ChunkSize == 64 ? 6 : 5); ++stage) {
             LoadAlign(index, sAddr + static_cast<uint32_t>(stage) * 64);
             Gather(gathered, value, index);
             uint32_t lowerCount = 1U << stage;
             MaskReg lower = UpdateMask<float>(lowerCount);
             MaskReg active;
-            Xor(active, all, lower, all);
+            Xor(active, chunkMask, lower, chunkMask);
             Add<float, MaskMergeMode::MERGING>(value, value, gathered, active);
         }
-        StoreAlign(gAddr, value, all);
+        StoreAlign(gAddr, value, chunkMask);
         if constexpr (UseExp2) {
-            Muls(value, value, kSparseLn2, all);
+            Muls(value, value, kSparseLn2, chunkMask);
         }
-        Exp(value, value, all);
-        StoreAlign(eAddr, value, all);
+        Exp(value, value, chunkMask);
+        StoreAlign(eAddr, value, chunkMask);
         RegTensor<float> one, reciprocal;
-        Duplicate(one, 1.0f, all);
-        Div(reciprocal, one, value, all);
-        StoreAlign(rAddr, reciprocal, all);
+        Duplicate(one, 1.0f, chunkMask);
+        Div(reciprocal, one, value, chunkMask);
+        StoreAlign(rAddr, reciprocal, chunkMask);
     }
 }
 
@@ -260,18 +261,18 @@ __aicore__ inline void StoreNdEvenOdd(__ubuf__ bfloat16_t *dst, uint32_t row,
     StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(dst + row * 128, lo, 1, m128);
 }
 
-__aicore__ inline void StoreNzEvenOdd64(__ubuf__ bfloat16_t *nz, uint32_t row,
-                                        RegTensor<float> &even, RegTensor<float> &odd,
-                                        MaskReg &m16, MaskReg &m128)
+__aicore__ inline void StoreNzEvenOddRows(__ubuf__ bfloat16_t *nz, uint32_t row,
+                                          RegTensor<float> &even, RegTensor<float> &odd,
+                                          MaskReg &m16, MaskReg &m128, uint32_t totalRows)
 {
     RegTensor<bfloat16_t> lo, hi;
     Cast<bfloat16_t, float, GdnFwd32::kCastB322B16>(lo, even, m16);
     Cast<bfloat16_t, float, GdnFwd32::kCastB322B16Hi>(hi, odd, m16);
     Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)hi, m16);
-    StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(nz + row * 16, lo, kChunk, m128);
+    StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(nz + row * 16, lo, totalRows, m128);
 }
 
-template <bool Normalize>
+template <bool Normalize, uint32_t ChunkSize = 64>
 __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
                                          LocalTensor<bfloat16_t> &nzOutput,
                                          LocalTensor<float> &rstd)
@@ -288,7 +289,7 @@ __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
         MaskReg m128 = UpdateMask<bfloat16_t>(n128);
         RegTensor<float> even, odd, sum0, sum1, one, scale;
         Duplicate(one, 1.0f, all);
-        for (uint16_t row = 0; row < kChunk; ++row) {
+        for (uint16_t row = 0; row < ChunkSize; ++row) {
             GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
             if constexpr (Normalize) {
                 Mul(sum0, even, even, all);
@@ -303,7 +304,7 @@ __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
                 Mul(odd, odd, scale, all);
                 StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, sum0, scalar);
             }
-            StoreNzEvenOdd64(nz, row, even, odd, m16, m128);
+            StoreNzEvenOddRows(nz, row, even, odd, m16, m128, ChunkSize);
         }
     }
 }
@@ -568,7 +569,7 @@ __aicore__ inline void ScaleKbgVF(LocalTensor<bfloat16_t> &k,
 
 // Build the full 64x64 pairwise gate-ratio matrix once per chunk. Inverse and
 // QKMask consume the same FP32 ratios before the next pair overwrites the slot.
-template <bool UseExp2>
+template <bool UseExp2, uint32_t ChunkSize = 64>
 __aicore__ inline void GateRatioVF(LocalTensor<float> &ratio,
                                    LocalTensor<float> &g,
                                    LocalTensor<float> &energy,
@@ -581,14 +582,15 @@ __aicore__ inline void GateRatioVF(LocalTensor<float> &ratio,
     __ubuf__ float *rcpAddr = reinterpret_cast<__ubuf__ float *>(energyRecip.GetPhyAddr());
     __VEC_SCOPE__
     {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t chunkCount = ChunkSize;
+        MaskReg all = UpdateMask<float>(chunkCount);
         RegTensor<float> invJ, gI, diff, value;
         if (useEnergyRatio) {
             LoadAlign(invJ, rcpAddr);
         } else {
             LoadAlign(invJ, gAddr);
         }
-        for (uint16_t row = 0; row < kChunk; ++row) {
+        for (uint16_t row = 0; row < ChunkSize; ++row) {
             if (useEnergyRatio) {
                 LoadAlign<float, LoadDist::DIST_BRC_B32>(gI, eAddr + row);
                 Mul(value, gI, invJ, all);
@@ -600,7 +602,7 @@ __aicore__ inline void GateRatioVF(LocalTensor<float> &ratio,
                 }
                 Exp(value, diff, all);
             }
-            StoreAlign(r + static_cast<uint32_t>(row) * 64, value, all);
+            StoreAlign(r + static_cast<uint32_t>(row) * ChunkSize, value, all);
         }
     }
 }
@@ -608,7 +610,8 @@ __aicore__ inline void GateRatioVF(LocalTensor<float> &ratio,
 // A=(I-L)^-1 for one complete 64x64 chunk. The owner AIV performs forward
 // substitution directly on 64-lane vectors; no diagonal split or Cube coupling
 // is involved. X starts as identity and each group reuses all earlier X rows.
-__aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
+template <uint32_t ChunkSize>
+__aicore__ inline void InverseChunkVF(LocalTensor<float> &kkt,
                                    LocalTensor<float> &lower,
                                    LocalTensor<float> &a,
                                    LocalTensor<float> &ratio,
@@ -623,52 +626,54 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
     __ubuf__ float *eyeAddr = reinterpret_cast<__ubuf__ float *>(eye.GetPhyAddr());
     __VEC_SCOPE__
     {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        uint32_t chunkCount = ChunkSize;
+        MaskReg all = UpdateMask<float>(chunkCount);
         RegTensor<float> bi, gate, score, zero, expLo, expHi;
         Duplicate(zero, 0.0f, all);
         Duplicate(expLo, 1.92874985e-22f, all);
         Duplicate(expHi, 5.18470553e21f, all);
-        for (uint16_t row = 0; row < kChunk; ++row) {
+        for (uint16_t row = 0; row < ChunkSize; ++row) {
             LoadAlign<float, LoadDist::DIST_BRC_B32>(bi, b + row);
-            LoadAlign(gate, r + static_cast<uint32_t>(row) * 64);
+            LoadAlign(gate, r + static_cast<uint32_t>(row) * ChunkSize);
             Max(gate, gate, expLo, all);
             Min(gate, gate, expHi, all);
             Mul(gate, gate, bi, all);
             Muls(gate, gate, -1.0f, all);
-            LoadAlign(score, kk + static_cast<uint32_t>(row) * 64);
+            LoadAlign(score, kk + static_cast<uint32_t>(row) * ChunkSize);
             Mul(gate, gate, score, all);
             uint32_t lowerCount = row;
             MaskReg lowerMask = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lowerMask);
-            StoreAlign(l + static_cast<uint32_t>(row) * 64, gate, all);
+            StoreAlign(l + static_cast<uint32_t>(row) * ChunkSize, gate, all);
         }
     }
     PipeBarrier<PIPE_V>();
 #define SPARSE_SOLVE_PREV(dst, rr)                                                                                     \
     LoadAlign<float, LoadDist::DIST_BRC_B32>(coefficient,                                                             \
-        l + (base + (rr)) * 64 + col);                                                                                 \
+        l + (base + (rr)) * ChunkSize + col);                                                                                 \
     MulAddDst(dst, previous, coefficient, all);
 #define SPARSE_SOLVE_LOCAL(dst, src, rr, cc)                                                                           \
     LoadAlign<float, LoadDist::DIST_BRC_B32>(coefficient,                                                             \
-        l + (base + (rr)) * 64 + base + (cc));                                                                         \
+        l + (base + (rr)) * ChunkSize + base + (cc));                                                                         \
     MulAddDst(dst, src, coefficient, all);
-    for (uint16_t group = 0; group < 8; ++group) {
+    for (uint16_t group = 0; group < ChunkSize / 8; ++group) {
         const uint32_t base = static_cast<uint32_t>(group) * 8;
         __VEC_SCOPE__
         {
-            MaskReg all = CreateMask<float, MaskPattern::ALL>();
+            uint32_t chunkCount = ChunkSize;
+            MaskReg all = UpdateMask<float>(chunkCount);
             RegTensor<float> y0, y1, y2, y3, y4, y5, y6, y7;
             RegTensor<float> previous, coefficient;
-            LoadAlign(y0, eyeAddr + (base + 0) * 64);
-            LoadAlign(y1, eyeAddr + (base + 1) * 64);
-            LoadAlign(y2, eyeAddr + (base + 2) * 64);
-            LoadAlign(y3, eyeAddr + (base + 3) * 64);
-            LoadAlign(y4, eyeAddr + (base + 4) * 64);
-            LoadAlign(y5, eyeAddr + (base + 5) * 64);
-            LoadAlign(y6, eyeAddr + (base + 6) * 64);
-            LoadAlign(y7, eyeAddr + (base + 7) * 64);
+            LoadAlign(y0, eyeAddr + (base + 0) * ChunkSize);
+            LoadAlign(y1, eyeAddr + (base + 1) * ChunkSize);
+            LoadAlign(y2, eyeAddr + (base + 2) * ChunkSize);
+            LoadAlign(y3, eyeAddr + (base + 3) * ChunkSize);
+            LoadAlign(y4, eyeAddr + (base + 4) * ChunkSize);
+            LoadAlign(y5, eyeAddr + (base + 5) * ChunkSize);
+            LoadAlign(y6, eyeAddr + (base + 6) * ChunkSize);
+            LoadAlign(y7, eyeAddr + (base + 7) * ChunkSize);
             for (uint16_t col = 0; col < base; ++col) {
-                LoadAlign(previous, x + static_cast<uint32_t>(col) * 64);
+                LoadAlign(previous, x + static_cast<uint32_t>(col) * ChunkSize);
                 SPARSE_SOLVE_PREV(y0, 0)
                 SPARSE_SOLVE_PREV(y1, 1)
                 SPARSE_SOLVE_PREV(y2, 2)
@@ -706,14 +711,14 @@ __aicore__ inline void Inverse64VF(LocalTensor<float> &kkt,
             SPARSE_SOLVE_LOCAL(y7, y4, 7, 4)
             SPARSE_SOLVE_LOCAL(y7, y5, 7, 5)
             SPARSE_SOLVE_LOCAL(y7, y6, 7, 6)
-            StoreAlign(x + (base + 0) * 64, y0, all);
-            StoreAlign(x + (base + 1) * 64, y1, all);
-            StoreAlign(x + (base + 2) * 64, y2, all);
-            StoreAlign(x + (base + 3) * 64, y3, all);
-            StoreAlign(x + (base + 4) * 64, y4, all);
-            StoreAlign(x + (base + 5) * 64, y5, all);
-            StoreAlign(x + (base + 6) * 64, y6, all);
-            StoreAlign(x + (base + 7) * 64, y7, all);
+            StoreAlign(x + (base + 0) * ChunkSize, y0, all);
+            StoreAlign(x + (base + 1) * ChunkSize, y1, all);
+            StoreAlign(x + (base + 2) * ChunkSize, y2, all);
+            StoreAlign(x + (base + 3) * ChunkSize, y3, all);
+            StoreAlign(x + (base + 4) * ChunkSize, y4, all);
+            StoreAlign(x + (base + 5) * ChunkSize, y5, all);
+            StoreAlign(x + (base + 6) * ChunkSize, y6, all);
+            StoreAlign(x + (base + 7) * ChunkSize, y7, all);
         }
         PipeBarrier<PIPE_V>();
     }
@@ -783,6 +788,7 @@ __aicore__ inline void BuildNeumannInputVF(LocalTensor<float> &kkt,
     }
 }
 
+template <uint32_t ChunkSize>
 __aicore__ inline void APrimeNzVF(LocalTensor<float> &qk,
                                   LocalTensor<bfloat16_t> &out,
                                   LocalTensor<float> &ratio)
@@ -792,19 +798,19 @@ __aicore__ inline void APrimeNzVF(LocalTensor<float> &qk,
     __ubuf__ float *r = reinterpret_cast<__ubuf__ float *>(ratio.GetPhyAddr());
     __VEC_SCOPE__
     {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        uint32_t n64 = 64;
-        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
+        uint32_t chunkCount = ChunkSize;
+        MaskReg all = UpdateMask<float>(chunkCount);
+        MaskReg mChunk = UpdateMask<bfloat16_t>(chunkCount);
         RegTensor<float> gate, raw, zero;
         Duplicate(zero, 0.0f, all);
-        for (uint16_t row = 0; row < kChunk; ++row) {
-            LoadAlign(raw, score + static_cast<uint32_t>(row) * 64);
-            LoadAlign(gate, r + static_cast<uint32_t>(row) * 64);
+        for (uint16_t row = 0; row < ChunkSize; ++row) {
+            LoadAlign(raw, score + static_cast<uint32_t>(row) * ChunkSize);
+            LoadAlign(gate, r + static_cast<uint32_t>(row) * ChunkSize);
             Mul(gate, gate, raw, all);
             uint32_t lowerCount = row + 1U;
             MaskReg lower = UpdateMask<float>(lowerCount);
             Select(gate, gate, zero, lower);
-            StoreBf16Nz64(nz, row, gate, all, m64, kChunk);
+            StoreBf16Nz64(nz, row, gate, all, mChunk, ChunkSize);
         }
     }
 }

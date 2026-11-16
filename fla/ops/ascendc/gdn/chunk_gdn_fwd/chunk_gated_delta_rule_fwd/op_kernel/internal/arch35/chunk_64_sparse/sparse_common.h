@@ -58,6 +58,7 @@ struct ChainLoc {
     int64_t kh;
     int64_t chunkBase;
     int64_t chunks;
+    int64_t chunkSize;
     int64_t tokenBegin;
     int64_t tokenEnd;
     int64_t tailRows;
@@ -106,6 +107,8 @@ __aicore__ inline ChainLoc ResolveChain(const FusedTilingData &td, GM_ADDR cuSeq
                                         uint32_t chainIdx)
 {
     ChainLoc loc{};
+    const int64_t chunkSize = td.chunkSize == 0 ? kChunk : static_cast<int64_t>(td.chunkSize);
+    loc.chunkSize = chunkSize;
     loc.hv = static_cast<int64_t>(chainIdx) % td.valueHeads;
     const int64_t sequence = static_cast<int64_t>(chainIdx) / td.valueHeads;
     loc.kh = loc.hv / (td.valueHeads / td.keyHeads);
@@ -118,13 +121,13 @@ __aicore__ inline ChainLoc ResolveChain(const FusedTilingData &td, GM_ADDR cuSeq
         int64_t prefix = 0;
         for (int64_t s = 0; s < sequence; ++s) {
             const int64_t len = cu.GetValue(s + 1) - cu.GetValue(s);
-            prefix += len > 0 ? (len + kChunk - 1) / kChunk : 0;
+            prefix += len > 0 ? (len + chunkSize - 1) / chunkSize : 0;
         }
         loc.tokenBegin = cu.GetValue(sequence);
         loc.tokenEnd = cu.GetValue(sequence + 1);
         loc.chunkBase = prefix;
         loc.chunks = loc.tokenEnd > loc.tokenBegin
-                         ? (loc.tokenEnd - loc.tokenBegin + kChunk - 1) / kChunk
+                         ? (loc.tokenEnd - loc.tokenBegin + chunkSize - 1) / chunkSize
                          : 0;
     } else {
         loc.chunkBase = sequence * td.chunksPerBatch;
@@ -133,15 +136,15 @@ __aicore__ inline ChainLoc ResolveChain(const FusedTilingData &td, GM_ADDR cuSeq
         loc.tokenEnd = td.tokens;
     }
     const int64_t length = loc.tokenEnd > loc.tokenBegin ? loc.tokenEnd - loc.tokenBegin : 0;
-    loc.tailRows = length == 0 ? 0 : (length - 1) % kChunk + 1;
+    loc.tailRows = length == 0 ? 0 : (length - 1) % chunkSize + 1;
     return loc;
 }
 
 __aicore__ inline ChunkWindow WindowOf(const ChainLoc &loc, int64_t localChunk)
 {
     ChunkWindow window{};
-    window.tokenStart = loc.tokenBegin + localChunk * kChunk;
-    window.rows = loc.chunks == 0 ? 0 : (localChunk == loc.chunks - 1 ? loc.tailRows : kChunk);
+    window.tokenStart = loc.tokenBegin + localChunk * loc.chunkSize;
+    window.rows = loc.chunks == 0 ? 0 : (localChunk == loc.chunks - 1 ? loc.tailRows : loc.chunkSize);
     return window;
 }
 

@@ -25,11 +25,13 @@ struct FusedTilingData {
     int64_t chunksPerBatch;
     int64_t workspaceOffset;
     int64_t normalizedQKOffset;
+    int64_t internalTOffset;
     int64_t workspaceBytes;
     float scale;
     uint32_t chainCount;
     uint32_t maxChunks;
     uint32_t launchGroups;
+    uint32_t chunkSize;
     uint32_t useNorm;
     uint32_t gateSoftplus;
     uint32_t betaSigmoid;

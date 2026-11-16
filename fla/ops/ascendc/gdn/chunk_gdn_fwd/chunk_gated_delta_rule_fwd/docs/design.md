@@ -95,3 +95,11 @@ Short and empty Producer chains still join every valid global AIC generation. Wh
 ## 8. Numeric order
 
 KKT, QKT, gate processing, gate ratios and the complete inverse remain FP32. Inverse clamping is applied only while constructing L; the shared QKMask ratio remains unmodified. T and APrime are BF16. Consumer W/U and subsequent Cube operations use BF16 inputs with FP32 accumulation. Kbg's negation changes only representation: `U + (-trueW)@S` is algebraically identical to `U - trueW@S`.
+
+## 9. Chunk32 Producer-only benchmark
+
+The chunk32 host path serializes the same `FusedTilingData` and launches `2*chainCount` MIX groups, but device dispatch calls `RunProducerOnly32Pipeline`. Consumer groups remain idle, so public O/final_state are intentionally not validated.
+
+Both chunk sizes instantiate the same `ProducerRole<ChunkSize,BetaT>` and the same normalize, cumsum, safe gate-ratio, forward-substitution, QKMask, buffer-slot and synchronization implementations. `ChunkSize` changes only matrix dimensions, row counts, strides and the number of eight-row inverse groups. On-chip buffer offsets and capacities remain identical to isolate size-related work from layout changes.
+
+Chunk64 uses `ProducerRole<64,float>`. Chunk32 uses `ProducerRole<32,bfloat16_t>` because its public beta input is BF16; beta is converted to the same FP32 gate buffer before the shared beta/gate processing. Chunk32 T uses `internalTOffset` instead of the chunk64 internal `args.a` allocation. APrime and normalized Q/K use the same workspace layout with 32-row dimensions.

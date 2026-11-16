@@ -220,6 +220,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.chainCount = static_cast<uint32_t>(totalChains);
     td.maxChunks = plan.maxChunks;
     td.launchGroups = 2U * td.chainCount;
+    td.chunkSize = 64;
     td.useNorm = norm;
     td.gateSoftplus = context->GetOptionalInputShape(10) != nullptr ||
                       context->GetOptionalInputShape(11) != nullptr;
@@ -275,6 +276,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace size overflow."),
                 return ge::GRAPH_FAILED);
     td.workspaceOffset = cursor;
+    td.internalTOffset = 0;
     OP_CHECK_IF(!CheckedAddU64(cursor, aPrimeBytes, &cursor),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace allocation failed."),
                 return ge::GRAPH_FAILED);

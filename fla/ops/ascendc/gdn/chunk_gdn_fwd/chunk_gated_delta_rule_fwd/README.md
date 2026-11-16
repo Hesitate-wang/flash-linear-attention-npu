@@ -93,7 +93,7 @@ Python 接受 `a_log=None, dt_bias=None` 预留参数；当前仅支持
 - A2（`ascend910b`）、A3（`ascend910_93`）、A5（`ascend950`）。
 - 原 Phase6 路径支持 FP16、BF16，`K=128`、`V=128/256`、`chunkSize=64/128`。
 - A5 三算子路径支持 `useExp2=true/false`、`useQkL2norm=true/false`、BF16、`K=V=128`、`chunkSize=64`、`Hv/Hk in {1,2,3,4}`。
-- `chunkSize=32` 仅 A5，走独立融合 kernel。限制为 BF16 的 q/k/v/beta/o、FP32 的 g、`K=V=128`，并且必须 `useExp2=false`、`useQkL2norm=true`、核内 beta sigmoid。`allowNegEigval` 与 `stateVFirst` 均可为 true/false；前者为 true 时使用 `2*sigmoid(beta)`，不导出 `betaEff`。layout 支持 `BNSD/BSND/NTD/TND`：BSND/TND 的 q/k/v 在 ACLNN 转为 head-major 后进核，g/beta 由 `[B,T,Hv]` 转为 `[B,Hv,T]` 后进核，o 固定 BSND。不导出 g_cumsum、A、beta_eff、h、q_hat、k_hat 和 rstd，因此 `disable_recompute=false`、`return_intermediate_states=false`，aLog/dtBias 必须为空；稳定入口仍返回十元组，除 o 和可选 final_state 外均为 None。支持 MHA、GVA（`Hv` 能被 `Hk` 整除）、定长和变长，变长要求物理 `B=1`。初始状态可选，dtype 为 BF16 或 FP32：无初始状态或 FP32 初始状态时最终状态为 FP32，BF16 初始状态时最终状态为 BF16。
+- `chunkSize=32` 仅 A5，当前为 Producer-only 性能测试路径：与 chunk64 共用 `ProducerRole<ChunkSize,BetaT>`，Consumer group 空跑，不保证 O/final_state。输入限制保持 BF16 q/k/v/beta/o、FP32 g、`K=V=128`、`useExp2=false`、`useQkL2norm=true`、核内 beta sigmoid；beta 在 Producer 内转换为 FP32 后复用 chunk64 gate/ratio/inverse 实现。支持 MHA、GVA、定长和变长，变长要求物理 `B=1`，且每个 `(sequence,value-head)` chain 可分配一对 Producer/Consumer MIX groups。该路径仅用于与 chunk64 比较 Producer 耗时，不用于精度验收。
 - 支持 MHA、GVA、定长和变长序列。
 - A2/A3 使用 `arch22` 私有实现，A5 使用 `arch35` 私有实现；两套架构代码隔离维护。
 

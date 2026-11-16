@@ -3,11 +3,14 @@
  * CANN Open Software License Agreement Version 2.0.
  */
 #include "chunk_gated_delta_rule_fwd_32_tiling_data.h"
+#include "../chunk_64_sparse/chunk_gated_delta_rule_fwd_sparse_tiling.h"
+#include "../../../../op_kernel/internal/arch35/chunk_64_sparse/sparse_fused_tiling.h"
 
 #include "platform/platform_ascendc.h"
 #include "register/op_impl_registry.h"
 #include "tiling_base/tiling_templates_registry.h"
 #include <algorithm>
+#include <limits>
 
 namespace optiling {
 namespace {
@@ -31,7 +34,6 @@ constexpr size_t ATTR_ALLOW_NEG_EIGVAL = 8;
 
 constexpr int64_t CHUNK_SIZE = 32;
 constexpr int64_t HEAD_DIM = 128;
-constexpr uint64_t DEFAULT_WORKSPACE_BYTES = 16ULL * 1024ULL * 1024ULL;
 constexpr uint64_t TILING_KEY = 32;
 
 bool IsShape(const gert::StorageShape *shape, std::initializer_list<int64_t> dims)
@@ -134,7 +136,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdChunk32(gert::TilingContext *cont
     OP_CHECK_IF(hasCu != hasChunks,
                 OP_LOGE(context->GetNodeName(), "Chunk32 varlen metadata must be paired."),
                 return ge::GRAPH_FAILED);
-    uint32_t seqNum = 0;
     int64_t stateBatch = batch;
     if (hasCu) {
         const gert::Shape &cu = cuShape->GetStorageShape();
@@ -147,7 +148,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdChunk32(gert::TilingContext *cont
                     OP_LOGE(context->GetNodeName(), "Chunk32 varlen metadata descriptor is invalid."),
                     return ge::GRAPH_FAILED);
         stateBatch = cu.GetDim(0) - 1;
-        seqNum = static_cast<uint32_t>(stateBatch);
     }
     // ACLNN validates the logical state shape. Executor-owned/output tensors
     // may reach tiling with a flattened storage descriptor, so do not repeat
@@ -179,35 +179,112 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdChunk32(gert::TilingContext *cont
                     return ge::GRAPH_FAILED);
     }
 
-    auto *tiling = context->GetTilingData<ChunkGatedDeltaRuleFwd32TilingData>();
+    auto *tiling = context->GetTilingData<GdnChunk64Sparse::FusedTilingData>();
     OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
-    tiling->B = static_cast<uint32_t>(batch);
-    tiling->HV = static_cast<uint32_t>(valueHeads);
-    tiling->HK = static_cast<uint32_t>(keyHeads);
-    tiling->T = static_cast<uint32_t>(tokens);
-    tiling->hasInitial = hasInitial;
-    tiling->scale = static_cast<float>(*scale);
-    tiling->seqNum = seqNum;
-    tiling->initialFp32 = initialFp32;
-    tiling->finalFp32 = stateDtype == ge::DT_FLOAT ? 1U : 0U;
-    const bool *stateVFirst = context->GetAttrs()->GetAttrPointer<bool>(ATTR_STATE_V_FIRST);
-    tiling->stateVFirst = stateVFirst != nullptr && *stateVFirst ? 1U : 0U;
-    const bool *allowNeg = context->GetAttrs()->GetAttrPointer<bool>(ATTR_ALLOW_NEG_EIGVAL);
-    tiling->allowNegEigval = allowNeg != nullptr && *allowNeg ? 1U : 0U;
+    GdnChunk64Sparse::FusedTilingData &td = *tiling;
+    td = {};
 
-    uint32_t aicNum = 1;
-    uint64_t workspaceBytes = DEFAULT_WORKSPACE_BYTES;
+    uint64_t chunkCount = 0;
+    if (hasCu) {
+        chunkCount = static_cast<uint64_t>(chunkShape->GetStorageShape().GetDim(0) / 2);
+    } else if (!CheckedMulU64(static_cast<uint64_t>(batch),
+                              static_cast<uint64_t>((tokens + CHUNK_SIZE - 1) / CHUNK_SIZE),
+                              &chunkCount)) {
+        OP_LOGE(context->GetNodeName(), "Chunk32 chunk count overflow.");
+        return ge::GRAPH_FAILED;
+    }
     const platform_ascendc::PlatformAscendC platform(context->GetPlatformInfo());
-    workspaceBytes = platform.GetLibApiWorkSpaceSize();
-    aicNum = std::max<uint32_t>(static_cast<uint32_t>(platform.GetCoreNumAic()), 1U);
-    const uint32_t blockDim =
-        std::min<uint32_t>(static_cast<uint32_t>(batch * valueHeads), aicNum);
-    tiling->coreNum = blockDim;
+    const uint32_t aicNum = std::max<uint32_t>(static_cast<uint32_t>(platform.GetCoreNumAic()), 1U);
+    uint64_t totalChains = 0;
+    OP_CHECK_IF(chunkCount == 0 ||
+                    !CheckedMulU64(static_cast<uint64_t>(stateBatch),
+                                   static_cast<uint64_t>(valueHeads), &totalChains) ||
+                    totalChains == 0 || totalChains > std::numeric_limits<uint32_t>::max() ||
+                    totalChains > aicNum / 2,
+                OP_LOGE(context->GetNodeName(),
+                        "Chunk32 Producer-only benchmark requires two MIX groups per chain."),
+                return ge::GRAPH_FAILED);
+
+    td.batch = batch;
+    td.sequenceCount = stateBatch;
+    td.keyHeads = keyHeads;
+    td.valueHeads = valueHeads;
+    td.tokens = tokens;
+    td.totalChunks = static_cast<int64_t>(chunkCount);
+    td.chunksPerBatch = hasCu ? 0 : (tokens + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    td.scale = static_cast<float>(*scale);
+    td.chainCount = static_cast<uint32_t>(totalChains);
+    td.maxChunks = hasCu ? static_cast<uint32_t>(chunkCount)
+                         : static_cast<uint32_t>((tokens + CHUNK_SIZE - 1) / CHUNK_SIZE);
+    td.launchGroups = 2U * td.chainCount;
+    td.chunkSize = CHUNK_SIZE;
+    td.useNorm = 1;
+    td.gateSoftplus = 0;
+    td.betaSigmoid = 1;
+    const bool *allowNeg = context->GetAttrs()->GetAttrPointer<bool>(ATTR_ALLOW_NEG_EIGVAL);
+    td.allowNegEigval = allowNeg != nullptr && *allowNeg ? 1U : 0U;
+    td.useExp2 = 0;
+    td.outputA = 0;
+    td.storeFinalState = 0;
+    const bool *stateVFirst = context->GetAttrs()->GetAttrPointer<bool>(ATTR_STATE_V_FIRST);
+    td.stateVFirst = stateVFirst != nullptr && *stateVFirst ? 1U : 0U;
+    td.stateFp32 = initialFp32 != 0 || hasInitial == 0;
+    td.varlen = hasCu ? 1U : 0U;
+    td.hasALog = 0;
+    td.hasDtBias = 0;
+    td.reserved = 0;
+    td.writeH = 0;
+
+    if (hasCu) {
+        const auto *cuTensor = context->GetOptionalInputTensor(INPUT_CU_SEQLENS);
+        const int64_t *cuData = cuTensor == nullptr ? nullptr : cuTensor->GetData<int64_t>();
+        if (cuData != nullptr) {
+            uint32_t perChainMax = 0;
+            for (int64_t seq = 0; seq < stateBatch; ++seq) {
+                const int64_t length = cuData[seq + 1] - cuData[seq];
+                const uint32_t chunks = length <= 0 ? 0U
+                    : static_cast<uint32_t>((length + CHUNK_SIZE - 1) / CHUNK_SIZE);
+                perChainMax = chunks > perChainMax ? chunks : perChainMax;
+            }
+            if (perChainMax > 0 && perChainMax < td.maxChunks) {
+                td.maxChunks = perChainMax;
+            }
+        }
+    }
+
+    uint64_t aPrimeBytes = 0;
+    uint64_t tBytes = 0;
+    uint64_t normalizedTensorBytes = 0;
+    OP_CHECK_IF(!CheckedMulU64(chunkCount, static_cast<uint64_t>(valueHeads), &aPrimeBytes) ||
+                    !CheckedMulU64(aPrimeBytes, CHUNK_SIZE * CHUNK_SIZE * sizeof(uint16_t), &aPrimeBytes) ||
+                    !CheckedMulU64(chunkCount, static_cast<uint64_t>(valueHeads), &tBytes) ||
+                    !CheckedMulU64(tBytes, CHUNK_SIZE * CHUNK_SIZE * sizeof(uint16_t), &tBytes) ||
+                    !CheckedMulU64(chunkCount, static_cast<uint64_t>(keyHeads), &normalizedTensorBytes) ||
+                    !CheckedMulU64(normalizedTensorBytes, CHUNK_SIZE * HEAD_DIM * sizeof(uint16_t),
+                                   &normalizedTensorBytes),
+                OP_LOGE(context->GetNodeName(), "Chunk32 benchmark workspace size overflow."),
+                return ge::GRAPH_FAILED);
+    uint64_t cursor = 0;
+    td.workspaceOffset = cursor;
+    td.internalTOffset = aPrimeBytes;
+    td.normalizedQKOffset = td.internalTOffset + tBytes;
+    uint64_t normalizedBytes = 0;
+    OP_CHECK_IF(!CheckedMulU64(normalizedTensorBytes, 2, &normalizedBytes) ||
+                    !CheckedAddU64(td.normalizedQKOffset, normalizedBytes, &cursor),
+                OP_LOGE(context->GetNodeName(), "Chunk32 benchmark workspace allocation failed."),
+                return ge::GRAPH_FAILED);
+    td.workspaceBytes = cursor;
+
     size_t *workspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, workspace);
-    workspace[0] = workspaceBytes;
+    uint64_t totalWorkspace = 0;
+    OP_CHECK_IF(workspace == nullptr ||
+                    !CheckedAddU64(cursor, platform.GetLibApiWorkSpaceSize(), &totalWorkspace) ||
+                    totalWorkspace > std::numeric_limits<size_t>::max(),
+                OP_LOGE(context->GetNodeName(), "Chunk32 benchmark workspace is invalid."),
+                return ge::GRAPH_FAILED);
+    workspace[0] = static_cast<size_t>(totalWorkspace);
     context->SetTilingKey(TILING_KEY);
-    context->SetBlockDim(blockDim);
+    context->SetBlockDim(td.launchGroups);
     context->SetScheduleMode(1);
     return ge::GRAPH_SUCCESS;
 }

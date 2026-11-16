@@ -151,6 +151,10 @@ def case_config(args: argparse.Namespace, name: str) -> dict:
     config["l2norm"] = not args.no_l2norm
     if config["chunk_size"] == 32:
         config["beta_sigmoid"] = True
+        # Chunk32 is a Producer-only benchmark path; Consumer groups are idle,
+        # so public O/final_state are intentionally not compared.
+        config["compare_cpu"] = False
+        config["compare_chain"] = False
     config["initial_state"] = not args.no_initial_state
     config["final_state"] = not args.no_final_state
     return config
