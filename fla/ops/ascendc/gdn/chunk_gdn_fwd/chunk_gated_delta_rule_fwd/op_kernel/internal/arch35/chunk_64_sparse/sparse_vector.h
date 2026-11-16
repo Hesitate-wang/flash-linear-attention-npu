@@ -140,7 +140,7 @@ __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
         MaskReg chunkMask = UpdateMask<float>(chunkCount);
         RegTensor<float> value, gathered;
         RegTensor<uint32_t> index;
-        LoadAlign(value, gAddr, chunkMask);
+        LoadAlign(value, gAddr);
         if constexpr (UseExp2) {
             Muls(value, value, kSparseRcpLn2, chunkMask);
         }
