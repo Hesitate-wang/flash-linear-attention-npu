@@ -30,8 +30,12 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
     if ASCEND_IS_AIV {
-        for (int64_t chunk = 0; chunk < chunks; ++chunk) {
-            role.RunChunk(chunk);
+        for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
+            if (iteration < chunks) {
+                role.RunChunk(iteration);
+            } else {
+                role.JoinNormalizedQKGeneration(iteration);
+            }
         }
     }
     if ASCEND_IS_AIC {

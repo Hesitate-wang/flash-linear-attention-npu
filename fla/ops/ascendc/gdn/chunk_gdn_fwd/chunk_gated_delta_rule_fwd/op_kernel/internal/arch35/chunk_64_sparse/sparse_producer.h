@@ -35,6 +35,13 @@ public:
         gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
             GetUserWorkspace(args.workspace) + td.workspaceOffset));
+        if (td.useNorm != 0) {
+            gmNormQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+                GetUserWorkspace(args.workspace) + td.normalizedQKOffset));
+            gmNormK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+                GetUserWorkspace(args.workspace) + td.normalizedQKOffset +
+                td.totalChunks * td.keyHeads * kChunkElems * sizeof(bfloat16_t)));
+        }
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
         }
@@ -91,6 +98,9 @@ public:
                 // At most the last two output events remain unconsumed. Earlier
                 // events were consumed by their same-slot preprocess.
                 WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + lastSlot);
+            }
+            if (td_.useNorm != 0) {
+                CompleteNormalizedQK(first);
             }
         }
         if ASCEND_IS_AIC {
@@ -219,6 +229,43 @@ private:
         }
     }
 
+    __aicore__ inline int64_t NormalizedQKChunkOffset(int64_t chunk) const
+    {
+        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
+        return (tile * td_.keyHeads + loc_.kh) * kChunkElems;
+    }
+
+    __aicore__ inline void PublishNormalizedQKPair(int64_t pair)
+    {
+        if (pair >= 2) {
+            // Reuse this parity only after the pair-2 generation was consumed.
+            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair - 2));
+        }
+        // The two Producer AIVs set the same mode-0 generation once per pair.
+        // No immediate wait: Consumer reads are synchronized independently.
+        CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair));
+    }
+
+    __aicore__ inline void CompleteNormalizedQK(int64_t first)
+    {
+        const int64_t globalPairs = (td_.maxChunks + 1) / 2;
+        int64_t nextPair = 0;
+        if (first < loc_.chunks) {
+            const int64_t last = first + ((loc_.chunks - 1 - first) >> 1) * 2;
+            nextPair = (last >> 1) + 1;
+        }
+        for (int64_t pair = nextPair; pair < globalPairs; ++pair) {
+            PublishNormalizedQKPair(pair);
+        }
+        // Only the final two local generations can remain unconsumed here.
+        if (globalPairs >= 2) {
+            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 2));
+        }
+        if (globalPairs >= 1) {
+            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 1));
+        }
+    }
+
     __aicore__ inline void PrepareLoadedInputs(int64_t chunk)
     {
         const int64_t pair = chunk >> 1;
@@ -234,6 +281,9 @@ private:
         // Publish this slot's K/Q L1 reads without draining them here. The
         // matching inverse waits this event before reusing the UB as L/X.
         SetFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
+        if (td_.useNorm != 0) {
+            PublishNormalizedQKPair(pair);
+        }
     }
 
     __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
@@ -333,6 +383,7 @@ private:
         WaitFlag<HardEvent::V_MTE3>(1);
         if (td_.useNorm != 0) {
             CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], kChunk, kDim, kChunk, 0);
+            DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], kChunkElems);
         } else {
             UploadNdToL1(l1QHat_[l1Slot], ubQ_[slot], kChunk, kDim, kChunk, 0);
         }
@@ -355,6 +406,9 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], kChunk, kDim, kChunk, 0);
+        if (td_.useNorm != 0) {
+            DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], kChunkElems);
+        }
         AivPublish(kProdK);
     }
 
@@ -435,7 +489,7 @@ private:
     ChainLoc loc_{};
     uint32_t sub_{0};
 
-    GlobalTensor<bfloat16_t> gmK_, gmQ_, gmT_, gmAPrime_;
+    GlobalTensor<bfloat16_t> gmK_, gmQ_, gmT_, gmAPrime_, gmNormQ_, gmNormK_;
     GlobalTensor<float> gmG_, gmBeta_;
     GlobalTensor<float> gmALog_, gmDtBias_;
 

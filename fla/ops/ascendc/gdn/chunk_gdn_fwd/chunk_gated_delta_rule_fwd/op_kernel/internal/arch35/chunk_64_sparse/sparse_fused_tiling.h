@@ -24,6 +24,7 @@ struct FusedTilingData {
     int64_t totalChunks;
     int64_t chunksPerBatch;
     int64_t workspaceOffset;
+    int64_t normalizedQKOffset;
     int64_t workspaceBytes;
     float scale;
     uint32_t chainCount;

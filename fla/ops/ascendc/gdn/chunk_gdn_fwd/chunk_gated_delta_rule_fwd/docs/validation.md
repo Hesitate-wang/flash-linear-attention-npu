@@ -4,9 +4,11 @@
 
 Producer AIV0/AIV1 own complete even/odd 64-row chunks. Each round preprocesses the owner's next chunk, issues independent MTE2 loads for the following round, performs one complete FP32 64x64 Vector inverse and executes QKMask. Producer AIC executes KKT and QKT for the even/odd pair. There are no 32x32 diagonal solves, Cube coupling operations or serial scheduling paths.
 
-A persistent 64x64 identity matrix is built once during Producer initialization and loaded by every inverse group. Preprocess and inverse use opposite local-pair buffer slots. The Producer UB layout occupies 216 KiB per AIV within a 248 KiB budget; Producer L1 occupies 96 KiB. Consumer behavior is unchanged: it prepares negative Kbg/Vb, recomputes W/U, fuses `U-W@S`, then computes O and the recurrent state update.
+For `useNorm=1`, Producer also publishes BF16 NZ QHat/KHat to independent per-chunk GM records. Consumer waits once per even/odd pair, then preloads the normalized inputs instead of repeating L2Norm. It still computes QExp/Kbg locally from gate energy and beta. The no-norm path remains unchanged.
 
-The internal A/T buffer remains allocated at full `[B,Hv,T,64]` size, including when `aOutOptional` is null. Only valid T rows are written for tails; APrime uses a complete 64x64 NZ workspace tile.
+A persistent 64x64 identity matrix is built once during Producer initialization and loaded by every inverse group. Preprocess and inverse use opposite local-pair buffer slots. The Producer UB layout occupies 216 KiB per AIV within a 248 KiB budget; Producer L1 occupies 96 KiB. Consumer prepares negative Kbg/Vb, recomputes W/U, fuses `U-W@S`, then computes O and the recurrent state update.
+
+The internal A/T buffer remains allocated at full `[B,Hv,T,64]` size, including when `aOutOptional` is null. Only valid T rows are written for tails; APrime uses a complete 64x64 NZ workspace tile. Normalized Q/K use independent BF16 NZ records sized as `totalChunks * Hk * 64 * 128` elements per tensor.
 
 ## Checks completed on the development host
 
@@ -21,6 +23,9 @@ The internal A/T buffer remains allocated at full `[B,Hv,T,64]` size, including 
 | Parity buffer slot schedule | Both owners, chunk counts 1 through 64 | Current/preprocess ratio slots and current/preprocess/load gate slots passed |
 | Odd, short and empty chain schedule | Every chain length for each `maxChunks` from 1 through 64 | Each valid chunk executed once; global generations exactly covered `0..maxChunks-1` |
 | Slot-decoupled MTE3 events | Both owners, chunk counts 1 through 64, plus explicit chunk4/inverse2 boundary | No consecutive Set without Wait, no Wait without Set, no unconsumed tail event; opposite-slot preprocess remained in flight |
+| Normalized Q/K pair protocol | Every chain length for `maxChunks` 1 through 32 | Four AIV participants per pair, including short/empty chains; four eventual Waits and no unmatched flag reuse |
+| BF16 NZ exchange layout | Both 32-row half bands, QExp/Kbg scaling reconstruction, Q/K workspace offsets | Passed |
+| Even/odd normalized prefetch | Every chain length from 1 through 64 | Both chunks issued at the even step with distinct MTE2 events; per-slot K release and tail waits fully paired |
 | Lightweight test scripts | Python 3.12 `py_compile` | Passed |
 | CPU-only lightweight cases | `dense-tail`, `varlen`, `varlen-empty` | CPU golden generation and logging completed; no device DUT was run |
 | Comparison helper | `compare_contract.py` | Passed |

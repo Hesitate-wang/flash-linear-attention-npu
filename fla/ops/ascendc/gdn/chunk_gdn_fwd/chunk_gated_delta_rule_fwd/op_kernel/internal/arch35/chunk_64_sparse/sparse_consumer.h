@@ -33,6 +33,13 @@ public:
         gmT_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.a));
         gmAPrime_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
             GetUserWorkspace(args.workspace) + td.workspaceOffset));
+        if (td.useNorm != 0) {
+            gmNormQ_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+                GetUserWorkspace(args.workspace) + td.normalizedQKOffset));
+            gmNormK_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(
+                GetUserWorkspace(args.workspace) + td.normalizedQKOffset +
+                td.totalChunks * td.keyHeads * kChunkElems * sizeof(bfloat16_t)));
+        }
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
@@ -117,9 +124,24 @@ public:
         RunAfterWu(chunk);
     }
 
+    __aicore__ inline void JoinNormalizedQKGeneration(int64_t chunk)
+    {
+        if ASCEND_IS_AIV {
+            if (td_.useNorm != 0 && (chunk & 1) == 0) {
+                WaitNormalizedQK(chunk);
+            }
+        }
+    }
+
     __aicore__ inline void EndChain()
     {
         if ASCEND_IS_AIV {
+            for (uint32_t slot = 0; slot < 2; ++slot) {
+                if (normalizedKArmed_[slot]) {
+                    WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
+                    normalizedKArmed_[slot] = false;
+                }
+            }
             if (td_.storeFinalState != 0) {
                 const int64_t offset = StateOffset();
                 if (td_.stateFp32 != 0) {
@@ -270,14 +292,21 @@ private:
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
         PrepareNextGate(0, true);
-        PrepareNextQAndQExp(0);
+        if (td_.useNorm != 0) {
+            PrepareNextVb(0);
+            PrepareNormalizedQK(0);
+        } else {
+            PrepareNextQAndQExp(0);
+        }
         ConvertInitialState(); //格式cast
         PrepareCurrentState(0, false);
-        // chunkDecay_ is produced by PrepareNextQAndQExp. H was already published,
+        // chunkDecay_ is produced from the gate energy. H was already published,
         // so this decay cannot change the S used by QS/W@S.
         StateDecayVF(ubStateF_, chunkDecay_[0]);
-        PrepareNextKAndKbg(0);
-        PrepareNextVb(0);
+        if (td_.useNorm == 0) {
+            PrepareNextKAndKbg(0);
+            PrepareNextVb(0);
+        }
         PrepareRightDecay(0);
     }
 
@@ -285,7 +314,12 @@ private:
     {
         if (chunk + 1 < loc_.chunks) {
             PrepareNextGate(chunk + 1);
-            PrepareNextQAndQExp(chunk + 1);
+            if (td_.useNorm != 0) {
+                PrepareNextVb(chunk + 1);
+                PrepareNormalizedQK(chunk + 1);
+            } else {
+                PrepareNextQAndQExp(chunk + 1);
+            }
         }
     }
 
@@ -353,7 +387,7 @@ private:
                         ubO_, params);
         }
 
-        if (chunk + 1 < loc_.chunks) {
+        if (chunk + 1 < loc_.chunks && td_.useNorm == 0) {
             PrepareNextKAndKbg(chunk + 1);
         }
         AivWait(kConsD);
@@ -364,9 +398,95 @@ private:
             // Publish the next H before its QS, then leave Vb as the final
             // independent Vector stage of this round.
             PrepareCurrentState(chunk + 1);
-            PrepareNextVb(chunk + 1);
+            if (td_.useNorm == 0) {
+                PrepareNextVb(chunk + 1);
+            }
             PrepareRightDecay(chunk + 1);
         }
+    }
+
+    __aicore__ inline void WaitNormalizedQK(int64_t chunk)
+    {
+        const int64_t pair = chunk >> 1;
+        // Both Consumer AIVs join once per even chunk. The odd chunk relies on
+        // this same-AIV generation wait and needs no additional synchronization.
+        CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair));
+        CrossCoreWaitFlag<0x0, PIPE_MTE2>(IterationNormalizedQKFlag(pair));
+    }
+
+    __aicore__ inline int64_t NormalizedQKChunkOffset(int64_t chunk) const
+    {
+        const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
+        return (tile * td_.keyHeads + loc_.kh) * kChunkElems;
+    }
+
+    __aicore__ inline void CopyNormalizedGmToUb(LocalTensor<bfloat16_t> dst,
+                                                GlobalTensor<bfloat16_t> src,
+                                                int64_t offset, uint32_t firstRow)
+    {
+        // Eight NZ panels: each source panel has 64 rows, while each Consumer
+        // AIV receives a contiguous 32-row band in UB.
+        DataCopyParams params{8, kHalfRows * 16 * sizeof(bfloat16_t) / 32,
+                              (kChunk - kHalfRows) * 16 * sizeof(bfloat16_t) / 32, 0};
+        DataCopy(dst, src[offset + firstRow * 16], params);
+    }
+
+    __aicore__ inline void IssueNormalizedQKLoad(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * kHalfRows;
+        LocalTensor<bfloat16_t> kBuffer = slot == 0 ? ubKHat_ : ubK_;
+        LocalTensor<bfloat16_t> qBuffer = slot == 0 ? ubQHat_ : ubQ_;
+        if (normalizedKArmed_[slot]) {
+            // This slot's previous K L1 upload must release the UB before the
+            // new GM load overwrites it. The other slot remains independent.
+            WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
+            normalizedKArmed_[slot] = false;
+        }
+        const int64_t offset = NormalizedQKChunkOffset(chunk);
+        CopyNormalizedGmToUb(kBuffer, gmNormK_, offset, firstRow);
+        CopyNormalizedGmToUb(qBuffer, gmNormQ_, offset, firstRow);
+        // Each chunk owns distinct MTE2 completion events. At an even chunk,
+        // the following odd chunk's loads are issued back-to-back with these.
+        SetFlag<HardEvent::MTE2_MTE3>(slot);
+        SetFlag<HardEvent::MTE2_V>(slot);
+    }
+
+    __aicore__ inline void ConsumeNormalizedQK(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * kHalfRows;
+        LocalTensor<bfloat16_t> kBuffer = slot == 0 ? ubKHat_ : ubK_;
+        LocalTensor<bfloat16_t> qBuffer = slot == 0 ? ubQHat_ : ubQ_;
+        WaitFlag<HardEvent::MTE2_MTE3>(slot);
+        CopyNzToL1(l1K_[slot], kBuffer, kHalfRows, kDim, kChunk, firstRow);
+        SetFlag<HardEvent::MTE3_MTE2>(1 + slot);
+        normalizedKArmed_[slot] = true;
+
+        // The odd chunk consumes the load issued by its even predecessor. K's
+        // L1 read and both Vector scaling operations only read this slot's UB.
+        WaitFlag<HardEvent::MTE2_V>(slot);
+        KHatKbgNzVF(kBuffer, ubW_, ubBeta_, ubEnergy_, firstRow);
+        QHatExpNzVF(qBuffer, ubOSB_, ubEnergy_, firstRow);
+        SetFlag<HardEvent::V_MTE3>(0);
+        WaitFlag<HardEvent::V_MTE3>(0);
+        CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
+        CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
+        AivPublish(kConsW);
+    }
+
+    __aicore__ inline void PrepareNormalizedQK(int64_t chunk)
+    {
+        if ((chunk & 1) == 0) {
+            // G/Beta/Vb for the even chunk are ready. Issue both chunks' GM
+            // transfers before consuming the even one to hide the odd load.
+            WaitNormalizedQK(chunk);
+            IssueNormalizedQKLoad(chunk);
+            if (chunk + 1 < loc_.chunks) {
+                IssueNormalizedQKLoad(chunk + 1);
+            }
+        }
+        ConsumeNormalizedQK(chunk);
     }
 
     __aicore__ inline void PrepareNextGate(int64_t chunk, bool includeInitial = false)
@@ -386,8 +506,10 @@ private:
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (rows < kHalfRows) {
-            Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
-            Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            if (td_.useNorm == 0) {
+                Duplicate(ubQ_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+                Duplicate(ubK_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            }
             Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
         if (window.rows < kChunk) {
@@ -430,10 +552,14 @@ private:
 
         // Issue Q/K/V while gate/cumsum and the scalar-safe checks retire.
         // Their consumers below only wait for the corresponding event.
-        CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(1);
-        CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
-        SetFlag<HardEvent::MTE2_V>(2);
+        // No-norm keeps the original raw Q/K path. The normalized path loads
+        // QHat/KHat from the Producer workspace after G/Beta/Vb instead.
+        if (td_.useNorm == 0) {
+            CopyGmToUb(ubQ_, gmQ_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+            SetFlag<HardEvent::MTE2_V>(1);
+            CopyGmToUb(ubK_, gmK_, OffsetBhtd(loc_.batch, loc_.kh, token, td_.keyHeads, td_.tokens), elems);
+            SetFlag<HardEvent::MTE2_V>(2);
+        }
         CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens), elems);
         SetFlag<HardEvent::MTE2_V>(3);
         if (includeInitial) {
@@ -613,9 +739,10 @@ private:
     uint32_t sub_{0};
     bool hasInitial_{false};
     bool gateRatioSafe_{false};
+    bool normalizedKArmed_[2]{false, false};
     float chunkDecay_[2]{};
 
-    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmT_, gmO_, gmAPrime_;
+    GlobalTensor<bfloat16_t> gmQ_, gmK_, gmV_, gmT_, gmO_, gmAPrime_, gmNormQ_, gmNormK_;
     GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
     GlobalTensor<float> gmG_, gmBeta_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
 

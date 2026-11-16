@@ -275,10 +275,27 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace size overflow."),
                 return ge::GRAPH_FAILED);
     td.workspaceOffset = cursor;
-    td.workspaceBytes = aPrimeBytes;
     OP_CHECK_IF(!CheckedAddU64(cursor, aPrimeBytes, &cursor),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "APrime workspace allocation failed."),
                 return ge::GRAPH_FAILED);
+
+    // Full-chunk BF16 NZ QHat/KHat exchanged from Producer to Consumer. Each
+    // tensor owns independent storage for every chunk, so Producer slot reuse
+    // never depends on a Consumer consumption acknowledgement.
+    uint64_t normalizedQKElements = 0;
+    uint64_t normalizedQKBytes = 0;
+    uint64_t normalizedQKTensorsBytes = 0;
+    OP_CHECK_IF(!CheckedMulU64(chunkCount, static_cast<uint64_t>(hk), &normalizedQKElements) ||
+                    !CheckedMulU64(normalizedQKElements, 64 * 128, &normalizedQKElements) ||
+                    !CheckedMulU64(normalizedQKElements, sizeof(uint16_t), &normalizedQKBytes) ||
+                    !CheckedMulU64(normalizedQKBytes, 2, &normalizedQKTensorsBytes),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Normalized Q/K workspace size overflow."),
+                return ge::GRAPH_FAILED);
+    td.normalizedQKOffset = cursor;
+    OP_CHECK_IF(!CheckedAddU64(cursor, normalizedQKTensorsBytes, &cursor),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Normalized Q/K workspace allocation failed."),
+                return ge::GRAPH_FAILED);
+    td.workspaceBytes = cursor;
 
     auto *raw = context->GetRawTilingData();
     auto *workspace = context->GetWorkspaceSizes(1);

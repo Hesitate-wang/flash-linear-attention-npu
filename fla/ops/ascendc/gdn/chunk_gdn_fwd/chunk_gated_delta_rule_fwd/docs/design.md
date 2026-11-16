@@ -4,7 +4,7 @@
 
 This implementation targets Ascend 950 / arch35, BF16 Q/K/V, FP32 gate/beta, `K=V=128`, and low parallelism `B*Hv <= AIC/2`. The public ACLNN ABI and ten-element Python result are unchanged. Every chain has one Producer group and one Consumer group; there is no serial scheduling mode.
 
-The Producer computes KKT, complete 64x64 Vector inverses, QKT and masked attention APrime. It does not compute Kbg/Vb or W/U. Consumer recomputes W/U and fuses `U-W@S` directly in L0C. Only the internal T, APrime workspace, final O and requested final_state reach GM.
+The Producer computes KKT, complete 64x64 Vector inverses, QKT and masked attention APrime. It does not compute Kbg/Vb or W/U. Consumer recomputes W/U and fuses `U-W@S` directly in L0C. Internal T, normalized Q/K and APrime workspace records, final O and requested final_state reach GM.
 
 ## 2. Producer: parity-owned full chunks
 
@@ -50,7 +50,17 @@ MTE3-to-Vector events are slot-specific rather than full-pipe drains. Input even
 
 Producer UB occupies 216 KiB per AIV, including the persistent 16 KiB identity matrix, within the 248 KiB budget. Producer L1 occupies 96 KiB for three full K slots and three full Q slots. No FP32 inverse records remain in L1.
 
-## 5. Consumer: prepare in L1, then fuse W/U and FwdO
+## 5. Normalized Q/K exchange
+
+For `useNorm=1`, Producer preprocess writes each full 64x128 normalized Q/K tile to independent BF16 NZ GM workspace records at `normalizedQKOffset`; K storage follows Q storage. There is one record per global chunk and key head, so no Consumer acknowledgement is required before Producer reuses its on-chip slots.
+
+Readiness is an AIV mode-0 generation per pair. Both Producer AIVs set the same flag after their even/odd Q/K GM stores, using alternating flag IDs 14 and 15. Producer waits only before reusing the pair-2 flag generation and drains at most the final two generations. Short and empty chains publish dummy generations.
+
+Consumer first prepares G/Beta and Vb. At each even chunk, both Consumer AIVs join and wait for that pair, then issue the even and odd QHat/KHat GM transfers back-to-back into two UB slots with distinct MTE2 completion events. The even chunk is consumed first; the following odd chunk consumes its already-issued transfer without another pair wait or GM issue. Invalid even chunks join without loading. `useNorm=0` bypasses this entire exchange and retains the original raw-input path.
+
+After the GM-to-UB transfer, K's UB-to-L1 MTE3 is issued before Kbg and QExp Vector scaling. These operations only read the same UB, so there is no immediate MTE3-to-Vector drain. The K upload is awaited only before that UB is overwritten or at chain teardown.
+
+## 6. Consumer: prepare in L1, then fuse W/U and FwdO
 
 While Producer computes KKT/inverse/QKT, Consumer prepares:
 
@@ -71,7 +81,7 @@ D = K^T @ (vnew * decay)
 
 `FixF32Halves` sends vnew to the two Consumer AIVs for the decayed right computation. D returns to AIV, which performs the FP32 state update and refreshes the BF16 state mirror for the next chunk.
 
-## 6. Synchronization
+## 7. Synchronization
 
 Mode-4 ownership is chunk-relative:
 
@@ -82,6 +92,6 @@ Mode-4 ownership is chunk-relative:
 
 Short and empty Producer chains still join every valid global AIC generation. When `maxChunks` is odd, the nonexistent last lane does not create an extra generation. Consumer T and APrime mode-0 hand-offs remain separate.
 
-## 7. Numeric order
+## 8. Numeric order
 
 KKT, QKT, gate processing, gate ratios and the complete inverse remain FP32. Inverse clamping is applied only while constructing L; the shared QKMask ratio remains unmodified. T and APrime are BF16. Consumer W/U and subsequent Cube operations use BF16 inputs with FP32 accumulation. Kbg's negation changes only representation: `U + (-trueW)@S` is algebraically identical to `U - trueW@S`.

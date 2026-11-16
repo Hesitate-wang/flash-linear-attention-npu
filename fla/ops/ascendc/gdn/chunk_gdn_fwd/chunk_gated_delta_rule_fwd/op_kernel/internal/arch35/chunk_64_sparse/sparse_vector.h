@@ -809,6 +809,71 @@ __aicore__ inline void APrimeNzVF(LocalTensor<float> &qk,
     }
 }
 
+__aicore__ inline void LoadNzEvenOdd(__ubuf__ bfloat16_t *nz, uint32_t row,
+                                     RegTensor<float> &even, RegTensor<float> &odd,
+                                     MaskReg &m16, MaskReg &m128)
+{
+    RegTensor<bfloat16_t> raw;
+    LoadAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(raw, nz + row * 16, kHalfRows, m128);
+    Cast<float, bfloat16_t, GdnFwd32::kCastB162B32>(even, raw, m16);
+    Cast<float, bfloat16_t, GdnFwd32::kCastB162B32Hi>(odd, raw, m16);
+}
+
+__aicore__ inline void QHatExpNzVF(LocalTensor<bfloat16_t> &qHat,
+                                   LocalTensor<bfloat16_t> &out,
+                                   LocalTensor<float> &energy,
+                                   uint32_t firstRow)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(qHat.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> even, odd, scale;
+        for (uint16_t row = 0; row < kHalfRows; ++row) {
+            LoadNzEvenOdd(src, row, even, odd, m16, m128);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
+            Mul(even, even, scale, all);
+            Mul(odd, odd, scale, all);
+            GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
+        }
+    }
+}
+
+__aicore__ inline void KHatKbgNzVF(LocalTensor<bfloat16_t> &kHat,
+                                   LocalTensor<bfloat16_t> &out,
+                                   LocalTensor<float> &beta,
+                                   LocalTensor<float> &energy,
+                                   uint32_t firstRow)
+{
+    __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(kHat.GetPhyAddr());
+    __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(out.GetPhyAddr());
+    __ubuf__ float *b = reinterpret_cast<__ubuf__ float *>(beta.GetPhyAddr());
+    __ubuf__ float *e = reinterpret_cast<__ubuf__ float *>(energy.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
+        uint32_t n128 = 128;
+        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
+        RegTensor<float> even, odd, scale, be;
+        for (uint16_t row = 0; row < kHalfRows; ++row) {
+            LoadNzEvenOdd(src, row, even, odd, m16, m128);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(be, b + firstRow + row);
+            LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, e + firstRow + row);
+            Mul(scale, scale, be, all);
+            Muls(scale, scale, -1.0f, all);
+            Mul(even, even, scale, all);
+            Mul(odd, odd, scale, all);
+            GdnFwd32::StoreNzEvenOdd(nz, row, even, odd, m16, m128);
+        }
+    }
+}
+
 __aicore__ inline void QExpNzVF(LocalTensor<bfloat16_t> &q,
                                 LocalTensor<bfloat16_t> &out,
                                 LocalTensor<float> &energy,

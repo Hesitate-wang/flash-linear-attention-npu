@@ -2,7 +2,7 @@
 
 ## Status
 
-Source-level two-group producer/consumer implementation. The public ACLNN ABI, stable Python signature and ten-element return tuple are unchanged. The internal OpDef adds Prepare inputs, intermediate outputs and attributes; host/device integration uses key 64. For eligible low-parallelism calls (`B*Hv <= AIC/2`), exactly `2*chainCount` MIX groups are launched. Producer AIV0/AIV1 independently own even/odd full chunks, while Producer AIC executes the paired KKT/QKT GEMMs. Each owner performs a complete FP32 64x64 Vector inverse and QKMask; there is no diagonal split or Cube coupling. Consumer recomputes W/U and executes H/O. No serial scheduling mode remains. The revised producer and consumer schedules have no Ascend build, accuracy, synchronization or performance validation yet, so their benefits must not be treated as proven.
+Source-level two-group producer/consumer implementation. The public ACLNN ABI, stable Python signature and ten-element return tuple are unchanged. The internal OpDef adds Prepare inputs, intermediate outputs and attributes; host/device integration uses key 64. For eligible low-parallelism calls (`B*Hv <= AIC/2`), exactly `2*chainCount` MIX groups are launched. Producer AIV0/AIV1 independently own even/odd full chunks, while Producer AIC executes the paired KKT/QKT GEMMs. Each owner performs a complete FP32 64x64 Vector inverse and QKMask; there is no diagonal split or Cube coupling. Consumer receives BF16 normalized Q/K through per-chunk GM workspace records and executes W/U and H/O. No serial scheduling mode remains. The revised producer and consumer schedules have no Ascend build, accuracy, synchronization or performance validation yet, so their benefits must not be treated as proven.
 
 ## Entry and selector
 

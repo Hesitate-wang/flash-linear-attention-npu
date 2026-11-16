@@ -15,6 +15,15 @@ constexpr uint16_t kAiv1FlagOffset = 16;
 constexpr uint16_t kSparseBarrierFlagIdAlt = 12;
 constexpr uint16_t kSparseAPrimeBarrierFlagId = 13;
 constexpr uint16_t kSparseAPrimeBarrierFlagIdAlt = 14;
+// AIV mode-0 QHat/KHat pair readiness. These IDs are not used by either
+// Producer or Consumer mode-4 traffic on AIV; AIC mode-0 has its own namespace.
+constexpr uint16_t kSparseNormalizedQKFlagId = 14;
+constexpr uint16_t kSparseNormalizedQKFlagIdAlt = 15;
+
+__aicore__ inline uint16_t IterationNormalizedQKFlag(int64_t pair)
+{
+    return (pair & 1) != 0 ? kSparseNormalizedQKFlagIdAlt : kSparseNormalizedQKFlagId;
+}
 
 __aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 {
