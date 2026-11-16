@@ -410,8 +410,7 @@ private:
         const int64_t pair = chunk >> 1;
         // Both Consumer AIVs join once per even chunk. The odd chunk relies on
         // this same-AIV generation wait and needs no additional synchronization.
-        CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair));
-        CrossCoreWaitFlag<0x0, PIPE_MTE2>(IterationNormalizedQKFlag(pair));
+        PublishMode0Flag<PIPE_MTE3, PIPE_MTE2>(IterationNormalizedQKFlag(pair));
     }
 
     __aicore__ inline int64_t NormalizedQKChunkOffset(int64_t chunk) const

@@ -239,11 +239,11 @@ private:
     {
         if (pair >= 2) {
             // Reuse this parity only after the pair-2 generation was consumed.
-            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair - 2));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(pair - 2));
         }
         // The two Producer AIVs set the same mode-0 generation once per pair.
         // No immediate wait: Consumer reads are synchronized independently.
-        CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(pair));
+        SetMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(pair));
     }
 
     __aicore__ inline void CompleteNormalizedQK(int64_t first)
@@ -259,10 +259,10 @@ private:
         }
         // Only the final two local generations can remain unconsumed here.
         if (globalPairs >= 2) {
-            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 2));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 2));
         }
         if (globalPairs >= 1) {
-            CrossCoreWaitFlag<0x0, PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 1));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 1));
         }
     }
 

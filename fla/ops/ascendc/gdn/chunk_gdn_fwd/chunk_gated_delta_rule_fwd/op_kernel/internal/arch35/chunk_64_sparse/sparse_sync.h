@@ -25,6 +25,25 @@ __aicore__ inline uint16_t IterationNormalizedQKFlag(int64_t pair)
     return (pair & 1) != 0 ? kSparseNormalizedQKFlagIdAlt : kSparseNormalizedQKFlagId;
 }
 
+template <pipe_t SetPipe>
+__aicore__ inline void SetMode0Flag(uint16_t flagId)
+{
+    // CrossCoreSetFlag<0x0, SetPipe>(flagId);
+}
+
+template <pipe_t WaitPipe>
+__aicore__ inline void WaitMode0Flag(uint16_t flagId)
+{
+    // CrossCoreWaitFlag<0x0, WaitPipe>(flagId);
+}
+
+template <pipe_t SetPipe, pipe_t WaitPipe>
+__aicore__ inline void PublishMode0Flag(uint16_t flagId)
+{
+    SetMode0Flag<SetPipe>(flagId);
+    WaitMode0Flag<WaitPipe>(flagId);
+}
+
 __aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 {
     return (iteration & 1) != 0 ? kSparseBarrierFlagIdAlt : kSparseBarrierFlagId;
@@ -38,7 +57,7 @@ __aicore__ inline uint16_t IterationAPrimeFlag(int64_t iteration)
 __aicore__ inline void SetAPrimeAic(int64_t iteration)
 {
     // if ASCEND_IS_AIC {
-    //     CrossCoreSetFlag<0x0, PIPE_MTE3>(IterationAPrimeFlag(iteration));
+    //     SetMode0Flag<PIPE_MTE3>(IterationAPrimeFlag(iteration));
     // }
 }
 
@@ -46,7 +65,7 @@ template <pipe_t WaitPipe>
 __aicore__ inline void WaitAPrimeAic(int64_t iteration)
 {
     // if ASCEND_IS_AIC {
-    //     CrossCoreWaitFlag<0x0, WaitPipe>(IterationAPrimeFlag(iteration));
+    //     WaitMode0Flag<WaitPipe>(IterationAPrimeFlag(iteration));
     // }
 }
 
@@ -62,7 +81,7 @@ __aicore__ inline void PublishAPrimeAic(int64_t iteration)
 __aicore__ inline void SetIterationAic(int64_t iteration)
 {
     // if ASCEND_IS_AIC {
-    //     CrossCoreSetFlag<0x0, PIPE_FIX>(IterationBarrierFlag(iteration));
+    //     SetMode0Flag<PIPE_FIX>(IterationBarrierFlag(iteration));
     // }
 }
 
@@ -70,7 +89,7 @@ template <pipe_t WaitPipe>
 __aicore__ inline void WaitIterationAic(int64_t iteration)
 {
     // if ASCEND_IS_AIC {
-    //     CrossCoreWaitFlag<0x0, WaitPipe>(IterationBarrierFlag(iteration));
+    //     WaitMode0Flag<WaitPipe>(IterationBarrierFlag(iteration));
     // }
 }
 
