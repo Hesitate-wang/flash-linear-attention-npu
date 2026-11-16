@@ -286,6 +286,12 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdChunk32(gert::TilingContext *cont
     context->SetTilingKey(TILING_KEY);
     context->SetBlockDim(td.launchGroups);
     context->SetScheduleMode(1);
+    OP_LOGD(context->GetNodeName(),
+            "Chunk32 Producer-only: chains=%u maxChunks=%u groups=%u APrimeOffset=%ld TOffset=%ld QKOffset=%ld userWs=%ld totalWs=%ld.",
+            td.chainCount, td.maxChunks, td.launchGroups,
+            static_cast<int64_t>(td.workspaceOffset), static_cast<int64_t>(td.internalTOffset),
+            static_cast<int64_t>(td.normalizedQKOffset), static_cast<int64_t>(td.workspaceBytes),
+            static_cast<int64_t>(totalWorkspace));
     return ge::GRAPH_SUCCESS;
 }
 
