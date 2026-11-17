@@ -101,15 +101,15 @@ public:
         if ASCEND_IS_AIV {
             RunAivPrologue();
         }
-        if ASCEND_IS_AIC {
-            RunCubeQs(0);
-        }
     }
 
     __aicore__ inline void RunPrepare(int64_t chunk)
     {
         if ASCEND_IS_AIV {
             RunAivPrepare(chunk);
+        }
+        if ASCEND_IS_AIC {
+            RunCubeQs(chunk);
         }
     }
 
@@ -685,17 +685,20 @@ private:
     __aicore__ inline void RunCubeQs(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const bool transposeB = td_.stateVFirst == 0;
         AicWaitBoth(kConsS);
         ComputeMm(l1QExp_[slot], l1H_[slot], l0A0_, l0B0_, l0C3_, 64, 64, 128,
-                  false, transposeB);
-        AicWaitBoth(kConsS1);
+                  false, td_.stateVFirst == 0);
+        // Enter W/U/VNew-C1 immediately; H-C2 and QS-C2 are handled later.
+    }
+
+    __aicore__ inline void RunCubeQsSecondHalf(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         LocalTensor<bfloat16_t> hC2 = l1H_[slot][kStateElems / 2];
-        ComputeMm(l1QExp_[slot], hC2, l0A0_, l0B0_, l0C3_[kChunk * kHalfDim],
-                  64, 64, 128, false, transposeB, true, false);
-        // C1/C2 remain in L0C3 for the corresponding O panels. One release
-        // covers both Matrix results; H is reloaded from L1 for W@S later.
-        ReleaseL0C();
+        // l0B0 holds D-C1's prefetched B and l0A1 holds APrime. Use l0B1
+        // for H-C2 so those live operands are preserved.
+        ComputeMm(l1QExp_[slot], hC2, l0A0_, l0B1_, l0C3_[kChunk * kHalfDim],
+                  64, 64, 128, false, td_.stateVFirst == 0, true, false);
     }
 
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
@@ -727,6 +730,7 @@ private:
         LocalTensor<bfloat16_t> uC2 = l1U_[slot][kChunk * kHalfDim];
         ComputeMm(l1T_, uC2, l0A0_, l0B1_, l0C0_[kChunk * kHalfDim],
                   64, 64, 64, false, true, true, false);
+        AicWaitBoth(kConsS1);
         ComputeMm(l1W_[slot], hC2, l0A0_, l0B0_, l0C0_[kChunk * kHalfDim],
                   64, 64, 128, false, transposeState, false);
         LocalTensor<bfloat16_t> l1VNewC2 = l1VNew_[kChunk * kHalfDim];
@@ -746,6 +750,7 @@ private:
                               64, 64, 64, 64, false, true, true, false);
         FixB16ScaledHalves(ubO_, l0C3_, 64, 64, td_.scale);
         AicPublishToBoth(kConsOL);
+        RunCubeQsSecondHalf(chunk);
 
         // D-C1 reuses its prefetched B and prefetches VNew-C2 for O-C2.
         WaitFlag<HardEvent::FIX_MTE1>(1);
@@ -774,10 +779,6 @@ private:
         // One release after D-C2 covers both O panels and both D panels.
         ReleaseL0C();
         AicPublishToBoth(kConsD1);
-
-        if (chunk + 1 < loc_.chunks) {
-            RunCubeQs(chunk + 1);
-        }
     }
 
     FusedTilingData td_{};
