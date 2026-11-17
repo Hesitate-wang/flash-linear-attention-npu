@@ -381,6 +381,22 @@ private:
         PrepareCurrentStateHalf(chunk, 1, applyDecay);
     }
 
+    __aicore__ inline void StoreOutputHalf(int64_t token, uint32_t rows, uint32_t half)
+    {
+        if (rows == 0) {
+            return;
+        }
+        DataCopyExtParams params{};
+        params.blockCount = static_cast<uint16_t>(rows);
+        params.blockLen = kHalfDim * sizeof(bfloat16_t);
+        params.srcStride = 0;
+        params.dstStride = (td_.valueHeads - 1) * kDim * sizeof(bfloat16_t);
+        params.rsv = 0;
+        DataCopyPad(gmO_[OffsetOutput(loc_.batch, token, loc_.hv,
+                                      td_.valueHeads, td_.tokens) + half * kHalfDim],
+                    ubO_[half * kHalfRows * kHalfDim], params);
+    }
+
     __aicore__ inline void RunAivAfterWu(int64_t chunk)
     {
         const ChunkWindow window = WindowOf(loc_, chunk);
@@ -398,6 +414,9 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1Right_, ubRight_, kHalfRows, kHalfDim, kChunk, firstRow);
         AivPublish(kConsRight);
+        const int64_t token = window.tokenStart + firstRow;
+        AivWaitMte3(kConsOL);
+        StoreOutputHalf(token, rows, 0);
 
         AivWait(kConsP1);
         LocalTensor<bfloat16_t> vNewC2 = ubVNew_[kHalfRows * kHalfDim];
@@ -409,26 +428,12 @@ private:
         CopyNzToL1(l1RightC2, rightC2, kHalfRows, kHalfDim, kChunk, firstRow);
         SetUbRelease(ubRightArmed_, 4);
         AivPublish(kConsRight1);
+        AivWaitMte3(kConsOL1);
+        StoreOutputHalf(token, rows, 1);
         if (chunk + 1 < loc_.chunks) {
             // Right is published before next Q/K Vector work; the GM loads
             // were already issued after the next gate was prepared.
             ConsumeNormalizedQK(chunk + 1);
-        }
-
-        const int64_t token = window.tokenStart + firstRow;
-        for (uint32_t half = 0; half < 2; ++half) {
-            AivWaitMte3(half == 0 ? kConsOL : kConsOL1);
-            if (rows != 0) {
-                DataCopyExtParams params{};
-                params.blockCount = static_cast<uint16_t>(rows);
-                params.blockLen = kHalfDim * sizeof(bfloat16_t);
-                params.srcStride = 0;
-                params.dstStride = (td_.valueHeads - 1) * kDim * sizeof(bfloat16_t);
-                params.rsv = 0;
-                DataCopyPad(gmO_[OffsetOutput(loc_.batch, token, loc_.hv,
-                                              td_.valueHeads, td_.tokens) + half * kHalfDim],
-                            ubO_[half * kHalfRows * kHalfDim], params);
-            }
         }
 
         AivWait(kConsD);
@@ -742,25 +747,24 @@ private:
         AicWaitBoth(kConsRight);
         LocalTensor<bfloat16_t> dA = td_.stateVFirst != 0 ? l1Right_ : l1K_[slot];
         LocalTensor<bfloat16_t> dB = td_.stateVFirst != 0 ? l1K_[slot] : l1Right_;
-        // D-C1 uses the rear 32 KiB so QS-C2 stays live for O-C2.
-        ComputeMm(dA, dB, l0A0_, l0B0_, l0C3_[kStateElems / 2],
-                  128, 64, 64, true, true, true, false);
-        FixF32Halves(ubD_, l0C3_[kStateElems / 2], 128, 64);
+        // W's accumulator is free now; D uses two regions of l0C2 so O-C2
+        // never blocks D-C2 through an l0C3 reuse dependency.
+        ComputeMm(dA, dB, l0A0_, l0B0_, l0C2_, 128, 64, 64,
+                  true, true, true, false);
+        FixF32Halves(ubD_, l0C2_, 128, 64);
         AicPublishToBoth(kConsD);
 
         ComputeMm(l1APrime_[slot], l1VNewC2, l0A1_, l0B1_, l0C3_[kChunk * kHalfDim],
                   64, 64, 64, false, true, false);
         FixB16ScaledHalves(ubO_[kHalfRows * kHalfDim], l0C3_[kChunk * kHalfDim],
                            64, 64, td_.scale);
-        // D-C2 reuses the O/QS half after both O Fixpipes have retired.
-        ReleaseL0C();
         AicPublishToBoth(kConsOL1);
 
         AicWaitBoth(kConsRight1);
-        ComputeMm(dA, dB[kHalfDim * kHalfDim], l0A0_, l0B0_, l0C3_,
-                  128, 64, 64, true, true);
-        FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C3_, 128, 64);
-        // Fixpipe order makes this final release cover O-C2 and both D panels.
+        ComputeMm(dA, dB[kHalfDim * kHalfDim], l0A0_, l0B0_, l0C2_[kStateElems / 2],
+                  128, 64, 64, true, true, true, false);
+        FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C2_[kStateElems / 2], 128, 64);
+        // One release after D-C2 covers both O panels and both D panels.
         ReleaseL0C();
         AicPublishToBoth(kConsD1);
 
