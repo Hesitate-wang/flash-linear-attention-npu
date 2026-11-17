@@ -389,7 +389,8 @@ private:
         WaitUbRelease(ubStateBArmed_, 5);
         StateAddD64VF(ubStateF_, ubStateB_, ubD_, 0);
         AivWait(kConsD1);
-        StateAddD64VF(ubStateF_, ubStateB_, ubD_[kHalfDim * kHalfDim], kHalfDim);
+        LocalTensor<float> dC2 = ubD_[kHalfDim * kHalfDim];
+        StateAddD64VF(ubStateF_, ubStateB_, dC2, kHalfDim);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         if (chunk + 1 < loc_.chunks) {
