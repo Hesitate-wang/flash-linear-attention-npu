@@ -79,6 +79,8 @@ O = APrime @ vnew + QExp @ S // accumulate in L0C
 D = K^T @ (vnew * decay)
 ```
 
+Gate/Beta use three modulo-3 UB slots. The prologue loads gates 0 and 1; iteration i issues gate i+2 before computing the already-loaded gate i+1. The third slot preserves the gate lifetime through PrepareRightDecay while future loads are in flight. Next-chunk Q/K GM loads remain immediately after gate preparation, with even chunks issuing the even/odd pair back-to-back. Only their Vector consumption is deferred until both current Right panels are published, so it overlaps the current K^T@Right Matrix instead of delaying VNew decay.
+
 All state-dependent Consumer data use two 64-column panels. H is uploaded and published as C1/C2; QS and W@S consume the matching H panel. VNew preserves the original per-panel order of W@S followed by U=T@Vb, then is fixpiped to L1/UB and published independently. Right generation/upload, O, and D consume their corresponding panels. D uses two non-overlapping 32 KiB regions of the same L0C allocation so C2 Matrix overlaps C1 Fixpipe. The AIVs apply D-C1, upload the next H-C1, then apply D-C2 and upload H-C2. FP32 state decay and the BF16 state mirror follow the same column order; existing AIV row partitioning is unchanged. A single ordered release after each C2 store covers both panels and avoids repeated Set on one event.
 
 ## 7. Synchronization

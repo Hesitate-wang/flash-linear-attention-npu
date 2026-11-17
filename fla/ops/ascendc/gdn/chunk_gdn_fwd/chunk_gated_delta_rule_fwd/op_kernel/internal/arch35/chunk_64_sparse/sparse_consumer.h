@@ -211,11 +211,14 @@ private:
             ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
             ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
             ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbZero);
-            ubG_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kCUbGates);
-            ubEnergy_ = ubG_[64];
-            ubEnergyRecip_ = ubG_[320];
+            for (uint32_t gateSlot = 0; gateSlot < 3; ++gateSlot) {
+                ubG_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
+                    kCUbGates + gateSlot * kCUbGateSlotBytes);
+                ubEnergy_[gateSlot] = ubG_[gateSlot][64];
+                ubBeta_[gateSlot] = ubG_[gateSlot][128];
+                ubEnergyRecip_[gateSlot] = ubG_[gateSlot][320];
+            }
             ubShift_ = buf.GetBuffer<BufferType::ASCEND_UB, uint32_t>(kCUbShift);
-            ubBeta_ = ubG_[128];
         }
 
         if ASCEND_IS_AIC {
@@ -306,7 +309,11 @@ private:
         // H preparation starts after the previous chain's EndChain drain.
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
-        PrepareNextGate(0, true);
+        IssueGateInputs(0);
+        if (loc_.chunks > 1) {
+            IssueGateInputs(1);
+        }
+        PrepareLoadedGate(0, true);
         PrepareNextVb(0);
         PrepareNormalizedQK(0);
         ConvertInitialState();
@@ -320,9 +327,12 @@ private:
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
         if (chunk + 1 < loc_.chunks) {
-            PrepareNextGate(chunk + 1);
+            if (chunk + 2 < loc_.chunks) {
+                IssueGateInputs(chunk + 2);
+            }
+            PrepareLoadedGate(chunk + 1);
+            PrepareNormalizedQKLoad(chunk + 1);
             PrepareNextVb(chunk + 1);
-            PrepareNormalizedQK(chunk + 1);
         }
     }
 
@@ -330,6 +340,7 @@ private:
     {
         const ChunkWindow window = WindowOf(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         LocalTensor<bfloat16_t> hPanel = l1H_[slot][half * (kStateElems / 2)];
         LocalTensor<bfloat16_t> statePanel = ubStateB_[half * kHalfDim * kHalfDim];
         CopyNzToL1(hPanel, statePanel, kHalfDim, kHalfDim, kDim,
@@ -339,9 +350,9 @@ private:
             SetUbRelease(ubStateBArmed_, 5);
         }
         if (half == 0) {
-            // PrepareNextGate publishes gate/energy on V_S event 1.
+            // PrepareLoadedGate publishes gate/energy on V_S event 1.
             WaitFlag<HardEvent::V_S>(1);
-            chunkDecay_[slot] = ubEnergy_.GetValue(window.rows - 1);
+            chunkDecay_[slot] = ubEnergy_[gateSlot].GetValue(window.rows - 1);
             AivPublish(kConsS);
         } else {
             AivPublish(kConsS1);
@@ -395,6 +406,11 @@ private:
         CopyNzToL1(l1RightC2, rightC2, kHalfRows, kHalfDim, kChunk, firstRow);
         SetUbRelease(ubRightArmed_, 4);
         AivPublish(kConsRight1);
+        if (chunk + 1 < loc_.chunks) {
+            // Right is published before next Q/K Vector work; the GM loads
+            // were already issued after the next gate was prepared.
+            ConsumeNormalizedQK(chunk + 1);
+        }
 
         const int64_t token = window.tokenStart + firstRow;
         for (uint32_t half = 0; half < 2; ++half) {
@@ -478,6 +494,7 @@ private:
     __aicore__ inline void ConsumeNormalizedQK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         LocalTensor<bfloat16_t> kBuffer = slot == 0 ? ubKHat_ : ubK_;
         LocalTensor<bfloat16_t> qBuffer = slot == 0 ? ubQHat_ : ubQ_;
@@ -489,7 +506,7 @@ private:
         // L1 upload and Kbg Vector work do not wait for Q.
         WaitFlag<HardEvent::MTE2_V>(slot);
         WaitUbRelease(ubWArmed_, 2);
-        KHatKbgNzVF(kBuffer, ubW_, ubBeta_, ubEnergy_, firstRow);
+        KHatKbgNzVF(kBuffer, ubW_, ubBeta_[gateSlot], ubEnergy_[gateSlot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
@@ -498,52 +515,65 @@ private:
 
         WaitFlag<HardEvent::MTE2_V>(4 + slot);
         WaitUbRelease(ubOSBArmed_, 1);
-        QHatExpNzVF(qBuffer, ubOSB_, ubEnergy_, firstRow);
+        QHatExpNzVF(qBuffer, ubOSB_, ubEnergy_[gateSlot], firstRow);
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
         SetUbRelease(ubOSBArmed_, 1);
     }
 
-    __aicore__ inline void PrepareNormalizedQK(int64_t chunk)
+    __aicore__ inline void PrepareNormalizedQKLoad(int64_t chunk)
     {
         if ((chunk & 1) == 0) {
-            // G/Beta/Vb for the even chunk are ready. Issue both chunks' GM
-            // transfers before consuming the even one to hide the odd load.
+            // At each even chunk, issue both chunks' GM transfers back-to-back.
             WaitNormalizedQK(chunk);
             IssueNormalizedQKLoad(chunk);
             if (chunk + 1 < loc_.chunks) {
                 IssueNormalizedQKLoad(chunk + 1);
             }
         }
+    }
+
+    __aicore__ inline void PrepareNormalizedQK(int64_t chunk)
+    {
+        PrepareNormalizedQKLoad(chunk);
         ConsumeNormalizedQK(chunk);
     }
 
-    __aicore__ inline void PrepareNextGate(int64_t chunk, bool includeInitial = false)
+    __aicore__ inline void IssueGateInputs(int64_t chunk)
     {
         const ChunkWindow window = WindowOf(loc_, chunk);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        if (window.rows < kChunk) {
+            Duplicate(ubG_[gateSlot], 0.0f, kChunk);
+            Duplicate(ubBeta_[gateSlot], 0.0f, kChunk);
+        }
+        SetFlag<HardEvent::V_MTE2>(0);
+        WaitFlag<HardEvent::V_MTE2>(0);
+        CopyGmToUb(ubG_[gateSlot], gmG_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
+                                                   td_.valueHeads, td_.tokens),
+                   static_cast<uint32_t>(window.rows));
+        CopyGmToUb(ubBeta_[gateSlot], gmBeta_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
+                                                         td_.valueHeads, td_.tokens),
+                   static_cast<uint32_t>(window.rows));
+    }
+
+    __aicore__ inline void PrepareLoadedGate(int64_t chunk, bool includeInitial = false)
+    {
+        const ChunkWindow window = WindowOf(loc_, chunk);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t remaining = window.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (window.rows < kChunk) {
-            Duplicate(ubG_, 0.0f, kChunk);
-            Duplicate(ubBeta_, 0.0f, kChunk);
-        }
         if (rows < kHalfRows) {
             Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
         }
         SetFlag<HardEvent::V_MTE2>(0);
         WaitFlag<HardEvent::V_MTE2>(0);
         const int64_t token = window.tokenStart + firstRow;
-        CopyGmToUb(ubG_, gmG_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
-                                          td_.valueHeads, td_.tokens),
-                   static_cast<uint32_t>(window.rows));
-        CopyGmToUb(ubBeta_, gmBeta_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
-                                               td_.valueHeads, td_.tokens),
-                   static_cast<uint32_t>(window.rows));
-        // Issue V before gate processing so its MTE2 transfer overlaps the
-        // gate softplus/cumsum Vector work. PrepareNextVb waits event 3.
+        // V still overlaps gate processing. Gate i+2 was issued before this
+        // function started computing the already-loaded gate i+1.
         CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens),
                    rows * static_cast<uint32_t>(kDim));
         SetFlag<HardEvent::MTE2_V>(3);
@@ -558,13 +588,14 @@ private:
             dtBias = gmDtBias_.GetValue(loc_.hv);
         }
         if (td_.gateSoftplus != 0 || td_.betaSigmoid != 0) {
-            PrepareGateBetaVF(ubG_, ubBeta_, aLog, dtBias, td_.gateSoftplus != 0,
-                              td_.betaSigmoid != 0, td_.allowNegEigval != 0 ? 2.0f : 1.0f);
+            PrepareGateBetaVF(ubG_[gateSlot], ubBeta_[gateSlot], aLog, dtBias,
+                              td_.gateSoftplus != 0, td_.betaSigmoid != 0,
+                              td_.allowNegEigval != 0 ? 2.0f : 1.0f);
         }
         if (td_.useExp2 != 0) {
-            CumsumEnergyVF<true>(ubG_, ubEnergy_, ubEnergyRecip_, ubShift_);
+            CumsumEnergyVF<true>(ubG_[gateSlot], ubEnergy_[gateSlot], ubEnergyRecip_[gateSlot], ubShift_);
         } else {
-            CumsumEnergyVF<false>(ubG_, ubEnergy_, ubEnergyRecip_, ubShift_);
+            CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubEnergyRecip_[gateSlot], ubShift_);
         }
 
         SetFlag<HardEvent::V_S>(1);
@@ -577,18 +608,18 @@ private:
     {
         const ChunkWindow window = WindowOf(loc_, chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
-        // This is needed only by the next steady right stage, so defer it
-        // after Q/K/Kbg/Vb and let it overlap the AIC's QS work. Gate/energy
-        // V_S event 1 was already consumed by PrepareCurrentState.
-        gateRatioSafe_ = GateRatioSafe(ubG_, ubScratch_, static_cast<uint32_t>(window.rows));
-        const float gLast = ubG_.GetValue(window.rows - 1);
+        // Gate/energy V_S event 1 was consumed by PrepareCurrentStateHalf.
+        // PrepareRightDecay runs before this gate slot is reused.
+        gateRatioSafe_ = GateRatioSafe(ubG_[gateSlot], ubScratch_, static_cast<uint32_t>(window.rows));
+        const float gLast = ubG_[gateSlot].GetValue(window.rows - 1);
         const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {
-            DecayVF<true>(ubDecay_[slot], ubG_, ubEnergyRecip_, gLast, lastEnergy,
+            DecayVF<true>(ubDecay_[slot], ubG_[gateSlot], ubEnergyRecip_[gateSlot], gLast, lastEnergy,
                           gateRatioSafe_, firstRow);
         } else {
-            DecayVF<false>(ubDecay_[slot], ubG_, ubEnergyRecip_, gLast, lastEnergy,
+            DecayVF<false>(ubDecay_[slot], ubG_[gateSlot], ubEnergyRecip_[gateSlot], gLast, lastEnergy,
                            gateRatioSafe_, firstRow);
         }
         // Publish decay now rather than draining all Vector work at its use.
@@ -598,10 +629,11 @@ private:
     __aicore__ inline void PrepareNextVb(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(3);
         WaitUbRelease(ubUArmed_, 3);
-        ScaleVbNzVF(ubV_, ubU_, ubBeta_, firstRow);
+        ScaleVbNzVF(ubV_, ubU_, ubBeta_[gateSlot], firstRow);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1U_[slot], ubU_, kHalfRows, kDim, kChunk, firstRow);
@@ -679,9 +711,9 @@ private:
         AicWaitBoth(kConsU);
         ComputeMm(l1T_, l1U_[slot], l0A0_, l0B1_, l0C0_, 64, 64, 64,
                   false, true, false);
-        FixB16L1Matrix(l1VNew_, l0C0_, 64, 64, 64);
         FixB16Halves(ubVNew_, l0C0_, 64, 64);
         AicPublishToBoth(kConsP);
+        FixB16L1Matrix(l1VNew_, l0C0_, 64, 64, 64);
 
         LocalTensor<bfloat16_t> hC2 = l1H_[slot][kStateElems / 2];
         ComputeMm(l1W_[slot], hC2, l0A0_, l0B0_, l0C0_[kChunk * kHalfDim],
@@ -690,10 +722,10 @@ private:
         ComputeMm(l1T_, uC2, l0A0_, l0B1_, l0C0_[kChunk * kHalfDim],
                   64, 64, 64, false, true, false);
         LocalTensor<bfloat16_t> l1VNewC2 = l1VNew_[kChunk * kHalfDim];
-        FixB16L1Matrix(l1VNewC2, l0C0_[kChunk * kHalfDim], 64, 64, 64);
         FixB16Halves(ubVNew_[kHalfRows * kHalfDim], l0C0_[kChunk * kHalfDim], 64, 64);
-        ReleaseL0C();
         AicPublishToBoth(kConsP1);
+        FixB16L1Matrix(l1VNewC2, l0C0_[kChunk * kHalfDim], 64, 64, 64);
+        ReleaseL0C();
 
         // O accumulates into the matching QS panel retained from RunCubeQs.
         LoadAPrime(chunk);
@@ -752,7 +784,7 @@ private:
     LocalTensor<float> ubDecay_[2];
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubZeroBf_, ubO_, ubInitB_, ubOSB_;
-    LocalTensor<float> ubG_, ubEnergy_, ubBeta_, ubEnergyRecip_;
+    LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubEnergyRecip_[3];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_;
