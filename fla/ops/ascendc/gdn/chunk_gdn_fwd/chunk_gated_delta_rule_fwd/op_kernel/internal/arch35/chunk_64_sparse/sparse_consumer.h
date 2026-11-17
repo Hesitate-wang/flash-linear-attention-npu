@@ -705,65 +705,70 @@ private:
         LoadT(chunk);
         AicWaitBoth(kConsW);
         // Kbg is negated, so W=T@Kbg=-trueW.
-        ComputeMm(l1T_, l1W_[slot], l0A0_, l0B1_, l0C2_, 64, 128, 64, false, true);
+        ComputeMmAndPrefetchB(l1T_, l1W_[slot], l1U_[slot], l0A0_, l0B1_, l0B0_, l0C2_,
+                              64, 128, 64, 64, false, true, true);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
+
+        // U initializes each accumulator while W's L1 store is in flight.
+        // W@S then accumulates into the corresponding U panel.
+        AicWaitBoth(kConsU);
+        IssueMm(l0A0_, l0B0_, l0C0_, 64, 64, 64, true, false);
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
-        ReleaseL0C();
-
-        // Preserve the original per-panel numeric order: W@S initializes the
-        // accumulator, then T@Vb accumulates into it.
         ComputeMm(l1W_[slot], l1H_[slot], l0A0_, l0B0_, l0C0_, 64, 64, 128,
-                  false, transposeState);
-        AicWaitBoth(kConsU);
-        ComputeMm(l1T_, l1U_[slot], l0A0_, l0B1_, l0C0_, 64, 64, 64,
-                  false, true, false);
+                  false, transposeState, false);
         FixB16Halves(ubVNew_, l0C0_, 64, 64);
         AicPublishToBoth(kConsP);
         FixB16L1Matrix(l1VNew_, l0C0_, 64, 64, 64);
+        SetFlag<HardEvent::FIX_MTE1>(0);
 
         LocalTensor<bfloat16_t> hC2 = l1H_[slot][kStateElems / 2];
-        ComputeMm(l1W_[slot], hC2, l0A0_, l0B0_, l0C0_[kChunk * kHalfDim],
-                  64, 64, 128, false, transposeState, true, false);
         LocalTensor<bfloat16_t> uC2 = l1U_[slot][kChunk * kHalfDim];
         ComputeMm(l1T_, uC2, l0A0_, l0B1_, l0C0_[kChunk * kHalfDim],
-                  64, 64, 64, false, true, false);
+                  64, 64, 64, false, true, true, false);
+        ComputeMm(l1W_[slot], hC2, l0A0_, l0B0_, l0C0_[kChunk * kHalfDim],
+                  64, 64, 128, false, transposeState, false);
         LocalTensor<bfloat16_t> l1VNewC2 = l1VNew_[kChunk * kHalfDim];
         FixB16Halves(ubVNew_[kHalfRows * kHalfDim], l0C0_[kChunk * kHalfDim], 64, 64);
         AicPublishToBoth(kConsP1);
         FixB16L1Matrix(l1VNewC2, l0C0_[kChunk * kHalfDim], 64, 64, 64);
+        SetFlag<HardEvent::FIX_MTE1>(1);
         ReleaseL0C();
 
         // O accumulates into the matching QS panel retained from RunCubeQs.
         LoadAPrime(chunk);
-        SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
-        WaitFlag<HardEvent::FIX_M>(0);
-        ComputeMm(l1APrime_[slot], l1VNew_, l0A1_, l0B1_, l0C3_, 64, 64, 64,
-                  false, true, false);
-        FixB16ScaledHalves(ubO_, l0C3_, 64, 64, td_.scale);
-        AicPublishToBoth(kConsOL);
-
         AicWaitBoth(kConsRight);
         LocalTensor<bfloat16_t> dA = td_.stateVFirst != 0 ? l1Right_ : l1K_[slot];
         LocalTensor<bfloat16_t> dB = td_.stateVFirst != 0 ? l1K_[slot] : l1Right_;
-        // W's accumulator is free now; D uses two regions of l0C2 so O-C2
-        // never blocks D-C2 through an l0C3 reuse dependency.
-        ComputeMm(dA, dB, l0A0_, l0B0_, l0C2_, 128, 64, 64,
-                  true, true, true, false);
+        ComputeMmAndPrefetchB(l1APrime_[slot], l1VNew_, dB, l0A1_, l0B1_, l0B0_, l0C3_,
+                              64, 64, 64, 64, false, true, true, false);
+        FixB16ScaledHalves(ubO_, l0C3_, 64, 64, td_.scale);
+        AicPublishToBoth(kConsOL);
+
+        // D-C1 reuses its prefetched B and prefetches VNew-C2 for O-C2.
+        WaitFlag<HardEvent::FIX_MTE1>(1);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, dA, 128, 64, true);
+        IssueMmAndPrefetchB(l0A0_, l0B0_, l0B1_, l1VNewC2, l0C2_,
+                            128, 64, 64, 64, true, true, false);
         FixF32Halves(ubD_, l0C2_, 128, 64);
         AicPublishToBoth(kConsD);
 
-        ComputeMm(l1APrime_[slot], l1VNewC2, l0A1_, l0B1_, l0C3_[kChunk * kHalfDim],
-                  64, 64, 64, false, true, false);
+        // APrime and VNew-C2 are already in L0A/L0B for O-C2. Prefetch D-C2's
+        // second B panel while O-C2 is in flight.
+        AicWaitBoth(kConsRight1);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        IssueMmAndPrefetchB(l0A1_, l0B1_, l0B0_, dB[kHalfDim * kHalfDim],
+                            l0C3_[kChunk * kHalfDim], 64, 64, 64, 64, true, false);
         FixB16ScaledHalves(ubO_[kHalfRows * kHalfDim], l0C3_[kChunk * kHalfDim],
                            64, 64, td_.scale);
         AicPublishToBoth(kConsOL1);
 
-        AicWaitBoth(kConsRight1);
-        ComputeMm(dA, dB[kHalfDim * kHalfDim], l0A0_, l0B0_, l0C2_[kStateElems / 2],
-                  128, 64, 64, true, true, true, false);
+        IssueMm(l0A0_, l0B0_, l0C2_[kStateElems / 2], 128, 64, 64, true, false);
         FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C2_[kStateElems / 2], 128, 64);
+        // Consume the VNew accumulator release only after all O/D Matrix work.
+        WaitFlag<HardEvent::FIX_M>(0);
         // One release after D-C2 covers both O panels and both D panels.
         ReleaseL0C();
         AicPublishToBoth(kConsD1);
