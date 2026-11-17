@@ -712,6 +712,7 @@ private:
         // U initializes each accumulator while W's L1 store is in flight.
         // W@S then accumulates into the corresponding U panel.
         AicWaitBoth(kConsU);
+        WaitFlag<HardEvent::M_MTE1>(0);
         IssueMm(l0A0_, l0B0_, l0C0_, 64, 64, 64, true, false);
         SetFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
@@ -765,6 +766,7 @@ private:
                            64, 64, td_.scale);
         AicPublishToBoth(kConsOL1);
 
+        WaitFlag<HardEvent::M_MTE1>(0);
         IssueMm(l0A0_, l0B0_, l0C2_[kStateElems / 2], 128, 64, 64, true, false);
         FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C2_[kStateElems / 2], 128, 64);
         // Consume the VNew accumulator release only after all O/D Matrix work.
