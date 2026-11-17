@@ -782,9 +782,10 @@ __aicore__ inline void StateDecayVF(LocalTensor<float> &state, float decay)
     }
 }
 
-__aicore__ inline void StateAddDVF(LocalTensor<float> &state,
-                                   LocalTensor<bfloat16_t> &stateBf,
-                                   LocalTensor<float> &d)
+__aicore__ inline void StateAddD64VF(LocalTensor<float> &state,
+                                     LocalTensor<bfloat16_t> &stateBf,
+                                     LocalTensor<float> &d,
+                                     uint32_t columnOffset)
 {
     __ubuf__ float *s = reinterpret_cast<__ubuf__ float *>(state.GetPhyAddr());
     __ubuf__ bfloat16_t *b = reinterpret_cast<__ubuf__ bfloat16_t *>(stateBf.GetPhyAddr());
@@ -794,18 +795,16 @@ __aicore__ inline void StateAddDVF(LocalTensor<float> &state,
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
         uint32_t n64 = 64;
         MaskReg m64 = UpdateMask<bfloat16_t>(n64);
-        RegTensor<float> s0, s1, d0, d1;
+        RegTensor<float> s0, d0;
         for (uint16_t row = 0; row < 64; ++row) {
-            const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            LoadAlign(s0, s + offset);
-            LoadAlign(s1, s + offset + 64);
-            LoadAlign(d0, dd + offset);
-            LoadAlign(d1, dd + offset + 64);
+            const uint32_t stateOffset = static_cast<uint32_t>(row) * kDim + columnOffset;
+            const uint32_t dOffset = static_cast<uint32_t>(row) * kHalfDim;
+            LoadAlign(s0, s + stateOffset);
+            LoadAlign(d0, dd + dOffset);
             Add(s0, s0, d0, all);
-            Add(s1, s1, d1, all);
-            StoreAlign(s + offset, s0, all);
-            StoreAlign(s + offset + 64, s1, all);
-            StoreBf16Nz128(b, row, s0, s1, all, m64, static_cast<uint32_t>(kHalfDim));
+            StoreAlign(s + stateOffset, s0, all);
+            StoreBf16Nz64(b + columnOffset * kHalfDim, row, s0, all, m64,
+                          static_cast<uint32_t>(kHalfDim));
         }
     }
 }

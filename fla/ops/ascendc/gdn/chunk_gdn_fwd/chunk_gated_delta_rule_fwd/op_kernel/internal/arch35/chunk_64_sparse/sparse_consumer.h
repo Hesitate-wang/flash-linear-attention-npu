@@ -17,6 +17,7 @@ constexpr uint16_t kConsP = 6; // Continuous GM->L1 DataCopy reserves mode-4 fla
 constexpr uint16_t kConsRight = 2;
 constexpr uint16_t kConsW = 3;
 constexpr uint16_t kConsD = 4;
+constexpr uint16_t kConsD1 = 7;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
@@ -386,7 +387,9 @@ private:
 
         AivWait(kConsD);
         WaitUbRelease(ubStateBArmed_, 5);
-        StateAddDVF(ubStateF_, ubStateB_, ubD_);
+        StateAddD64VF(ubStateF_, ubStateB_, ubD_, 0);
+        AivWait(kConsD1);
+        StateAddD64VF(ubStateF_, ubStateB_, ubD_[kHalfDim * kHalfDim], kHalfDim);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         if (chunk + 1 < loc_.chunks) {
@@ -653,14 +656,19 @@ private:
         AicPublishToBoth(kConsOL);
 
         AicWaitBoth(kConsRight);
-        if (td_.stateVFirst != 0) {
-            ComputeMm(l1Right_, l1K_[slot], l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
-        } else {
-            ComputeMm(l1K_[slot], l1Right_, l0A0_, l0B0_, l0C3_, 128, 128, 64, true, true);
-        }
-        FixF32Halves(ubD_, l0C3_, 128, 128);
-        ReleaseL0C();
+        LocalTensor<bfloat16_t> dA = td_.stateVFirst != 0 ? l1Right_ : l1K_[slot];
+        LocalTensor<bfloat16_t> dB = td_.stateVFirst != 0 ? l1K_[slot] : l1Right_;
+        ComputeMm(dA, dB, l0A0_, l0B0_, l0C3_, 128, 64, 64, true, true);
+        FixF32Halves(ubD_, l0C3_, 128, 64);
         AicPublishToBoth(kConsD);
+
+        // C2 uses the second 32 KiB of the same L0C allocation. Its Matrix
+        // work overlaps C1's Fixpipe; one release after C2 covers both stores.
+        ComputeMm(dA, dB[kHalfDim * kHalfDim], l0A0_, l0B0_, l0C3_[kStateElems / 2],
+                  128, 64, 64, true, true, true, false);
+        FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C3_[kStateElems / 2], 128, 64);
+        ReleaseL0C();
+        AicPublishToBoth(kConsD1);
 
         // The following QS is retained for the next O, while its B0 copy of S
         // is reused by the next W@S.

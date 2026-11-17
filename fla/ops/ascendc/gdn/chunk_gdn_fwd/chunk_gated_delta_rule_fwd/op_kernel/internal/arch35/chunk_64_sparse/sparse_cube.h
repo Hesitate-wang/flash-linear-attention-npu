@@ -43,11 +43,12 @@ __aicore__ inline void LoadB(LocalTensor<bfloat16_t> l0, LocalTensor<bfloat16_t>
 __aicore__ inline void IssueMm(LocalTensor<bfloat16_t> l0A,
                                LocalTensor<bfloat16_t> l0B,
                                LocalTensor<float> l0C,
-                               int32_t m, int32_t n, int32_t k, bool initC = true)
+                               int32_t m, int32_t n, int32_t k, bool initC = true,
+                               bool waitCRelease = true)
 {
     SetFlag<HardEvent::MTE1_M>(0);
     WaitFlag<HardEvent::MTE1_M>(0);
-    if (initC) {
+    if (initC && waitCRelease) {
         WaitFlag<HardEvent::FIX_M>(0);
     }
     MmadParams p{};
@@ -64,19 +65,22 @@ __aicore__ inline void IssueMm(LocalTensor<bfloat16_t> l0A,
 }
 
 // One independent BF16 GEMM. The caller fixpipes L0C and then calls
-// ReleaseL0C. Event zero is primed once by the pipeline entry.
+// ReleaseL0C. Event zero is primed once by the pipeline entry. With
+// waitCRelease=false, l0C must name a region independent of any earlier
+// accumulator still being fixpiped; the caller supplies the eventual release.
 __aicore__ inline void ComputeMm(LocalTensor<bfloat16_t> l1A,
                                  LocalTensor<bfloat16_t> l1B,
                                  LocalTensor<bfloat16_t> l0A,
                                  LocalTensor<bfloat16_t> l0B,
                                  LocalTensor<float> l0C,
                                  int32_t m, int32_t n, int32_t k,
-                                 bool transposeA, bool transposeB, bool initC = true)
+                                 bool transposeA, bool transposeB, bool initC = true,
+                                 bool waitCRelease = true)
 {
     WaitFlag<HardEvent::M_MTE1>(0);
     LoadA(l0A, l1A, m, k, transposeA);
     LoadB(l0B, l1B, n, k, transposeB);
-    IssueMm(l0A, l0B, l0C, m, n, k, initC);
+    IssueMm(l0A, l0B, l0C, m, n, k, initC, waitCRelease);
 }
 
 // Reuse a B operand retained in an L0 bank by an earlier GEMM. The caller

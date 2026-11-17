@@ -79,7 +79,7 @@ O = APrime @ vnew + QExp @ S // accumulate in L0C
 D = K^T @ (vnew * decay)
 ```
 
-`FixF32Halves` sends vnew to the two Consumer AIVs for the decayed right computation. D returns to AIV, which performs the FP32 state update and refreshes the BF16 state mirror for the next chunk.
+`FixF32Halves` sends vnew to the two Consumer AIVs for the decayed right computation. D is computed as two 128x64 column panels in two non-overlapping 32 KiB regions of the same L0C allocation. C1 is fixpiped to UB and published before C2's Matrix work, allowing C2 Matrix to overlap C1 Fixpipe. The two AIVs apply C1 then C2 to the FP32 state in the same order and refresh the corresponding BF16 state panels; their existing row partitioning is unchanged.
 
 ## 7. Synchronization
 
