@@ -18,13 +18,13 @@ constexpr uint16_t kConsW = 3;
 constexpr uint16_t kConsD = 4;
 constexpr uint16_t kConsOL = 5;
 constexpr uint16_t kConsP = 6; // Continuous GM->L1 DataCopy reserves mode-4 flags 1/17.
-constexpr uint16_t kConsD1 = 7;
+constexpr uint16_t kConsD1 = kConsD; // Ordered C1/C2 generations share one mode-4 channel.
 constexpr uint16_t kConsRight1 = 8;
 constexpr uint16_t kConsP1 = 9;
 constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
-constexpr uint16_t kConsOL1 = 12;
-constexpr uint16_t kConsS1 = 13;
+constexpr uint16_t kConsOL1 = kConsOL; // Ordered C1/C2 generations share one mode-4 channel.
+constexpr uint16_t kConsS1 = 0;
 
 class ConsumerRole {
 public:
@@ -109,6 +109,7 @@ public:
             RunAivPrepare(chunk);
         }
         if ASCEND_IS_AIC {
+            RunCubePrepare(chunk);
             RunCubeQs(chunk);
         }
     }
@@ -227,6 +228,7 @@ private:
             l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
             l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
             l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
+            l0C1_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C1);
             l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
             l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
         }
@@ -701,24 +703,28 @@ private:
                   64, 64, 128, false, td_.stateVFirst == 0, true, false);
     }
 
+    __aicore__ inline void RunCubePrepare(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        LoadT(chunk);
+        AicWaitBoth(kConsW);
+        // T@Kbg and T@Vb do not depend on H. Compute them before QS, using
+        // l0C2/l0C0 independently of the previous D panels in l0C1.
+        ComputeMmAndPrefetchB(l1T_, l1W_[slot], l1U_[slot], l0A0_, l0B1_, l0B0_, l0C2_,
+                              64, 128, 64, 128, false, true, true, true, false);
+        FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
+        AicWaitBoth(kConsU);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        IssueMm(l0A0_, l0B0_, l0C0_, 64, 128, 64, true, false);
+        SetFlag<HardEvent::FIX_MTE1>(0);
+    }
+
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const bool transposeState = td_.stateVFirst == 0;
-        LoadT(chunk);
-        AicWaitBoth(kConsW);
-        // Kbg is negated, so W=T@Kbg=-trueW. RunCubeQs already consumed the
-        // previous L0C release, so W must not wait for another FIX_M generation.
-        ComputeMmAndPrefetchB(l1T_, l1W_[slot], l1U_[slot], l0A0_, l0B1_, l0B0_, l0C2_,
-                              64, 128, 64, 64, false, true, true, true, false);
-        FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
-
-        // U initializes each accumulator while W's L1 store is in flight.
-        // W@S then accumulates into the corresponding U panel.
-        AicWaitBoth(kConsU);
-        WaitFlag<HardEvent::M_MTE1>(0);
-        IssueMm(l0A0_, l0B0_, l0C0_, 64, 64, 64, true, false);
-        SetFlag<HardEvent::FIX_MTE1>(0);
+        // U was initialized in RunCubePrepare. Only the state-dependent W@S
+        // accumulation remains in the serial path.
         WaitFlag<HardEvent::FIX_MTE1>(0);
         ComputeMm(l1W_[slot], l1H_[slot], l0A0_, l0B0_, l0C0_, 64, 64, 128,
                   false, transposeState, false);
@@ -728,9 +734,6 @@ private:
         SetFlag<HardEvent::FIX_MTE1>(0);
 
         LocalTensor<bfloat16_t> hC2 = l1H_[slot][kStateElems / 2];
-        LocalTensor<bfloat16_t> uC2 = l1U_[slot][kChunk * kHalfDim];
-        ComputeMm(l1T_, uC2, l0A0_, l0B1_, l0C0_[kChunk * kHalfDim],
-                  64, 64, 64, false, true, true, false);
         AicWaitBoth(kConsS1);
         ComputeMm(l1W_[slot], hC2, l0A0_, l0B0_, l0C0_[kChunk * kHalfDim],
                   64, 64, 128, false, transposeState, false);
@@ -757,9 +760,9 @@ private:
         WaitFlag<HardEvent::FIX_MTE1>(1);
         WaitFlag<HardEvent::M_MTE1>(0);
         LoadA(l0A0_, dA, 128, 64, true);
-        IssueMmAndPrefetchB(l0A0_, l0B0_, l0B1_, l1VNewC2, l0C2_,
+        IssueMmAndPrefetchB(l0A0_, l0B0_, l0B1_, l1VNewC2, l0C1_,
                             128, 64, 64, 64, true, true, false);
-        FixF32Halves(ubD_, l0C2_, 128, 64);
+        FixF32Halves(ubD_, l0C1_, 128, 64);
         AicPublishToBoth(kConsD);
 
         // APrime and VNew-C2 are already in L0A/L0B for O-C2. Prefetch D-C2's
@@ -773,8 +776,8 @@ private:
         AicPublishToBoth(kConsOL1);
 
         WaitFlag<HardEvent::M_MTE1>(0);
-        IssueMm(l0A0_, l0B0_, l0C2_[kStateElems / 2], 128, 64, 64, true, false);
-        FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C2_[kStateElems / 2], 128, 64);
+        IssueMm(l0A0_, l0B0_, l0C1_[kStateElems / 2], 128, 64, 64, true, false);
+        FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C1_[kStateElems / 2], 128, 64);
         // Consume the VNew accumulator release only after all O/D Matrix work.
         WaitFlag<HardEvent::FIX_M>(0);
         // One release after D-C2 covers both O panels and both D panels.
@@ -807,7 +810,7 @@ private:
     LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_;
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
-    LocalTensor<float> l0C0_, l0C2_, l0C3_;
+    LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
 };
 
 } // namespace GdnChunk64Sparse

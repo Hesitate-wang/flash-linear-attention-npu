@@ -12,6 +12,8 @@ namespace GdnChunk64Sparse {
 using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
+// AIC mode-0 reserves 7/12 for T and 13/14 for APrime. Consumer C1/C2
+// generations share mode-4 channels rather than occupying these IDs.
 constexpr uint16_t kSparseBarrierFlagIdAlt = 12;
 constexpr uint16_t kSparseAPrimeBarrierFlagId = 13;
 constexpr uint16_t kSparseAPrimeBarrierFlagIdAlt = 14;

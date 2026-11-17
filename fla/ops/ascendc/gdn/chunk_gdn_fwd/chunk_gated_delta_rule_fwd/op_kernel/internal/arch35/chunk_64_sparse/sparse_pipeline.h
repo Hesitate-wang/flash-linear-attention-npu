@@ -40,12 +40,12 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     }
     if ASCEND_IS_AIC {
         for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
+            // T is complete after the producer's mode-0. RunCubePrepare starts
+            // with the Consumer's GM->L1 T copy, so synchronize before Prepare.
+            PublishIterationAic<PIPE_MTE2>(iteration);
             if (iteration < chunks) {
                 role.RunPrepare(iteration);
             }
-            // T is complete after the producer's mode-0. The next operation is
-            // the Consumer's GM->L1 T copy, so block MTE2 rather than only FIX.
-            PublishIterationAic<PIPE_MTE2>(iteration);
             if (iteration < chunks) {
                 role.RunAfterWu(iteration);
             } else {
