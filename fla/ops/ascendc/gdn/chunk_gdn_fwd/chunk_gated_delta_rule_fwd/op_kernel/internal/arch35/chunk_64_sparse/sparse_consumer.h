@@ -707,9 +707,10 @@ private:
         const bool transposeState = td_.stateVFirst == 0;
         LoadT(chunk);
         AicWaitBoth(kConsW);
-        // Kbg is negated, so W=T@Kbg=-trueW.
+        // Kbg is negated, so W=T@Kbg=-trueW. RunCubeQs already consumed the
+        // previous L0C release, so W must not wait for another FIX_M generation.
         ComputeMmAndPrefetchB(l1T_, l1W_[slot], l1U_[slot], l0A0_, l0B1_, l0B0_, l0C2_,
-                              64, 128, 64, 64, false, true, true);
+                              64, 128, 64, 64, false, true, true, true, false);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
 
         // U initializes each accumulator while W's L1 store is in flight.
