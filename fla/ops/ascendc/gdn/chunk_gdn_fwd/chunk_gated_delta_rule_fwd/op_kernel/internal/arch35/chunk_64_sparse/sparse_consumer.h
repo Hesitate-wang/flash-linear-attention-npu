@@ -337,6 +337,7 @@ private:
             PrepareLoadedGate(chunk + 1);
             PrepareNormalizedQKLoad(chunk + 1);
             PrepareNextVb(chunk + 1);
+            ConsumeNormalizedK(chunk + 1);
         }
     }
 
@@ -447,7 +448,7 @@ private:
         StoreOutput(window.tokenStart + firstRow, rows);
         if (chunk + 1 < loc_.chunks) {
             // Next Q/K Vector follows the full O and overlaps the next round.
-            ConsumeNormalizedQK(chunk + 1);
+            ConsumeNormalizedQ(chunk + 1);
         }
     }
 
@@ -495,19 +496,16 @@ private:
         SetFlag<HardEvent::MTE2_V>(4 + slot);
     }
 
-    __aicore__ inline void ConsumeNormalizedQK(int64_t chunk)
+    __aicore__ inline void ConsumeNormalizedK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         LocalTensor<bfloat16_t> kBuffer = slot == 0 ? ubKHat_ : ubK_;
-        LocalTensor<bfloat16_t> qBuffer = slot == 0 ? ubQHat_ : ubQ_;
         WaitFlag<HardEvent::MTE2_MTE3>(slot);
         CopyNzToL1(l1K_[slot], kBuffer, kHalfRows, kDim, kChunk, firstRow);
         SetFlag<HardEvent::MTE3_MTE2>(1 + slot);
 
-        // The odd chunk consumes the load issued by its even predecessor. K's
-        // L1 upload and Kbg Vector work do not wait for Q.
         WaitFlag<HardEvent::MTE2_V>(slot);
         WaitUbRelease(ubWArmed_, 2);
         KHatKbgNzVF(kBuffer, ubW_, ubBeta_[gateSlot], ubEnergy_[gateSlot], firstRow);
@@ -516,7 +514,14 @@ private:
         CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
         SetUbRelease(ubWArmed_, 2);
         AivPublish(kConsW);
+    }
 
+    __aicore__ inline void ConsumeNormalizedQ(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const uint32_t firstRow = sub_ * kHalfRows;
+        LocalTensor<bfloat16_t> qBuffer = slot == 0 ? ubQHat_ : ubQ_;
         WaitFlag<HardEvent::MTE2_V>(4 + slot);
         WaitUbRelease(ubOSBArmed_, 1);
         QHatExpNzVF(qBuffer, ubOSB_, ubEnergy_[gateSlot], firstRow);
@@ -524,6 +529,12 @@ private:
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
         SetUbRelease(ubOSBArmed_, 1);
+    }
+
+    __aicore__ inline void ConsumeNormalizedQK(int64_t chunk)
+    {
+        ConsumeNormalizedK(chunk);
+        ConsumeNormalizedQ(chunk);
     }
 
     __aicore__ inline void PrepareNormalizedQKLoad(int64_t chunk)

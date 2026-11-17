@@ -692,24 +692,22 @@ __aicore__ inline void DecayVF(LocalTensor<float> &decay,
     __ubuf__ float *rAddr = reinterpret_cast<__ubuf__ float *>(energyRecip.GetPhyAddr());
     __VEC_SCOPE__
     {
-        MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        MaskReg scalar = CreateMask<float, MaskPattern::VL1>();
-        RegTensor<float> scale, last, diff;
-        Duplicate(last, useEnergyRatio ? lastEnergy : gLast, all);
-        for (uint16_t row = 0; row < 32; ++row) {
-            if (useEnergyRatio) {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, rAddr + firstRow + row);
-                Mul(scale, last, scale, all);
-            } else {
-                LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, gAddr + firstRow + row);
-                Sub(diff, last, scale, all);
-                if constexpr (UseExp2) {
-                    Muls(diff, diff, kSparseLn2, all);
-                }
-                Exp(scale, diff, all);
+        uint32_t n32 = kHalfRows;
+        MaskReg lanes = UpdateMask<float>(n32);
+        RegTensor<float> scale, last, values, diff;
+        Duplicate(last, useEnergyRatio ? lastEnergy : gLast, lanes);
+        if (useEnergyRatio) {
+            LoadAlign(values, rAddr + firstRow);
+            Mul(scale, last, values, lanes);
+        } else {
+            LoadAlign(values, gAddr + firstRow);
+            Sub(diff, last, values, lanes);
+            if constexpr (UseExp2) {
+                Muls(diff, diff, kSparseLn2, lanes);
             }
-            StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dAddr + firstRow + row, scale, scalar);
+            Exp(scale, diff, lanes);
         }
+        StoreAlign(dAddr + firstRow, scale, lanes);
     }
 }
 
