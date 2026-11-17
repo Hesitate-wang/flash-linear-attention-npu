@@ -79,7 +79,7 @@ O = APrime @ vnew + QExp @ S // accumulate in L0C
 D = K^T @ (vnew * decay)
 ```
 
-`FixF32Halves` sends vnew to the two Consumer AIVs for the decayed right computation. D is computed as two 128x64 column panels in two non-overlapping 32 KiB regions of the same L0C allocation. C1 is fixpiped to UB and published before C2's Matrix work, allowing C2 Matrix to overlap C1 Fixpipe. The two AIVs apply C1 then C2 to the FP32 state in the same order and refresh the corresponding BF16 state panels; their existing row partitioning is unchanged.
+All state-dependent Consumer data use two 64-column panels. H is uploaded and published as C1/C2; QS and W@S consume the matching H panel. VNew preserves the original per-panel order of W@S followed by U=T@Vb, then is fixpiped to L1/UB and published independently. Right generation/upload, O, and D consume their corresponding panels. D uses two non-overlapping 32 KiB regions of the same L0C allocation so C2 Matrix overlaps C1 Fixpipe. The AIVs apply D-C1, upload the next H-C1, then apply D-C2 and upload H-C2. FP32 state decay and the BF16 state mirror follow the same column order; existing AIV row partitioning is unchanged. A single ordered release after each C2 store covers both panels and avoids repeated Set on one event.
 
 ## 7. Synchronization
 

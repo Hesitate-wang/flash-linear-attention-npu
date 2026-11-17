@@ -713,10 +713,10 @@ __aicore__ inline void DecayVF(LocalTensor<float> &decay,
     }
 }
 
-__aicore__ inline void RightNzVF(LocalTensor<bfloat16_t> &u,
-                                 LocalTensor<bfloat16_t> &right,
-                                 LocalTensor<float> &decay,
-                                 uint32_t firstRow)
+__aicore__ inline void Right64NzVF(LocalTensor<bfloat16_t> &u,
+                                   LocalTensor<bfloat16_t> &right,
+                                   LocalTensor<float> &decay,
+                                   uint32_t firstRow)
 {
     __ubuf__ bfloat16_t *uAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(u.GetPhyAddr());
     __ubuf__ bfloat16_t *rAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(right.GetPhyAddr());
@@ -724,17 +724,14 @@ __aicore__ inline void RightNzVF(LocalTensor<bfloat16_t> &u,
     __VEC_SCOPE__
     {
         MaskReg all = CreateMask<float, MaskPattern::ALL>();
-        MaskReg m16 = CreateMask<uint16_t, MaskPattern::ALL>();
-        uint32_t n128 = 128;
-        MaskReg m128 = UpdateMask<bfloat16_t>(n128);
-        RegTensor<float> u0, u1, scale;
-        for (uint16_t row = 0; row < 32; ++row) {
-            const uint32_t offset = static_cast<uint32_t>(row) * 128;
-            GdnFwd32::LoadEvenOdd(uAddr + offset, u0, u1, m16);
+        uint32_t n64 = 64;
+        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
+        RegTensor<float> u0, scale;
+        for (uint16_t row = 0; row < kHalfRows; ++row) {
+            LoadBf16(u0, uAddr + static_cast<uint32_t>(row) * kHalfDim, all);
             LoadAlign<float, LoadDist::DIST_BRC_B32>(scale, dAddr + firstRow + row);
             Mul(u0, u0, scale, all);
-            Mul(u1, u1, scale, all);
-            GdnFwd32::StoreNzEvenOdd(rAddr, row, u0, u1, m16, m128);
+            StoreBf16Nz64(rAddr, row, u0, all, m64, static_cast<uint32_t>(kHalfRows));
         }
     }
 }
@@ -778,6 +775,24 @@ __aicore__ inline void StateDecayVF(LocalTensor<float> &state, float decay)
             Mul(s1, s1, alpha, all);
             StoreAlign(s + offset, s0, all);
             StoreAlign(s + offset + 64, s1, all);
+        }
+    }
+}
+
+__aicore__ inline void StateDecay64VF(LocalTensor<float> &state, float decay,
+                                      uint32_t columnOffset)
+{
+    __ubuf__ float *s = reinterpret_cast<__ubuf__ float *>(state.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<float> s0, alpha;
+        Duplicate(alpha, decay, all);
+        for (uint16_t row = 0; row < 64; ++row) {
+            const uint32_t offset = static_cast<uint32_t>(row) * kDim + columnOffset;
+            LoadAlign(s0, s + offset);
+            Mul(s0, s0, alpha, all);
+            StoreAlign(s + offset, s0, all);
         }
     }
 }
