@@ -22,6 +22,15 @@ constexpr uint16_t kProdAPrime = 11;
 constexpr int32_t kProdInputMte3EventBase = 0;
 constexpr int32_t kProdOutputMte3EventBase = 2;
 
+// Each pair lane owns a private L1 K/Q slot: the odd AIV's upload must never
+// overwrite the even chunk still feeding KKT/QK. A slot is reused three pairs
+// later; the pair-2 output-event wait in PrepareLoadedInputs retires the Cube
+// reads of that generation first.
+__aicore__ inline uint32_t ProducerL1Slot(int64_t chunk)
+{
+    return static_cast<uint32_t>((chunk >> 1) % 3) * 2 + static_cast<uint32_t>(chunk & 1);
+}
+
 class ProducerRole {
 public:
     __aicore__ inline void Init(const PhaseArgs &args, const FusedTilingData &td)
@@ -160,7 +169,7 @@ private:
         OnChipBuffer buf;
         ubKkt_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbKkt);
         ubQk_ = buf.GetBuffer<BufferType::ASCEND_UB, float>(kPUbQk);
-        for (uint32_t slot = 0; slot < 3; ++slot) {
+        for (uint32_t slot = 0; slot < kPL1SlotCount; ++slot) {
             l1K_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
                 kPL1K + slot * kPL1SlotBytes);
             l1QHat_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
@@ -374,7 +383,7 @@ private:
         const int64_t pair = chunk >> 1;
         const uint32_t slot = static_cast<uint32_t>(pair & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(pair % 3);
-        const uint32_t l1Slot = static_cast<uint32_t>(pair % 3);
+        const uint32_t l1Slot = ProducerL1Slot(chunk);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
         WaitFlag<HardEvent::MTE2_V>(eventBase + 2);
         NormalizeRowsNzVF(ubQ_[slot], ubQHat_[slot], ubKRstd_[gateSlot]);
@@ -391,7 +400,7 @@ private:
         const int64_t pair = chunk >> 1;
         const uint32_t slot = static_cast<uint32_t>(pair & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(pair % 3);
-        const uint32_t l1Slot = static_cast<uint32_t>(pair % 3);
+        const uint32_t l1Slot = ProducerL1Slot(chunk);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
         WaitFlag<HardEvent::MTE2_V>(eventBase);
         NormalizeRowsNzVF(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot]);
@@ -456,7 +465,7 @@ private:
 
     __aicore__ inline void RunQK(int64_t chunk)
     {
-        const uint32_t l1Slot = static_cast<uint32_t>((chunk >> 1) % 3);
+        const uint32_t l1Slot = ProducerL1Slot(chunk);
         AicWaitOwner(chunk, kProdQ);
         WaitFlag<HardEvent::M_MTE1>(0);
         LoadA(l0A0_, l1QHat_[l1Slot], 64, 128, false);
@@ -475,7 +484,7 @@ private:
 
     __aicore__ inline void RunKkt(int64_t chunk)
     {
-        const uint32_t l1Slot = static_cast<uint32_t>((chunk >> 1) % 3);
+        const uint32_t l1Slot = ProducerL1Slot(chunk);
         AicWaitOwner(chunk, kProdK);
         WaitFlag<HardEvent::M_MTE1>(0);
         LoadA(l0A0_, l1K_[l1Slot], 64, 128, false);
@@ -507,7 +516,7 @@ private:
     LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubKRstd_[3], ubEnergyRecip_[3];
     LocalTensor<float> ubScratch_, ubEye_;
     LocalTensor<uint32_t> ubShift_;
-    LocalTensor<bfloat16_t> l1K_[3], l1QHat_[3];
+    LocalTensor<bfloat16_t> l1K_[kPL1SlotCount], l1QHat_[kPL1SlotCount];
     LocalTensor<bfloat16_t> l0A0_, l0B0_, l0B1_;
     LocalTensor<float> l0C0_, l0C1_;
 };

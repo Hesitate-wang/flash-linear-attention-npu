@@ -38,13 +38,16 @@ constexpr uint32_t kPUbEye = kPUbEnd;
 constexpr uint32_t kPUbEndWithEye = kPUbEye + 16 * kKiB;
 static_assert(kPUbEndWithEye <= kUbBudget);
 
-// Three full-chunk K/Q L1 slots protect the current KKT/QKT pair from the next
-// preprocess. No FP32 inverse or coupling records remain in L1.
+// Six full-chunk K/Q L1 slots: each lane of a pair owns a private slot so the
+// odd AIV's upload never overwrites the even chunk still feeding KKT/QK. A
+// slot is reused three pairs later, after the pair-2 output event confirms the
+// Cube side retired all reads of that generation.
 constexpr uint32_t kPL1SlotBytes = 16 * kKiB;
+constexpr uint32_t kPL1SlotCount = 6;
 constexpr uint32_t kPL1K = 0;
-constexpr uint32_t kPL1QHat = kPL1K + 3 * kPL1SlotBytes;
+constexpr uint32_t kPL1QHat = kPL1K + kPL1SlotCount * kPL1SlotBytes;
 constexpr uint32_t kPL1QSlotBytes = kPL1SlotBytes;
-constexpr uint32_t kPL1End = kPL1QHat + 3 * kPL1QSlotBytes;
+constexpr uint32_t kPL1End = kPL1QHat + kPL1SlotCount * kPL1QSlotBytes;
 static_assert(kPL1End <= 512 * kKiB);
 
 // Consumer UB, per AIV.
