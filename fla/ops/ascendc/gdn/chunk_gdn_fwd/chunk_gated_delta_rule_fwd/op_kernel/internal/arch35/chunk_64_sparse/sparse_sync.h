@@ -12,34 +12,27 @@ namespace GdnChunk64Sparse {
 using namespace AscendC;
 
 constexpr uint16_t kAiv1FlagOffset = 16;
-// AIC mode-0 reserves 7/12 for T and 13/14 for APrime. Consumer C1/C2
-// generations share mode-4 channels rather than occupying these IDs.
-constexpr uint16_t kSparseBarrierFlagIdAlt = 12;
-constexpr uint16_t kSparseAPrimeBarrierFlagId = 13;
-constexpr uint16_t kSparseAPrimeBarrierFlagIdAlt = 14;
-// AIV mode-0 normalized K/Q readiness uses independent parity channels.
-constexpr uint16_t kSparseNormalizedKFlagId = 10;
-constexpr uint16_t kSparseNormalizedKFlagIdAlt = 11;
-constexpr uint16_t kSparseNormalizedQFlagId = 14;
-constexpr uint16_t kSparseNormalizedQFlagIdAlt = 15;
+// AIC mode-0 T/APrime channels. AIC and AIV have independent mode-0 counters,
+// so equal numeric IDs on different execution units do not share a channel.
+constexpr uint16_t kSparseBarrierFlagIds[2] = {7, 12};
+constexpr uint16_t kSparseAPrimeBarrierFlagIds[2] = {13, 14};
+// AIV mode-0 normalized K/Q readiness channels, indexed by pair parity.
+constexpr uint16_t kSparseNormalizedKFlagIds[2] = {10, 11};
+constexpr uint16_t kSparseNormalizedQFlagIds[2] = {14, 15};
 
-// Independent L0C accumulator releases. Prime and drain every ID at the
-// pipeline boundary; each role waits only before reusing its own region.
-constexpr int32_t kL0CReleaseVNew = 0;
-constexpr int32_t kL0CReleaseW = 1;
-constexpr int32_t kL0CReleaseO = 2;
-constexpr int32_t kL0CReleaseDC1 = 3;
-constexpr int32_t kL0CReleaseDC2 = 4;
+// Independent L0C accumulator release event IDs. Prime and drain every ID at
+// the pipeline boundary; each role waits only before reusing its own region.
 constexpr int32_t kL0CReleaseEventCount = 5;
+constexpr int32_t kL0CReleaseEventIds[kL0CReleaseEventCount] = {0, 1, 2, 3, 4};
 
 __aicore__ inline uint16_t IterationNormalizedKFlag(int64_t pair)
 {
-    return (pair & 1) != 0 ? kSparseNormalizedKFlagIdAlt : kSparseNormalizedKFlagId;
+    return kSparseNormalizedKFlagIds[pair & 1];
 }
 
 __aicore__ inline uint16_t IterationNormalizedQFlag(int64_t pair)
 {
-    return (pair & 1) != 0 ? kSparseNormalizedQFlagIdAlt : kSparseNormalizedQFlagId;
+    return kSparseNormalizedQFlagIds[pair & 1];
 }
 
 template <pipe_t SetPipe>
@@ -63,18 +56,18 @@ __aicore__ inline void PublishMode0Flag(uint16_t flagId)
 
 __aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 {
-    return (iteration & 1) != 0 ? kSparseBarrierFlagIdAlt : kSparseBarrierFlagId;
+    return kSparseBarrierFlagIds[iteration & 1];
 }
 
 __aicore__ inline uint16_t IterationAPrimeFlag(int64_t iteration)
 {
-    return (iteration & 1) != 0 ? kSparseAPrimeBarrierFlagIdAlt : kSparseAPrimeBarrierFlagId;
+    return kSparseAPrimeBarrierFlagIds[iteration & 1];
 }
 
 __aicore__ inline void SetAPrimeAic(int64_t iteration)
 {
     if ASCEND_IS_AIC {
-        SetMode0Flag<PIPE_MTE3>(IterationAPrimeFlag(iteration));
+        SetMode0Flag<PIPE_FIX>(IterationAPrimeFlag(iteration));
     }
 }
 
@@ -126,11 +119,6 @@ __aicore__ inline void AivPublish(uint16_t id)
 __aicore__ inline void AivWait(uint16_t id)
 {
     CrossCoreWaitFlag<0x4, PIPE_V>(id);
-}
-
-__aicore__ inline void AivWaitMte2(uint16_t id)
-{
-    CrossCoreWaitFlag<0x4, PIPE_MTE2>(id);
 }
 
 __aicore__ inline void AivWaitMte3(uint16_t id)

@@ -65,8 +65,8 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
     if ASCEND_IS_AIC {
         SetHF32Mode(false);
         SetFlag<HardEvent::M_MTE1>(0);
-        for (int32_t eventId = 0; eventId < kL0CReleaseEventCount; ++eventId) {
-            SetFlag<HardEvent::FIX_M>(eventId);
+        for (int32_t region = 0; region < kL0CReleaseEventCount; ++region) {
+            SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
         }
     }
     const uint32_t group = GroupIndex();
@@ -81,8 +81,8 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
     }
     if ASCEND_IS_AIC {
         WaitFlag<HardEvent::M_MTE1>(0);
-        for (int32_t eventId = 0; eventId < kL0CReleaseEventCount; ++eventId) {
-            WaitFlag<HardEvent::FIX_M>(eventId);
+        for (int32_t region = 0; region < kL0CReleaseEventCount; ++region) {
+            WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
         }
     }
 }

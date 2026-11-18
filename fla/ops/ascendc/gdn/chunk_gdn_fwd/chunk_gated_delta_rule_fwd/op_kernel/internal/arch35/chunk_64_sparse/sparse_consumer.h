@@ -733,7 +733,7 @@ private:
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
         // Consume the previous O Fixpipe release before reinitializing l0C3.
-        WaitFlag<HardEvent::FIX_M>(kL0CReleaseO);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[2]);
         IssueMm(l0A0_, l0B0_, l0C3_, 64, 64, 128, true);
 
         AicWaitBoth(kConsS1);
@@ -762,14 +762,14 @@ private:
         LoadB(l0B1_, l1W_[slot], 128, 64, true);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        WaitFlag<HardEvent::FIX_M>(kL0CReleaseW);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[1]);
         IssueMm(l0A0_, l0B1_, l0C2_, 64, 128, 64, true);
         LoadB(l0B0_, l1U_[slot], 128, 64, true);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
-        SetFlag<HardEvent::FIX_M>(kL0CReleaseW);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[1]);
         // Publish W as soon as its Fixpipe is ordered; U and QS are independent.
         SetFlag<HardEvent::FIX_MTE1>(0);
 
@@ -777,7 +777,7 @@ private:
         WaitFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        WaitFlag<HardEvent::FIX_M>(kL0CReleaseVNew);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[0]);
         IssueMm(l0A0_, l0B0_, l0C0_, 64, 128, 64, true);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
@@ -818,7 +818,7 @@ private:
         AicPublishToBoth(kConsP1);
         FixB16L1Matrix(l1VNewC2, l0C0_[kChunk * kHalfDim], 64, 64, 64);
         SetFlag<HardEvent::FIX_MTE1>(1);
-        SetFlag<HardEvent::FIX_M>(kL0CReleaseVNew);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[0]);
 
         // Start D-C1 with Right-C1 only; C2 is loaded after its own ready event.
         AicWaitBoth(kConsRight);
@@ -829,13 +829,13 @@ private:
         LoadB(l0B0_, dB, 64, 64, true);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        WaitFlag<HardEvent::FIX_M>(kL0CReleaseDC1);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[3]);
         IssueMm(l0A0_, l0B0_, l0C1_, 128, 64, 64, true);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
         FixF32Halves(ubD_, l0C1_, 128, 64);
-        SetFlag<HardEvent::FIX_M>(kL0CReleaseDC1);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[3]);
         AicPublishToBoth(kConsD);
 
         // APrime uses independent l0A1. Once Right-C2 arrives, load its B and
@@ -850,7 +850,7 @@ private:
         LoadB(l0B1_, dB[kHalfDim * kHalfDim], 64, 64, true);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        WaitFlag<HardEvent::FIX_M>(kL0CReleaseDC2);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[4]);
         IssueMm(l0A0_, l0B1_, l0C1_[kStateElems / 2], 128, 64, 64, true);
         WaitFlag<HardEvent::M_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
@@ -860,7 +860,7 @@ private:
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
         FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C1_[kStateElems / 2], 128, 64);
-        SetFlag<HardEvent::FIX_M>(kL0CReleaseDC2);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[4]);
         AicPublishToBoth(kConsD1);
 
         WaitFlag<HardEvent::M_MTE1>(1);
@@ -871,7 +871,7 @@ private:
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
         FixB16ScaledHalves(ubO_, l0C3_, 64, 128, td_.scale);
-        SetFlag<HardEvent::FIX_M>(kL0CReleaseO);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[2]);
         AicPublishToBoth(kConsOL);
     }
 

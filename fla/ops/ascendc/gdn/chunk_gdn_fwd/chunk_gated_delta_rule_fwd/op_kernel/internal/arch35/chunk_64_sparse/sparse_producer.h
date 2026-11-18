@@ -107,7 +107,7 @@ public:
                     const int64_t iteration = 2 * pair + lane;
                     if (iteration < iterations && iteration >= 2) {
                         WaitIterationAic<PIPE_M>(iteration);
-                        WaitAPrimeAic<PIPE_MTE3>(iteration);
+                        WaitAPrimeAic<PIPE_FIX>(iteration);
                     }
                 }
                 for (uint32_t lane = 0; lane < 2; ++lane) {
@@ -126,7 +126,7 @@ public:
                     const int64_t chunk = 2 * pair + lane;
                     if (chunk < iterations) {
                         if (chunk < loc_.chunks) {
-                            AicWaitOwner<PIPE_FIX>(chunk, kProdA);
+                            AicWaitOwner<PIPE_S>(chunk, kProdA);
                         }
                         // Short and empty chains still join every global generation.
                         SetIterationAic(chunk);
@@ -137,7 +137,7 @@ public:
                     if (chunk < iterations) {
                         if (chunk < loc_.chunks) {
                             // Backpressure also releases the single KKT/QK UB slots.
-                            AicWaitOwner<PIPE_FIX>(chunk, kProdAPrime);
+                            AicWaitOwner<PIPE_S>(chunk, kProdAPrime);
                         }
                         SetAPrimeAic(chunk);
                     }
@@ -145,11 +145,11 @@ public:
             }
             if (iterations >= 2) {
                 WaitIterationAic<PIPE_M>(iterations - 2);
-                WaitAPrimeAic<PIPE_MTE3>(iterations - 2);
+                WaitAPrimeAic<PIPE_FIX>(iterations - 2);
             }
             if (iterations >= 1) {
                 WaitIterationAic<PIPE_M>(iterations - 1);
-                WaitAPrimeAic<PIPE_MTE3>(iterations - 1);
+                WaitAPrimeAic<PIPE_FIX>(iterations - 1);
             }
         }
     }

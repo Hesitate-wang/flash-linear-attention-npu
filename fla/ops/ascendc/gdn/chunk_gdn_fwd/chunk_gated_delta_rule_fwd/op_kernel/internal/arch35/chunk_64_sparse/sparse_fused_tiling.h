@@ -11,8 +11,6 @@
 
 namespace GdnChunk64Sparse {
 
-constexpr uint32_t kSparseBarrierFlagId = 7;
-
 struct FusedTilingData {
     int64_t batch;
     int64_t sequenceCount;
