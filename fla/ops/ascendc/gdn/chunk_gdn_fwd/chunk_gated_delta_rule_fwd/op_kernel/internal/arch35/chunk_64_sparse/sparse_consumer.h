@@ -24,7 +24,7 @@ constexpr uint16_t kConsP1 = 9;
 constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
 constexpr uint16_t kConsS1 = 0;
-constexpr uint16_t kConsQExp = 1;
+constexpr uint16_t kConsQExp = 7; // Continuous GM->L1 DataCopy reserves mode-4 flags 1/17.
 
 class ConsumerRole {
 public:
@@ -134,7 +134,8 @@ public:
     {
         if ASCEND_IS_AIV {
             if ((chunk & 1) == 0) {
-                WaitNormalizedQK(chunk);
+                WaitNormalizedK(chunk);
+                WaitNormalizedQ(chunk);
             }
         }
     }
@@ -428,10 +429,11 @@ private:
         SetUbRelease(ubRightArmed_, 4);
         AivPublish(kConsRight1);
         if (chunk + 1 < loc_.chunks) {
-            // Only the uploads follow current Right in ordered MTE3; Vb/Kbg
-            // were already computed in Prepare, so the transfers overlap D.
+            // Current Right is published before next-chunk L1 uploads. Vb/Kbg
+            // were computed in Prepare; QExp overlaps the current state update.
             UploadNextVb(chunk + 1);
             UploadNormalizedK(chunk + 1);
+            ConsumeNormalizedQ(chunk + 1);
         }
 
         AivWait(kConsD);
@@ -441,6 +443,7 @@ private:
             SetFlag<HardEvent::V_MTE3>(0);
             WaitFlag<HardEvent::V_MTE3>(0);
             PrepareCurrentStateHalf(chunk + 1, 0, true);
+            PrepareRightDecay(chunk + 1);
         }
         AivWait(kConsD1);
         LocalTensor<float> dC2 = ubD_[kHalfDim * kHalfDim];
@@ -449,22 +452,21 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
         if (chunk + 1 < loc_.chunks) {
             PrepareCurrentStateHalf(chunk + 1, 1, true);
-            PrepareRightDecay(chunk + 1);
         }
         AivWaitMte3(kConsOL);
         StoreOutput(window.tokenStart + firstRow, rows);
-        if (chunk + 1 < loc_.chunks) {
-            // Next Q/K Vector follows the full O and overlaps the next round.
-            ConsumeNormalizedQ(chunk + 1);
-        }
     }
 
-    __aicore__ inline void WaitNormalizedQK(int64_t chunk)
+    __aicore__ inline void WaitNormalizedK(int64_t chunk)
     {
         const int64_t pair = chunk >> 1;
-        // Both Consumer AIVs join once per even chunk. The odd chunk relies on
-        // this same-AIV generation wait and needs no additional synchronization.
-        PublishMode0Flag<PIPE_MTE3, PIPE_MTE2>(IterationNormalizedQKFlag(pair));
+        PublishMode0Flag<PIPE_MTE3, PIPE_MTE2>(IterationNormalizedKFlag(pair));
+    }
+
+    __aicore__ inline void WaitNormalizedQ(int64_t chunk)
+    {
+        const int64_t pair = chunk >> 1;
+        PublishMode0Flag<PIPE_MTE3, PIPE_MTE2>(IterationNormalizedQFlag(pair));
     }
 
     __aicore__ inline int64_t NormalizedQKChunkOffset(int64_t chunk) const
@@ -494,9 +496,16 @@ private:
         // new GM load overwrites its UB. The other slot remains independent.
         WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
         const int64_t offset = NormalizedQKChunkOffset(chunk);
+        if ((chunk & 1) == 0) {
+            // Join K and Q independently so the K GM read can overlap Q compute.
+            WaitNormalizedK(chunk);
+        }
         CopyNormalizedGmToUb(kBuffer, gmNormK_, offset, firstRow);
         SetFlag<HardEvent::MTE2_MTE3>(slot);
         SetFlag<HardEvent::MTE2_V>(slot);
+        if ((chunk & 1) == 0) {
+            WaitNormalizedQ(chunk);
+        }
         CopyNormalizedGmToUb(qBuffer, gmNormQ_, offset, firstRow);
         // K and Q have independent Vector readiness events. Q uses 4/5;
         // initial-state loading uses 2 and V uses 3.
@@ -561,7 +570,6 @@ private:
     {
         if ((chunk & 1) == 0) {
             // At each even chunk, issue both chunks' GM transfers back-to-back.
-            WaitNormalizedQK(chunk);
             IssueNormalizedQKLoad(chunk);
             if (chunk + 1 < loc_.chunks) {
                 IssueNormalizedQKLoad(chunk + 1);

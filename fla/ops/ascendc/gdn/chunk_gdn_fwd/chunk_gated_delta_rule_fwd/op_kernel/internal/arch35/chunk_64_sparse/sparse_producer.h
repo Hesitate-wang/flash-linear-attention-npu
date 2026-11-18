@@ -231,15 +231,20 @@ private:
         return (tile * td_.keyHeads + loc_.kh) * kChunkElems;
     }
 
-    __aicore__ inline void PublishNormalizedQKPair(int64_t pair)
+    __aicore__ inline void PublishNormalizedKPair(int64_t pair)
     {
         if (pair >= 2) {
-            // Reuse this parity only after the pair-2 generation was consumed.
-            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(pair - 2));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(pair - 2));
         }
-        // The two Producer AIVs set the same mode-0 generation once per pair.
-        // No immediate wait: Consumer reads are synchronized independently.
-        SetMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(pair));
+        SetMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(pair));
+    }
+
+    __aicore__ inline void PublishNormalizedQPair(int64_t pair)
+    {
+        if (pair >= 2) {
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(pair - 2));
+        }
+        SetMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(pair));
     }
 
     __aicore__ inline void CompleteNormalizedQK(int64_t first)
@@ -251,14 +256,17 @@ private:
             nextPair = (last >> 1) + 1;
         }
         for (int64_t pair = nextPair; pair < globalPairs; ++pair) {
-            PublishNormalizedQKPair(pair);
+            PublishNormalizedKPair(pair);
+            PublishNormalizedQPair(pair);
         }
-        // Only the final two local generations can remain unconsumed here.
+        // Only the final two local K/Q generations can remain unconsumed here.
         if (globalPairs >= 2) {
-            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 2));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(globalPairs - 2));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(globalPairs - 2));
         }
         if (globalPairs >= 1) {
-            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQKFlag(globalPairs - 1));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(globalPairs - 1));
+            WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(globalPairs - 1));
         }
     }
 
@@ -277,7 +285,6 @@ private:
         // Publish this slot's K/Q L1 reads without draining them here. The
         // matching inverse waits this event before reusing the UB as L/X.
         SetFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
-        PublishNormalizedQKPair(pair);
     }
 
     __aicore__ inline void IssueInputs(int64_t chunk, uint32_t rows)
@@ -374,8 +381,9 @@ private:
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], kChunk, kDim, kChunk, 0);
-        DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], kChunkElems);
         AivPublish(kProdQ);
+        DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], kChunkElems);
+        PublishNormalizedQPair(pair);
     }
 
     __aicore__ inline void PrepareK(int64_t chunk)
@@ -390,8 +398,9 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], kChunk, kDim, kChunk, 0);
-        DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], kChunkElems);
         AivPublish(kProdK);
+        DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], kChunkElems);
+        PublishNormalizedKPair(pair);
     }
 
     __aicore__ inline void WriteT(int64_t chunk, uint32_t rows, LocalTensor<bfloat16_t> src)

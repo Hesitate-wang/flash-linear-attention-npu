@@ -17,10 +17,11 @@ constexpr uint16_t kAiv1FlagOffset = 16;
 constexpr uint16_t kSparseBarrierFlagIdAlt = 12;
 constexpr uint16_t kSparseAPrimeBarrierFlagId = 13;
 constexpr uint16_t kSparseAPrimeBarrierFlagIdAlt = 14;
-// AIV mode-0 QHat/KHat pair readiness. These IDs are not used by either
-// Producer or Consumer mode-4 traffic on AIV; AIC mode-0 has its own namespace.
-constexpr uint16_t kSparseNormalizedQKFlagId = 14;
-constexpr uint16_t kSparseNormalizedQKFlagIdAlt = 15;
+// AIV mode-0 normalized K/Q readiness uses independent parity channels.
+constexpr uint16_t kSparseNormalizedKFlagId = 10;
+constexpr uint16_t kSparseNormalizedKFlagIdAlt = 11;
+constexpr uint16_t kSparseNormalizedQFlagId = 14;
+constexpr uint16_t kSparseNormalizedQFlagIdAlt = 15;
 
 // Independent L0C accumulator releases. Prime and drain every ID at the
 // pipeline boundary; each role waits only before reusing its own region.
@@ -31,21 +32,26 @@ constexpr int32_t kL0CReleaseDC1 = 3;
 constexpr int32_t kL0CReleaseDC2 = 4;
 constexpr int32_t kL0CReleaseEventCount = 5;
 
-__aicore__ inline uint16_t IterationNormalizedQKFlag(int64_t pair)
+__aicore__ inline uint16_t IterationNormalizedKFlag(int64_t pair)
 {
-    return (pair & 1) != 0 ? kSparseNormalizedQKFlagIdAlt : kSparseNormalizedQKFlagId;
+    return (pair & 1) != 0 ? kSparseNormalizedKFlagIdAlt : kSparseNormalizedKFlagId;
+}
+
+__aicore__ inline uint16_t IterationNormalizedQFlag(int64_t pair)
+{
+    return (pair & 1) != 0 ? kSparseNormalizedQFlagIdAlt : kSparseNormalizedQFlagId;
 }
 
 template <pipe_t SetPipe>
 __aicore__ inline void SetMode0Flag(uint16_t flagId)
 {
-    // CrossCoreSetFlag<0x0, SetPipe>(flagId);
+    CrossCoreSetFlag<0x0, SetPipe>(flagId);
 }
 
 template <pipe_t WaitPipe>
 __aicore__ inline void WaitMode0Flag(uint16_t flagId)
 {
-    // CrossCoreWaitFlag<0x0, WaitPipe>(flagId);
+    CrossCoreWaitFlag<0x0, WaitPipe>(flagId);
 }
 
 template <pipe_t SetPipe, pipe_t WaitPipe>
@@ -67,17 +73,17 @@ __aicore__ inline uint16_t IterationAPrimeFlag(int64_t iteration)
 
 __aicore__ inline void SetAPrimeAic(int64_t iteration)
 {
-    // if ASCEND_IS_AIC {
-    //     SetMode0Flag<PIPE_MTE3>(IterationAPrimeFlag(iteration));
-    // }
+    if ASCEND_IS_AIC {
+        SetMode0Flag<PIPE_MTE3>(IterationAPrimeFlag(iteration));
+    }
 }
 
 template <pipe_t WaitPipe>
 __aicore__ inline void WaitAPrimeAic(int64_t iteration)
 {
-    // if ASCEND_IS_AIC {
-    //     WaitMode0Flag<WaitPipe>(IterationAPrimeFlag(iteration));
-    // }
+    if ASCEND_IS_AIC {
+        WaitMode0Flag<WaitPipe>(IterationAPrimeFlag(iteration));
+    }
 }
 
 template <pipe_t WaitPipe>
@@ -91,17 +97,17 @@ __aicore__ inline void PublishAPrimeAic(int64_t iteration)
 // wait until the same parity flag is reused two iterations later.
 __aicore__ inline void SetIterationAic(int64_t iteration)
 {
-    // if ASCEND_IS_AIC {
-    //     SetMode0Flag<PIPE_FIX>(IterationBarrierFlag(iteration));
-    // }
+    if ASCEND_IS_AIC {
+        SetMode0Flag<PIPE_FIX>(IterationBarrierFlag(iteration));
+    }
 }
 
 template <pipe_t WaitPipe>
 __aicore__ inline void WaitIterationAic(int64_t iteration)
 {
-    // if ASCEND_IS_AIC {
-    //     WaitMode0Flag<WaitPipe>(IterationBarrierFlag(iteration));
-    // }
+    if ASCEND_IS_AIC {
+        WaitMode0Flag<WaitPipe>(IterationBarrierFlag(iteration));
+    }
 }
 
 // // Consumer still publishes and drains each T generation immediately.
