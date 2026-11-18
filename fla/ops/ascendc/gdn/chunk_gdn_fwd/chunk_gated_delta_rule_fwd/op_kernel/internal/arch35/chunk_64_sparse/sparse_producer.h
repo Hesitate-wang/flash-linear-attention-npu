@@ -14,11 +14,9 @@
 namespace GdnChunk64Sparse {
 
 constexpr uint16_t kProdKkt = 1;
-constexpr uint16_t kProdA = 3;
 constexpr uint16_t kProdK = 8;
 constexpr uint16_t kProdQ = 9;
 constexpr uint16_t kProdQK = 10;
-constexpr uint16_t kProdAPrime = 11;
 constexpr int32_t kProdInputMte3EventBase = 0;
 constexpr int32_t kProdOutputMte3EventBase = 2;
 
@@ -106,18 +104,26 @@ public:
                 // events were consumed by their same-slot preprocess.
                 WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + lastSlot);
             }
+            // An odd chunk count leaves the last pair without an odd lane; the
+            // idle sub still joins that pair's mode-2 rounds so the AIC wait
+            // completes.
+            if (sub_ == 1 && (loc_.chunks & 1) != 0) {
+                CrossCoreSetFlag<0x2, PIPE_MTE3>(kProdTPairDoneFlag);
+                CrossCoreSetFlag<0x2, PIPE_MTE3>(kProdAPairDoneFlag);
+            }
             CompleteNormalizedQK(first);
         }
         if ASCEND_IS_AIC {
             const int64_t iterations = td_.maxChunks;
             const int64_t pairs = (iterations + 1) / 2;
+            const int64_t localPairs = (loc_.chunks + 1) / 2;
             for (int64_t pair = 0; pair < pairs; ++pair) {
-                for (uint32_t lane = 0; lane < 2; ++lane) {
-                    const int64_t iteration = 2 * pair + lane;
-                    if (iteration < iterations && iteration >= 2) {
-                        WaitIterationAic<PIPE_MTE2>(iteration);
-                        WaitAPrimeAic<PIPE_FIX>(iteration);
-                    }
+                // Pairs 0 and 1 set freely; from pair 2 on, drain the
+                // generation published two pairs earlier before its flag is
+                // set again.
+                if (pair >= 2) {
+                    WaitIterationAic<PIPE_MTE2>(pair);
+                    WaitAPrimeAic<PIPE_FIX>(pair);
                 }
                 for (uint32_t lane = 0; lane < 2; ++lane) {
                     const int64_t chunk = 2 * pair + lane;
@@ -131,39 +137,28 @@ public:
                         RunQK(chunk);
                     }
                 }
-                for (uint32_t lane = 0; lane < 2; ++lane) {
-                    const int64_t chunk = 2 * pair + lane;
-                    if (chunk < iterations) {
-                        if (chunk < loc_.chunks) {
-                            // The T hand-off rides the AIC's otherwise idle MTE2
-                            // queue: the owner wait and the barrier set stay
-                            // ordered there without stalling the issue stream.
-                            AicWaitOwner<PIPE_MTE2>(chunk, kProdA);
-                        }
-                        // Short and empty chains still join every global generation.
-                        SetIterationAic<PIPE_MTE2>(chunk);
-                    }
+                if (pair < localPairs) {
+                    // One mode-2 wait covers both lanes' T stores of this pair
+                    // and rides the AIC's otherwise idle MTE2 queue.
+                    CrossCoreWaitFlag<0x2, PIPE_MTE2>(kProdTPairDoneFlag);
                 }
-                for (uint32_t lane = 0; lane < 2; ++lane) {
-                    const int64_t chunk = 2 * pair + lane;
-                    if (chunk < iterations) {
-                        if (chunk < loc_.chunks) {
-                            // Backpressure also releases the single KKT/QK UB slots.
-                            // The FIX wait keeps the next FixF32 behind the AIV's
-                            // KKT/QK consumption; it must not move off the FIX pipe.
-                            AicWaitOwner<PIPE_FIX>(chunk, kProdAPrime);
-                        }
-                        SetAPrimeAic(chunk);
-                    }
+                // Short and empty chains still join every global generation.
+                SetIterationAic<PIPE_MTE2>(pair);
+                if (pair < localPairs) {
+                    // Backpressure also releases the single KKT/QK UB slots.
+                    // The FIX wait keeps the next pair's FixF32 behind both
+                    // AIVs' KKT/QK consumption; it must not move off FIX.
+                    CrossCoreWaitFlag<0x2, PIPE_FIX>(kProdAPairDoneFlag);
                 }
+                SetAPrimeAic(pair);
             }
-            if (iterations >= 2) {
-                WaitIterationAic<PIPE_MTE2>(iterations - 2);
-                WaitAPrimeAic<PIPE_FIX>(iterations - 2);
+            if (pairs >= 2) {
+                WaitIterationAic<PIPE_MTE2>(pairs - 2);
+                WaitAPrimeAic<PIPE_FIX>(pairs - 2);
             }
-            if (iterations >= 1) {
-                WaitIterationAic<PIPE_MTE2>(iterations - 1);
-                WaitAPrimeAic<PIPE_FIX>(iterations - 1);
+            if (pairs >= 1) {
+                WaitIterationAic<PIPE_MTE2>(pairs - 1);
+                WaitAPrimeAic<PIPE_FIX>(pairs - 1);
             }
         }
     }
@@ -448,7 +443,8 @@ private:
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         WriteT(chunk, static_cast<uint32_t>(window.rows), ubABf_[slot]);
-        AivPublish(kProdA);
+        // Mode-2 pairs both lanes' T stores into one flag for the AIC.
+        CrossCoreSetFlag<0x2, PIPE_MTE3>(kProdTPairDoneFlag);
     }
 
     __aicore__ inline void BuildAPrime(int64_t chunk)
@@ -465,7 +461,7 @@ private:
         // This MTE3 event covers both T and APrime in the slot. It is consumed
         // by preprocess two pairs later, or by the chain-tail drain.
         SetFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
-        AivPublish(kProdAPrime);
+        CrossCoreSetFlag<0x2, PIPE_MTE3>(kProdAPairDoneFlag);
     }
 
     __aicore__ inline void RunQK(int64_t chunk)

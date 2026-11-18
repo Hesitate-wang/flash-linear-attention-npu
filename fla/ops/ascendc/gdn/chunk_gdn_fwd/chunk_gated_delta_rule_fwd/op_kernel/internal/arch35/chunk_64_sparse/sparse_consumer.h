@@ -185,7 +185,10 @@ private:
         l1H_[1] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1H1);
         l1VNew_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1VNew);
         l1Right_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1Right);
-        l1T_ = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1T);
+        for (uint32_t slot = 0; slot < 2; ++slot) {
+            l1T_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(
+                kCL1T + slot * kCL1TSlotBytes);
+        }
         for (uint32_t slot = 0; slot < 2; ++slot) {
             l1W_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1W + slot * kCL1Slot16);
             l1U_[slot] = buf.GetBuffer<BufferType::ASCEND_CB, bfloat16_t>(kCL1U + slot * kCL1Slot16);
@@ -379,7 +382,7 @@ private:
             Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
             SetFlag<HardEvent::V_MTE3>(0);
             WaitFlag<HardEvent::V_MTE3>(0);
-            CopyNzToL1(l1T_, ubZeroBf_, kHalfRows, kChunk, kChunk, firstRow);
+            CopyNzToL1(l1T_[0], ubZeroBf_, kHalfRows, kChunk, kChunk, firstRow);
         }
         PrepareCurrentStateHalf(chunk, 0, applyDecay);
         PrepareCurrentStateHalf(chunk, 1, applyDecay);
@@ -708,7 +711,7 @@ private:
         params.dstNzMatrixStride = 0;
         const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window.tokenStart,
                                           td_.valueHeads, td_.tokens, kChunk);
-        DataCopy(l1T_, gmT_[offset], params);
+        DataCopy(l1T_[chunk & 1], gmT_[offset], params);
     }
 
     __aicore__ inline void LoadAPrime(int64_t chunk)
@@ -751,14 +754,27 @@ private:
     __aicore__ inline void RunCubePrepare(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        LoadT(chunk);
+        if ((chunk & 1) == 0) {
+            // One pair-granular join covers both lanes: load the pair's T
+            // tiles back-to-back, like the AIV's normalized K/Q pair loads.
+            // Each slot's previous LoadA retired two chunks earlier.
+            if (chunk >= 2) {
+                WaitFlag<HardEvent::MTE1_MTE2>(0);
+                WaitFlag<HardEvent::MTE1_MTE2>(1);
+            }
+            LoadT(chunk);
+            if (chunk + 1 < loc_.chunks) {
+                LoadT(chunk + 1);
+            }
+        }
         SetFlag<HardEvent::MTE2_MTE1>(0);
         WaitFlag<HardEvent::MTE2_MTE1>(0);
         AicWaitBoth(kConsW);
         // T@Kbg and T@Vb do not depend on H. Compute them before QS, using
         // l0C2/l0C0 independently of the previous D panels in l0C1.
         WaitFlag<HardEvent::M_MTE1>(0);
-        LoadA(l0A0_, l1T_, 64, 64, false);
+        LoadA(l0A0_, l1T_[slot], 64, 64, false);
+        SetFlag<HardEvent::MTE1_MTE2>(slot);
         LoadB(l0B1_, l1W_[slot], 128, 64, true);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
@@ -840,9 +856,17 @@ private:
 
         // APrime uses independent l0A1. Once Right-C2 arrives, load its B and
         // queue D-C2 before consuming D-C1's release for the VNew prefetch.
-        // Delay the mode-0 publish until O so T, W and v_new do not wait for APrime.
-        PublishAPrimeAic<PIPE_MTE2>(chunk);
-        LoadAPrime(chunk);
+        // Delay the mode-0 publish until O so T, W and v_new do not wait for
+        // APrime. APrime generations are pair-granular: the even chunk joins
+        // once and loads both lanes' tiles back-to-back into their parity
+        // slots.
+        if ((chunk & 1) == 0) {
+            PublishAPrimeAic<PIPE_MTE2>(chunk >> 1);
+            LoadAPrime(chunk);
+            if (chunk + 1 < loc_.chunks) {
+                LoadAPrime(chunk + 1);
+            }
+        }
         SetFlag<HardEvent::MTE2_MTE1>(0);
         WaitFlag<HardEvent::MTE2_MTE1>(0);
         LoadA(l0A1_, l1APrime_[slot], 64, 64, false);
@@ -898,7 +922,7 @@ private:
     LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubEnergyRecip_[3];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];
-    LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_;
+    LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_[2];
     LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
     LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
 };

@@ -16,6 +16,11 @@ constexpr uint16_t kAiv1FlagOffset = 16;
 // so equal numeric IDs on different execution units do not share a channel.
 constexpr uint16_t kSparseBarrierFlagIds[2] = {7, 12};
 constexpr uint16_t kSparseAPrimeBarrierFlagIds[2] = {13, 14};
+// Producer-internal mode-2 pair-completion flags: each AIV sets after its
+// UB->GM store of the pair's lane, so one AIC wait covers both lanes. The IDs
+// avoid every mode-0 flag in use on either execution-unit domain.
+constexpr uint16_t kProdTPairDoneFlag = 2;
+constexpr uint16_t kProdAPairDoneFlag = 4;
 // AIV mode-0 normalized K/Q readiness channels, indexed by pair parity.
 constexpr uint16_t kSparseNormalizedKFlagIds[2] = {10, 11};
 constexpr uint16_t kSparseNormalizedQFlagIds[2] = {14, 15};
@@ -86,10 +91,11 @@ __aicore__ inline void PublishAPrimeAic(int64_t iteration)
     WaitAPrimeAic<WaitPipe>(iteration);
 }
 
-// Producer sets this after the current T is complete but delays the matching
-// wait until the same parity flag is reused two iterations later. The producer
-// joins on its idle MTE2 pipe so its issue stream never stalls; the consumer
-// keeps the default FIX join that transitively protects its single L1 T buffer.
+// T and APrime mode-0 generations are pair-granular: every AIC sets once per
+// pair, and the producer drains a pair generation two pairs after its set.
+// The producer joins on its idle MTE2 pipe so its issue stream never stalls;
+// the consumer keeps the default FIX join that transitively protects its
+// single L1 T buffer.
 template <pipe_t SetPipe = PIPE_FIX>
 __aicore__ inline void SetIterationAic(int64_t iteration)
 {

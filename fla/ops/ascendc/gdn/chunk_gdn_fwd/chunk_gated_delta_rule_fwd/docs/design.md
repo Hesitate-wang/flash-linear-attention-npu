@@ -91,10 +91,13 @@ Mode-4 ownership is chunk-relative:
 
 - `kProdK` / `kProdQ`: the owner has published full normalized K/Q to L1; AIC waits only for that owner.
 - `kProdKkt` / `kProdQK`: AIC has delivered a full 64x64 result to the owner AIV.
-- `kProdA`: the owner's complete T store has been issued through MTE3.
-- `kProdAPrime`: the owner's complete APrime store has been issued through MTE3 and provides per-pair backpressure.
 
-Short and empty Producer chains still join every valid global AIC generation. When `maxChunks` is odd, the nonexistent last lane does not create an extra generation. Consumer T and APrime mode-0 hand-offs remain separate.
+Mode-2 pair completion is lane-aggregated:
+
+- `kProdTPairDoneFlag`: each AIV sets after its lane's T UB->GM store; one AIC wait (idle MTE2 queue) covers both lanes of the pair.
+- `kProdAPairDoneFlag`: same shape for APrime; the AIC waits on FIX so the next pair's KKT/QK FixF32 stays behind both AIVs' UB consumption.
+
+T and APrime mode-0 generations are pair-granular: every AIC joins once per pair; the producer drains a pair generation two pairs after its set (pairs 0/1 set freely, pair 2 drains pair 0). The consumer AIC joins before the even chunk and loads both lanes' T (and APrime) tiles back-to-back, like the AIV's normalized K/Q pair loads; T keeps one L1 slot per pair lane, guarded across pairs by local MTE1_MTE2 flags. An odd chunk count leaves the last pair without an odd lane, which the idle producer AIV still joins in mode-2. Short and empty chains still join every valid global generation.
 
 ## 8. Numeric order
 

@@ -90,8 +90,11 @@ constexpr uint32_t kCL1VNew = 208 * kKiB;
 constexpr uint32_t kCL1Right = 224 * kKiB;
 constexpr uint32_t kCL1APrime = 240 * kKiB;
 constexpr uint32_t kCL1APrimeSlotBytes = 8 * kKiB;
+// T keeps one slot per pair lane: the even chunk loads both tiles back-to-back
+// after a single pair-granular mode-0 join, like the normalized K/Q loads.
 constexpr uint32_t kCL1T = 256 * kKiB;
-constexpr uint32_t kCL1End = 264 * kKiB;
+constexpr uint32_t kCL1TSlotBytes = 8 * kKiB;
+constexpr uint32_t kCL1End = kCL1T + 2 * kCL1TSlotBytes;
 static_assert(kCL1End <= 512 * kKiB);
 
 constexpr uint32_t kL0Bank0 = 0;

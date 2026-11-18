@@ -40,21 +40,34 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     }
     if ASCEND_IS_AIC {
         for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-            // T is complete after the producer's mode-0. RunCubePrepare starts
-            // with the Consumer's GM->L1 T copy, so synchronize before Prepare.
-            PublishIterationAic<PIPE_MTE2>(iteration);
+            // T and APrime mode-0 generations are pair-granular: join once per
+            // pair, before the even chunk's GM->L1 T copy in RunCubePrepare.
+            if ((iteration & 1) == 0) {
+                PublishIterationAic<PIPE_MTE2>(iteration >> 1);
+            }
             if (iteration < chunks) {
                 role.RunPrepare(iteration);
             }
             if (iteration < chunks) {
                 role.RunAfterWu(iteration);
-            } else {
+            } else if ((iteration & 1) == 0) {
                 // Shorter and empty chains still join every global mode-0
                 // generation; active chains publish at O inside LoadAPrime.
                 // No MTE2 load follows an idle iteration, so block MTE3 to
                 // prevent a later Set from reusing this flag before the wait.
-                PublishAPrimeAic<PIPE_MTE3>(iteration);
+                PublishAPrimeAic<PIPE_MTE3>(iteration >> 1);
             }
+        }
+        // Drain the local MTE1->MTE2 guards of the final l1T_ reads. An even
+        // chunk count leaves both parity flags pending, an odd one only the
+        // even slot's.
+        if (chunks >= 2) {
+            WaitFlag<HardEvent::MTE1_MTE2>(0);
+            if ((chunks & 1) == 0) {
+                WaitFlag<HardEvent::MTE1_MTE2>(1);
+            }
+        } else if (chunks == 1) {
+            WaitFlag<HardEvent::MTE1_MTE2>(0);
         }
     }
     role.EndChain();
