@@ -449,10 +449,18 @@ private:
     {
         const uint32_t l1Slot = static_cast<uint32_t>((chunk >> 1) % 3);
         AicWaitOwner(chunk, kProdQ);
-        ComputeMm(l1QHat_[l1Slot], l1K_[l1Slot], l0A0_, l0B1_, l0C1_, 64, 64, 128,
-                  false, false);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, l1QHat_[l1Slot], 64, 128, false);
+        LoadB(l0B1_, l1K_[l1Slot], 64, 128, false);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::FIX_M>(0);
+        IssueMm(l0A0_, l0B1_, l0C1_, 64, 64, 128, true);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixF32(ubQk_, l0C1_, 64, 64, (chunk & 1) != 0);
-        ReleaseL0C();
+        SetFlag<HardEvent::FIX_M>(0);
         AicPublishToOwner(chunk, kProdQK);
     }
 
@@ -460,10 +468,18 @@ private:
     {
         const uint32_t l1Slot = static_cast<uint32_t>((chunk >> 1) % 3);
         AicWaitOwner(chunk, kProdK);
-        ComputeMm(l1K_[l1Slot], l1K_[l1Slot], l0A0_, l0B0_, l0C0_, 64, 64, 128,
-                  false, false);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, l1K_[l1Slot], 64, 128, false);
+        LoadB(l0B0_, l1K_[l1Slot], 64, 128, false);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::FIX_M>(0);
+        IssueMm(l0A0_, l0B0_, l0C0_, 64, 64, 128, true);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixF32(ubKkt_, l0C0_, 64, 64, (chunk & 1) != 0);
-        ReleaseL0C();
+        SetFlag<HardEvent::FIX_M>(0);
         AicPublishToOwner(chunk, kProdKkt);
     }
 

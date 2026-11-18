@@ -22,6 +22,15 @@ constexpr uint16_t kSparseAPrimeBarrierFlagIdAlt = 14;
 constexpr uint16_t kSparseNormalizedQKFlagId = 14;
 constexpr uint16_t kSparseNormalizedQKFlagIdAlt = 15;
 
+// Independent L0C accumulator releases. Prime and drain every ID at the
+// pipeline boundary; each role waits only before reusing its own region.
+constexpr int32_t kL0CReleaseVNew = 0;
+constexpr int32_t kL0CReleaseW = 1;
+constexpr int32_t kL0CReleaseO = 2;
+constexpr int32_t kL0CReleaseDC1 = 3;
+constexpr int32_t kL0CReleaseDC2 = 4;
+constexpr int32_t kL0CReleaseEventCount = 5;
+
 __aicore__ inline uint16_t IterationNormalizedQKFlag(int64_t pair)
 {
     return (pair & 1) != 0 ? kSparseNormalizedQKFlagIdAlt : kSparseNormalizedQKFlagId;

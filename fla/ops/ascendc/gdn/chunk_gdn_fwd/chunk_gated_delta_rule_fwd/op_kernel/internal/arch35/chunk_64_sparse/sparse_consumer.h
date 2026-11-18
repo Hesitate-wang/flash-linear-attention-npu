@@ -24,6 +24,7 @@ constexpr uint16_t kConsP1 = 9;
 constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
 constexpr uint16_t kConsS1 = 0;
+constexpr uint16_t kConsQExp = 1;
 
 class ConsumerRole {
 public:
@@ -336,8 +337,8 @@ private:
             }
             PrepareLoadedGate(chunk + 1);
             PrepareNormalizedQKLoad(chunk + 1);
-            PrepareNextVb(chunk + 1);
-            ConsumeNormalizedK(chunk + 1);
+            ComputeNextVb(chunk + 1);
+            ComputeNormalizedK(chunk + 1);
         }
     }
 
@@ -426,6 +427,12 @@ private:
         CopyNzToL1(l1RightC2, rightC2, kHalfRows, kHalfDim, kChunk, firstRow);
         SetUbRelease(ubRightArmed_, 4);
         AivPublish(kConsRight1);
+        if (chunk + 1 < loc_.chunks) {
+            // Only the uploads follow current Right in ordered MTE3; Vb/Kbg
+            // were already computed in Prepare, so the transfers overlap D.
+            UploadNextVb(chunk + 1);
+            UploadNormalizedK(chunk + 1);
+        }
 
         AivWait(kConsD);
         WaitUbRelease(ubStateBArmed_, 5);
@@ -496,24 +503,36 @@ private:
         SetFlag<HardEvent::MTE2_V>(4 + slot);
     }
 
-    __aicore__ inline void ConsumeNormalizedK(int64_t chunk)
+    __aicore__ inline void ComputeNormalizedK(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         LocalTensor<bfloat16_t> kBuffer = slot == 0 ? ubKHat_ : ubK_;
-        WaitFlag<HardEvent::MTE2_MTE3>(slot);
-        CopyNzToL1(l1K_[slot], kBuffer, kHalfRows, kDim, kChunk, firstRow);
-        SetFlag<HardEvent::MTE3_MTE2>(1 + slot);
-
         WaitFlag<HardEvent::MTE2_V>(slot);
         WaitUbRelease(ubWArmed_, 2);
         KHatKbgNzVF(kBuffer, ubW_, ubBeta_[gateSlot], ubEnergy_[gateSlot], firstRow);
+    }
+
+    __aicore__ inline void UploadNormalizedK(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * kHalfRows;
+        LocalTensor<bfloat16_t> kBuffer = slot == 0 ? ubKHat_ : ubK_;
+        WaitFlag<HardEvent::MTE2_MTE3>(slot);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
+        CopyNzToL1(l1K_[slot], kBuffer, kHalfRows, kDim, kChunk, firstRow);
+        SetFlag<HardEvent::MTE3_MTE2>(1 + slot);
         CopyNzToL1(l1W_[slot], ubW_, kHalfRows, kDim, kChunk, firstRow);
         SetUbRelease(ubWArmed_, 2);
         AivPublish(kConsW);
+    }
+
+    __aicore__ inline void ConsumeNormalizedK(int64_t chunk)
+    {
+        ComputeNormalizedK(chunk);
+        UploadNormalizedK(chunk);
     }
 
     __aicore__ inline void ConsumeNormalizedQ(int64_t chunk)
@@ -529,6 +548,7 @@ private:
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
         SetUbRelease(ubOSBArmed_, 1);
+        AivPublish(kConsQExp);
     }
 
     __aicore__ inline void ConsumeNormalizedQK(int64_t chunk)
@@ -640,19 +660,30 @@ private:
         SetFlag<HardEvent::V_S>(2);
     }
 
-    __aicore__ inline void PrepareNextVb(int64_t chunk)
+    __aicore__ inline void ComputeNextVb(int64_t chunk)
     {
-        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
         WaitFlag<HardEvent::MTE2_V>(3);
         WaitUbRelease(ubUArmed_, 3);
         ScaleVbNzVF(ubV_, ubU_, ubBeta_[gateSlot], firstRow);
+    }
+
+    __aicore__ inline void UploadNextVb(int64_t chunk)
+    {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
+        const uint32_t firstRow = sub_ * kHalfRows;
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1U_[slot], ubU_, kHalfRows, kDim, kChunk, firstRow);
         SetUbRelease(ubUArmed_, 3);
         AivPublish(kConsU);
+    }
+
+    __aicore__ inline void PrepareNextVb(int64_t chunk)
+    {
+        ComputeNextVb(chunk);
+        UploadNextVb(chunk);
     }
 
     __aicore__ inline void LoadT(int64_t chunk)
@@ -670,52 +701,79 @@ private:
         const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window.tokenStart,
                                           td_.valueHeads, td_.tokens, kChunk);
         DataCopy(l1T_, gmT_[offset], params);
-        SetFlag<HardEvent::MTE2_MTE1>(0);
-        WaitFlag<HardEvent::MTE2_MTE1>(0);
     }
 
     __aicore__ inline void LoadAPrime(int64_t chunk)
     {
-        // Mode 0 requires every AIC to set as well as wait. Delay this
-        // publish until O so T, W and v_new do not wait for APrime.
-        PublishAPrimeAic<PIPE_MTE2>(chunk);
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
         const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads);
         // The Producer writes a complete 64x64 NZ tile, so no ND conversion or
         // per-half copies are needed here.
         DataCopy(l1APrime_[slot], gmAPrime_[offset], kMatrixElems);
-        SetFlag<HardEvent::MTE2_MTE1>(0);
-        WaitFlag<HardEvent::MTE2_MTE1>(0);
     }
 
     __aicore__ inline void RunCubeQs(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const bool transposeB = td_.stateVFirst == 0;
+        AicWaitBoth(kConsQExp);
         AicWaitBoth(kConsS);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, l1QExp_[slot], 64, 128, false);
+        LoadB(l0B0_, l1H_[slot], 64, 128, transposeB);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        // Consume the previous O Fixpipe release before reinitializing l0C3.
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseO);
+        IssueMm(l0A0_, l0B0_, l0C3_, 64, 64, 128, true);
+
         AicWaitBoth(kConsS1);
         LocalTensor<bfloat16_t> hC2 = l1H_[slot][kStateElems / 2];
-        ComputeMmAndPrefetchB(l1QExp_[slot], l1H_[slot], hC2, l0A0_, l0B0_, l0B1_, l0C3_,
-                              64, 64, 128, 64, false, transposeB, transposeB);
-        WaitFlag<HardEvent::M_MTE1>(0);
-        IssueMm(l0A0_, l0B1_, l0C3_[kChunk * kHalfDim], 64, 64, 128, true, false);
+        LoadB(l0B1_, hC2, 64, 128, transposeB);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        IssueMm(l0A0_, l0B1_, l0C3_[kChunk * kHalfDim], 64, 64, 128, true);
+        // M orders C2 after C1, so one release covers both QS panels.
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
     }
 
     __aicore__ inline void RunCubePrepare(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         LoadT(chunk);
+        SetFlag<HardEvent::MTE2_MTE1>(0);
+        WaitFlag<HardEvent::MTE2_MTE1>(0);
         AicWaitBoth(kConsW);
         // T@Kbg and T@Vb do not depend on H. Compute them before QS, using
         // l0C2/l0C0 independently of the previous D panels in l0C1.
-        ComputeMmAndPrefetchB(l1T_, l1W_[slot], l1U_[slot], l0A0_, l0B1_, l0B0_, l0C2_,
-                              64, 128, 64, 128, false, true, true, true, false);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, l1T_, 64, 64, false);
+        LoadB(l0B1_, l1W_[slot], 128, 64, true);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseW);
+        IssueMm(l0A0_, l0B1_, l0C2_, 64, 128, 64, true);
+        LoadB(l0B0_, l1U_[slot], 128, 64, true);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseW);
+        // Publish W as soon as its Fixpipe is ordered; U and QS are independent.
+        SetFlag<HardEvent::FIX_MTE1>(0);
+
         AicWaitBoth(kConsU);
         WaitFlag<HardEvent::M_MTE1>(0);
-        IssueMm(l0A0_, l0B0_, l0C0_, 64, 128, 64, true, false);
-        SetFlag<HardEvent::FIX_MTE1>(0);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseVNew);
+        IssueMm(l0A0_, l0B0_, l0C0_, 64, 128, 64, true);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
     }
 
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
@@ -723,52 +781,89 @@ private:
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const bool transposeState = td_.stateVFirst == 0;
         // U was initialized in RunCubePrepare. Only the state-dependent W@S
-        // accumulation remains in the serial path.
+        // accumulation remains in the serial path. This wait pairs with the
+        // W Fixpipe in RunCubePrepare, not with QS.
         WaitFlag<HardEvent::FIX_MTE1>(0);
-        ComputeMm(l1W_[slot], l1H_[slot], l0A0_, l0B0_, l0C0_, 64, 64, 128,
-                  false, transposeState, false);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, l1W_[slot], 64, 128, false);
+        LoadB(l0B0_, l1H_[slot], 64, 128, transposeState);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        IssueMm(l0A0_, l0B0_, l0C0_, 64, 64, 128, false);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixB16Halves(ubVNew_, l0C0_, 64, 64);
         AicPublishToBoth(kConsP);
         FixB16L1Matrix(l1VNew_, l0C0_, 64, 64, 64);
         SetFlag<HardEvent::FIX_MTE1>(0);
 
         WaitFlag<HardEvent::M_MTE1>(0);
-        IssueMm(l0A0_, l0B1_, l0C0_[kChunk * kHalfDim], 64, 64, 128, false, false);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        IssueMm(l0A0_, l0B1_, l0C0_[kChunk * kHalfDim], 64, 64, 128, false);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         LocalTensor<bfloat16_t> l1VNewC2 = l1VNew_[kChunk * kHalfDim];
         FixB16Halves(ubVNew_[kHalfRows * kHalfDim], l0C0_[kChunk * kHalfDim], 64, 64);
         AicPublishToBoth(kConsP1);
         FixB16L1Matrix(l1VNewC2, l0C0_[kChunk * kHalfDim], 64, 64, 64);
         SetFlag<HardEvent::FIX_MTE1>(1);
-        ReleaseL0C();
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseVNew);
 
-        // D-C1 prefetches D-C2's B as soon as both Right panels are ready.
+        // Start D-C1 with Right-C1 only; C2 is loaded after its own ready event.
         AicWaitBoth(kConsRight);
-        AicWaitBoth(kConsRight1);
         LocalTensor<bfloat16_t> dA = td_.stateVFirst != 0 ? l1Right_ : l1K_[slot];
         LocalTensor<bfloat16_t> dB = td_.stateVFirst != 0 ? l1K_[slot] : l1Right_;
-        ComputeMmAndPrefetchB(dA, dB, dB[kHalfDim * kHalfDim], l0A0_, l0B0_, l0B1_, l0C1_,
-                              128, 64, 64, 64, true, true, true, true, false);
+        WaitFlag<HardEvent::M_MTE1>(0);
+        LoadA(l0A0_, dA, 128, 64, true);
+        LoadB(l0B0_, dB, 64, 64, true);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseDC1);
+        IssueMm(l0A0_, l0B0_, l0C1_, 128, 64, 64, true);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixF32Halves(ubD_, l0C1_, 128, 64);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseDC1);
         AicPublishToBoth(kConsD);
 
-        // Load APrime independently, then D-C2 reuses its B and prefetches the
-        // full VNew operand for the final O GEMM.
+        // APrime uses independent l0A1. Once Right-C2 arrives, load its B and
+        // queue D-C2 before consuming D-C1's release for the VNew prefetch.
+        // Delay the mode-0 publish until O so T, W and v_new do not wait for APrime.
+        PublishAPrimeAic<PIPE_MTE2>(chunk);
         LoadAPrime(chunk);
-        WaitFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::MTE2_MTE1>(0);
+        WaitFlag<HardEvent::MTE2_MTE1>(0);
         LoadA(l0A1_, l1APrime_[slot], 64, 64, false);
+        AicWaitBoth(kConsRight1);
+        LoadB(l0B1_, dB[kHalfDim * kHalfDim], 64, 64, true);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::FIX_M>(kL0CReleaseDC2);
+        IssueMm(l0A0_, l0B1_, l0C1_[kStateElems / 2], 128, 64, 64, true);
+        WaitFlag<HardEvent::M_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(1);
-        IssueMmAndPrefetchB(l0A0_, l0B1_, l0B0_, l1VNew_, l0C1_[kStateElems / 2],
-                            128, 64, 64, 128, true, true, false);
+        LoadB(l0B0_, l1VNew_, 128, 64, true);
+        SetFlag<HardEvent::M_MTE1>(1);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixF32Halves(ubD_[kHalfDim * kHalfDim], l0C1_[kStateElems / 2], 128, 64);
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseDC2);
         AicPublishToBoth(kConsD1);
 
-        WaitFlag<HardEvent::M_MTE1>(0);
-        IssueMm(l0A1_, l0B0_, l0C3_, 64, 128, 64, false, false);
+        WaitFlag<HardEvent::M_MTE1>(1);
+        SetFlag<HardEvent::MTE1_M>(0);
+        WaitFlag<HardEvent::MTE1_M>(0);
+        IssueMm(l0A1_, l0B0_, l0C3_, 64, 128, 64, false);
+        SetFlag<HardEvent::M_MTE1>(0);
+        SetFlag<HardEvent::M_FIX>(0);
+        WaitFlag<HardEvent::M_FIX>(0);
         FixB16ScaledHalves(ubO_, l0C3_, 64, 128, td_.scale);
-        // Consume the VNew accumulator release only after all O/D Matrix work.
-        WaitFlag<HardEvent::FIX_M>(0);
-        ReleaseL0C();
+        SetFlag<HardEvent::FIX_M>(kL0CReleaseO);
         AicPublishToBoth(kConsOL);
     }
 
