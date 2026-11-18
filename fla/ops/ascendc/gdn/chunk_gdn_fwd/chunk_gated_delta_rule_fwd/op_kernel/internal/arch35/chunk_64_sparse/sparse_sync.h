@@ -87,11 +87,14 @@ __aicore__ inline void PublishAPrimeAic(int64_t iteration)
 }
 
 // Producer sets this after the current T is complete but delays the matching
-// wait until the same parity flag is reused two iterations later.
+// wait until the same parity flag is reused two iterations later. The producer
+// joins on its idle MTE2 pipe so its issue stream never stalls; the consumer
+// keeps the default FIX join that transitively protects its single L1 T buffer.
+template <pipe_t SetPipe = PIPE_FIX>
 __aicore__ inline void SetIterationAic(int64_t iteration)
 {
     if ASCEND_IS_AIC {
-        SetMode0Flag<PIPE_FIX>(IterationBarrierFlag(iteration));
+        SetMode0Flag<SetPipe>(IterationBarrierFlag(iteration));
     }
 }
 

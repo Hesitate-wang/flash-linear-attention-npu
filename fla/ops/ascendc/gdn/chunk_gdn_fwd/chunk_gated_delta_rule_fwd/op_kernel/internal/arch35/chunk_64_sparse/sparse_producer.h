@@ -115,7 +115,7 @@ public:
                 for (uint32_t lane = 0; lane < 2; ++lane) {
                     const int64_t iteration = 2 * pair + lane;
                     if (iteration < iterations && iteration >= 2) {
-                        WaitIterationAic<PIPE_M>(iteration);
+                        WaitIterationAic<PIPE_MTE2>(iteration);
                         WaitAPrimeAic<PIPE_FIX>(iteration);
                     }
                 }
@@ -135,10 +135,13 @@ public:
                     const int64_t chunk = 2 * pair + lane;
                     if (chunk < iterations) {
                         if (chunk < loc_.chunks) {
-                            AicWaitOwner<PIPE_S>(chunk, kProdA);
+                            // The T hand-off rides the AIC's otherwise idle MTE2
+                            // queue: the owner wait and the barrier set stay
+                            // ordered there without stalling the issue stream.
+                            AicWaitOwner<PIPE_MTE2>(chunk, kProdA);
                         }
                         // Short and empty chains still join every global generation.
-                        SetIterationAic(chunk);
+                        SetIterationAic<PIPE_MTE2>(chunk);
                     }
                 }
                 for (uint32_t lane = 0; lane < 2; ++lane) {
@@ -146,18 +149,20 @@ public:
                     if (chunk < iterations) {
                         if (chunk < loc_.chunks) {
                             // Backpressure also releases the single KKT/QK UB slots.
-                            AicWaitOwner<PIPE_S>(chunk, kProdAPrime);
+                            // The FIX wait keeps the next FixF32 behind the AIV's
+                            // KKT/QK consumption; it must not move off the FIX pipe.
+                            AicWaitOwner<PIPE_FIX>(chunk, kProdAPrime);
                         }
                         SetAPrimeAic(chunk);
                     }
                 }
             }
             if (iterations >= 2) {
-                WaitIterationAic<PIPE_M>(iterations - 2);
+                WaitIterationAic<PIPE_MTE2>(iterations - 2);
                 WaitAPrimeAic<PIPE_FIX>(iterations - 2);
             }
             if (iterations >= 1) {
-                WaitIterationAic<PIPE_M>(iterations - 1);
+                WaitIterationAic<PIPE_MTE2>(iterations - 1);
                 WaitAPrimeAic<PIPE_FIX>(iterations - 1);
             }
         }
