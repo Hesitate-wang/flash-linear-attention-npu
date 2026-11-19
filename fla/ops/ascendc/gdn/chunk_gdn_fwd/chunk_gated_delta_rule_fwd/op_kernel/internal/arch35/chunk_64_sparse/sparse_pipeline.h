@@ -84,10 +84,15 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
         }
     }
     const uint32_t group = GroupIndex();
-    if (group < td.chainCount) {
-        RunProducer(args, td, group);
+    // Pair producer and consumer of one chain on adjacent cores (2g, 2g+1)
+    // instead of splitting all producers before all consumers: the pair's
+    // GM exchange (T, APrime, normalized Q/K) then stays within the same
+    // L2 die/bank neighborhood instead of crossing the device.
+    const uint32_t chain = group >> 1;
+    if ((group & 1U) == 0U) {
+        RunProducer(args, td, chain);
     } else {
-        RunConsumer(args, td, group - td.chainCount);
+        RunConsumer(args, td, chain);
     }
     if ASCEND_IS_AIV {
         SetFlag<HardEvent::MTE3_V>(0);

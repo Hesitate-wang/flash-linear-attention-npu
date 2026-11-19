@@ -491,7 +491,8 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd(
             q, k, v, raw_g, beta, a_log, dt_bias, cu_seqlens, chunk_indices,
             g_cumsum_bht, w, u, A, q_hat, k_hat, q_rstd, k_rstd, beta_eff,
             h, v_new, o, initial_state, final_state, workspace};
-        // RunSparsePipeline dispatches one producer and one consumer group per chain.
+        // RunSparsePipeline dispatches one producer and one consumer group per
+        // chain, paired on adjacent cores (2g, 2g+1) for L2 locality.
         GdnChunk64Sparse::RunSparsePipeline(args, fusedTiling);
     } else if (TILING_KEY_IS(32)) {
         KERNEL_TASK_TYPE(32, KERNEL_TYPE_MIX_AIC_1_2);
