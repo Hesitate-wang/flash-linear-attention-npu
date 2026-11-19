@@ -69,6 +69,9 @@ __aicore__ inline uint16_t IterationAPrimeFlag(int64_t iteration)
     return kSparseAPrimeBarrierFlagIds[iteration & 1];
 }
 
+// Producer-only: the FIX-pipe set stays ordered behind the kProdAPairDoneFlag
+// FIX wait (both AIVs' APrime stores retired). Consumers must not use this
+// wrapper; their publish is the templated one below.
 __aicore__ inline void SetAPrimeAic(int64_t iteration)
 {
     if ASCEND_IS_AIC {
@@ -84,18 +87,27 @@ __aicore__ inline void WaitAPrimeAic(int64_t iteration)
     }
 }
 
-template <pipe_t WaitPipe>
+// Consumer publish: set and wait ride the same pipe. The set then stays
+// ordered behind the previous generation's wait on that pipe, and fires as
+// soon as the pipe's own prior work (the GM loads) retires instead of
+// draining an unrelated compute pipe.
+template <pipe_t Pipe>
 __aicore__ inline void PublishAPrimeAic(int64_t iteration)
 {
-    SetAPrimeAic(iteration);
-    WaitAPrimeAic<WaitPipe>(iteration);
+    if ASCEND_IS_AIC {
+        SetMode0Flag<Pipe>(IterationAPrimeFlag(iteration));
+    }
+    WaitAPrimeAic<Pipe>(iteration);
 }
 
 // T and APrime mode-0 generations are pair-granular: every AIC sets once per
 // pair, and the producer drains a pair generation two pairs after its set.
-// The producer joins on its idle MTE2 pipe so its issue stream never stalls;
-// the consumer keeps the default FIX join that transitively protects its
-// single L1 T buffer.
+// The producer joins on its idle MTE2 pipe so its issue stream never stalls.
+// The consumer also joins on MTE2: a generation only has to cover the GM
+// loads themselves — the T/APrime GM regions are per-chunk unique and the
+// l1T_ slot reuse is guarded locally by MTE1_MTE2 — so the barrier retires
+// with the loads instead of waiting for the consumer's mmad/fix backlog,
+// letting producers proceed without tracking cube-side compute.
 template <pipe_t SetPipe = PIPE_FIX>
 __aicore__ inline void SetIterationAic(int64_t iteration)
 {
@@ -112,12 +124,14 @@ __aicore__ inline void WaitIterationAic(int64_t iteration)
     }
 }
 
-// // Consumer still publishes and drains each T generation immediately.
-template <pipe_t WaitPipe>
+// Consumer publish: set and wait ride the same pipe, chaining each
+// generation's set behind the previous generation's wait (drain-before-reset)
+// without holding the barrier hostage to the cube/fix backlog.
+template <pipe_t Pipe>
 __aicore__ inline void PublishIterationAic(int64_t iteration)
 {
-    SetIterationAic(iteration);
-    WaitIterationAic<WaitPipe>(iteration);
+    SetIterationAic<Pipe>(iteration);
+    WaitIterationAic<Pipe>(iteration);
 }
 
 __aicore__ inline void AivPublish(uint16_t id)
