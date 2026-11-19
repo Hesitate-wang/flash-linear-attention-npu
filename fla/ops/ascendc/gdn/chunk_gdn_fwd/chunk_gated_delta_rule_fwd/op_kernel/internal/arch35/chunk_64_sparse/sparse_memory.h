@@ -71,9 +71,12 @@ constexpr uint32_t kCUbO = 180 * kKiB;
 constexpr uint32_t kCUbGates = 188 * kKiB;
 constexpr uint32_t kCUbGateSlotBytes = 2 * kKiB;
 constexpr uint32_t kCUbShift = kCUbGates + 3 * kCUbGateSlotBytes;
+// V is double-buffered by chunk parity: iteration i issues the chunk i+2 load
+// while ComputeNextVb consumes the chunk i+1 buffer.
 constexpr uint32_t kCUbV = 200 * kKiB;
+constexpr uint32_t kCUbVSlotBytes = 8 * kKiB;
 static_assert(kCUbShift + 6 * 64 * sizeof(uint32_t) <= kCUbV);
-constexpr uint32_t kCUbEnd = 208 * kKiB;
+constexpr uint32_t kCUbEnd = kCUbV + 2 * kCUbVSlotBytes;
 static_assert(kCUbEnd <= kUbBudget);
 
 // Consumer L1 uses chunk-parity slots for values whose next-chunk upload can

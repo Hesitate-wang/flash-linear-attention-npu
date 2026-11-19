@@ -25,6 +25,10 @@ constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
 constexpr uint16_t kConsS1 = 0;
 constexpr uint16_t kConsQExp = 7; // Continuous GM->L1 DataCopy reserves mode-4 flags 1/17.
+// V ready events per parity slot; gate uses 0, K 1, initial state 2, Q 4/5.
+constexpr int32_t kConsVEventIds[2] = {3, 6};
+// V->MTE2 release guarding each ubV_ slot against its next load.
+constexpr int32_t kConsVReleaseEvent = 1;
 
 class ConsumerRole {
 public:
@@ -146,6 +150,11 @@ public:
             for (uint32_t slot = 0; slot < 2; ++slot) {
                 WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
             }
+            // Drain the V slot releases of the last two ComputeNextVb calls;
+            // their IssueV waits never came.
+            for (int64_t chunk = 0; chunk < loc_.chunks && chunk < 2; ++chunk) {
+                WaitFlag<HardEvent::V_MTE2>(kConsVReleaseEvent);
+            }
             WaitUbRelease(ubOSBArmed_, 1);
             WaitUbRelease(ubWArmed_, 2);
             WaitUbRelease(ubUArmed_, 3);
@@ -212,7 +221,10 @@ private:
             ubW_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbW);
             ubQ_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQ);
             ubK_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbK);
-            ubV_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbV);
+            for (uint32_t slot = 0; slot < 2; ++slot) {
+                ubV_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
+                    kCUbV + slot * kCUbVSlotBytes);
+            }
             ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
             ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
             ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbZero);
@@ -319,6 +331,11 @@ private:
         if (loc_.chunks > 1) {
             IssueGateInputs(1);
         }
+        // V runs one iteration ahead of its Vb computation, like the gates.
+        IssueV(0);
+        if (loc_.chunks > 1) {
+            IssueV(1);
+        }
         SetFlag<HardEvent::MTE2_V>(0);
         PrepareLoadedGate(0, true);
         PrepareNextVb(0);
@@ -338,6 +355,7 @@ private:
             SetFlag<HardEvent::MTE2_V>(0);
             if (chunk + 2 < loc_.chunks) {
                 IssueGateInputs(chunk + 2);
+                IssueV(chunk + 2);
             }
             PrepareLoadedGate(chunk + 1);
             PrepareNormalizedQKLoad(chunk + 1);
@@ -604,25 +622,38 @@ private:
                    static_cast<uint32_t>(window.rows));
     }
 
-    __aicore__ inline void PrepareLoadedGate(int64_t chunk, bool includeInitial = false)
+    // V loads run one iteration ahead of their ComputeNextVb consumption:
+    // iteration i issues chunk i+2 into the parity slot that chunk i's Vb
+    // computation has just released.
+    __aicore__ inline void IssueV(int64_t chunk)
     {
         const ChunkWindow window = WindowOf(loc_, chunk);
-        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t firstRow = sub_ * kHalfRows;
         const int64_t remaining = window.rows - static_cast<int64_t>(firstRow);
         const uint32_t rows = remaining <= 0 ? 0U
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
-        if (rows < kHalfRows) {
-            Duplicate(ubV_, static_cast<bfloat16_t>(0), kHalfRows * kDim);
+        if (chunk >= 2) {
+            // The slot's previous reader is ComputeNextVb(chunk-2) on V.
+            WaitFlag<HardEvent::V_MTE2>(kConsVReleaseEvent);
         }
-        SetFlag<HardEvent::V_MTE2>(0);
-        WaitFlag<HardEvent::V_MTE2>(0);
+        if (rows < kHalfRows) {
+            Duplicate(ubV_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
+            SetFlag<HardEvent::V_MTE2>(0);
+            WaitFlag<HardEvent::V_MTE2>(0);
+        }
         const int64_t token = window.tokenStart + firstRow;
-        // V still overlaps gate processing. Gate i+2 was issued before this
-        // function started computing the already-loaded gate i+1.
-        CopyGmToUb(ubV_, gmV_, OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens),
+        CopyGmToUb(ubV_[slot], gmV_,
+                   OffsetBhtd(loc_.batch, loc_.hv, token, td_.valueHeads, td_.tokens),
                    rows * static_cast<uint32_t>(kDim));
-        SetFlag<HardEvent::MTE2_V>(3);
+        SetFlag<HardEvent::MTE2_V>(kConsVEventIds[slot]);
+    }
+
+    __aicore__ inline void PrepareLoadedGate(int64_t chunk, bool includeInitial = false)
+    {
+        const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
+        // V is issued separately one iteration early; only this chunk's
+        // gate/beta loads (MTE2_V event 0) are consumed here.
         WaitFlag<HardEvent::MTE2_V>(0);
         float aLog = 0.0f;
         float dtBias = 0.0f;
@@ -673,11 +704,14 @@ private:
 
     __aicore__ inline void ComputeNextVb(int64_t chunk)
     {
+        const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         const uint32_t firstRow = sub_ * kHalfRows;
-        WaitFlag<HardEvent::MTE2_V>(3);
+        WaitFlag<HardEvent::MTE2_V>(kConsVEventIds[slot]);
         WaitUbRelease(ubUArmed_, 3);
-        ScaleVbNzVF(ubV_, ubU_, ubBeta_[gateSlot], firstRow);
+        ScaleVbNzVF(ubV_[slot], ubU_, ubBeta_[gateSlot], firstRow);
+        // Release the slot to the chunk+2 load issued next iteration.
+        SetFlag<HardEvent::V_MTE2>(kConsVReleaseEvent);
     }
 
     __aicore__ inline void UploadNextVb(int64_t chunk)
@@ -920,7 +954,8 @@ private:
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubScratch_;
     LocalTensor<float> ubDecay_[2];
-    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_, ubV_;
+    LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_;
+    LocalTensor<bfloat16_t> ubV_[2];
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubZeroBf_, ubO_, ubInitB_, ubOSB_;
     LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubEnergyRecip_[3];
     LocalTensor<uint32_t> ubShift_;
