@@ -52,9 +52,10 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
                 role.RunAfterWu(iteration);
             } else if ((iteration & 1) == 0) {
                 // Shorter and empty chains still join every global mode-0
-                // generation; active chains publish at O inside LoadAPrime.
-                // No MTE2 load follows an idle iteration, so block MTE3 to
-                // prevent a later Set from reusing this flag before the wait.
+                // generation; active chains publish in RunCubePrepare behind
+                // the T loads. No MTE2 load follows an idle iteration, so
+                // block MTE3 to prevent a later Set from reusing this flag
+                // before the wait.
                 PublishAPrimeAic<PIPE_MTE3>(iteration >> 1);
             }
         }

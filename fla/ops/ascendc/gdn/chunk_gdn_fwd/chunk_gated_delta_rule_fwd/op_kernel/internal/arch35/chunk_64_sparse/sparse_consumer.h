@@ -755,24 +755,36 @@ private:
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         if ((chunk & 1) == 0) {
-            // One pair-granular join covers both lanes: load the pair's T
-            // tiles back-to-back, like the AIV's normalized K/Q pair loads.
-            // Each slot's previous LoadA retired two chunks earlier.
+            // Load both lanes' T tiles back-to-back on independent MTE2_MTE1
+            // flags so this lane's T@Kbg never waits for the other lane's
+            // load. Each slot's previous LoadA retired two chunks earlier.
             if (chunk >= 2) {
                 WaitFlag<HardEvent::MTE1_MTE2>(0);
                 WaitFlag<HardEvent::MTE1_MTE2>(1);
             }
             LoadT(chunk);
+            SetFlag<HardEvent::MTE2_MTE1>(0);
             if (chunk + 1 < loc_.chunks) {
                 LoadT(chunk + 1);
+                SetFlag<HardEvent::MTE2_MTE1>(1);
+            }
+            // The APrime join and loads follow T: T never waits for APrime.
+            // The APrime loads reuse the same flag IDs (counting semantics);
+            // their wait sits at the O consumption point in RunCubeAfterWu,
+            // so the transfers hide under U-WS and the v_new-decay work.
+            PublishAPrimeAic<PIPE_MTE2>(chunk >> 1);
+            LoadAPrime(chunk);
+            SetFlag<HardEvent::MTE2_MTE1>(0);
+            if (chunk + 1 < loc_.chunks) {
+                LoadAPrime(chunk + 1);
+                SetFlag<HardEvent::MTE2_MTE1>(1);
             }
         }
-        SetFlag<HardEvent::MTE2_MTE1>(0);
-        WaitFlag<HardEvent::MTE2_MTE1>(0);
         AicWaitBoth(kConsW);
         // T@Kbg and T@Vb do not depend on H. Compute them before QS, using
         // l0C2/l0C0 independently of the previous D panels in l0C1.
         WaitFlag<HardEvent::M_MTE1>(0);
+        WaitFlag<HardEvent::MTE2_MTE1>(slot);
         LoadA(l0A0_, l1T_[slot], 64, 64, false);
         SetFlag<HardEvent::MTE1_MTE2>(slot);
         LoadB(l0B1_, l1W_[slot], 128, 64, true);
@@ -856,19 +868,10 @@ private:
 
         // APrime uses independent l0A1. Once Right-C2 arrives, load its B and
         // queue D-C2 before consuming D-C1's release for the VNew prefetch.
-        // Delay the mode-0 publish until O so T, W and v_new do not wait for
-        // APrime. APrime generations are pair-granular: the even chunk joins
-        // once and loads both lanes' tiles back-to-back into their parity
-        // slots.
-        if ((chunk & 1) == 0) {
-            PublishAPrimeAic<PIPE_MTE2>(chunk >> 1);
-            LoadAPrime(chunk);
-            if (chunk + 1 < loc_.chunks) {
-                LoadAPrime(chunk + 1);
-            }
-        }
-        SetFlag<HardEvent::MTE2_MTE1>(0);
-        WaitFlag<HardEvent::MTE2_MTE1>(0);
+        // APrime was joined and loaded in RunCubePrepare behind the T loads;
+        // its flag shares the T load's ID and is only consumed here, after
+        // U-WS and the v_new-decay work covered the transfer.
+        WaitFlag<HardEvent::MTE2_MTE1>(slot);
         LoadA(l0A1_, l1APrime_[slot], 64, 64, false);
         AicWaitBoth(kConsRight1);
         LoadB(l0B1_, dB[kHalfDim * kHalfDim], 64, 64, true);
