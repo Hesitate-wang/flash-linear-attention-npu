@@ -25,10 +25,16 @@ constexpr uint16_t kConsS = 10;
 constexpr uint16_t kConsU = 11;
 constexpr uint16_t kConsS1 = 0;
 constexpr uint16_t kConsQExp = 7; // Continuous GM->L1 DataCopy reserves mode-4 flags 1/17.
-// V ready events per parity slot; gate uses 0, K 1, initial state 2, Q 4/5.
+// V ready events per parity slot; K uses 0/1, initial state 2, Q 4/5.
 constexpr int32_t kConsVEventIds[2] = {3, 6};
-// V->MTE2 release guarding each ubV_ slot against its next load.
-constexpr int32_t kConsVReleaseEvent = 1;
+// Gate/beta readiness gets a dedicated event: a blanket publish would cover
+// every prior MTE2 transfer (V, normalized K/Q), not just the gate loads.
+constexpr int32_t kConsGateEvent = 7;
+// V->MTE2 release guarding each ubV_ slot against its next load. Each parity
+// slot owns an ID: consecutive SetFlag on one pipe+ID without an intervening
+// wait is undefined behavior, and the chain tail's last two releases would
+// land back-to-back on a single shared ID.
+constexpr int32_t kConsVReleaseEventIds[2] = {1, 2};
 
 class ConsumerRole {
 public:
@@ -151,9 +157,12 @@ public:
                 WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
             }
             // Drain the V slot releases of the last two ComputeNextVb calls;
-            // their IssueV waits never came.
-            for (int64_t chunk = 0; chunk < loc_.chunks && chunk < 2; ++chunk) {
-                WaitFlag<HardEvent::V_MTE2>(kConsVReleaseEvent);
+            // their IssueV waits never came. Each release sits on its own
+            // parity slot's ID, so drain by parity.
+            const int64_t vReleaseDrainBegin = loc_.chunks >= 2 ? loc_.chunks - 2 : 0;
+            for (int64_t chunk = vReleaseDrainBegin; chunk < loc_.chunks; ++chunk) {
+                WaitFlag<HardEvent::V_MTE2>(
+                    kConsVReleaseEventIds[static_cast<uint32_t>(chunk & 1)]);
             }
             WaitUbRelease(ubOSBArmed_, 1);
             WaitUbRelease(ubWArmed_, 2);
@@ -328,16 +337,16 @@ private:
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
         IssueGateInputs(0);
-        if (loc_.chunks > 1) {
-            IssueGateInputs(1);
-        }
         // V runs one iteration ahead of its Vb computation, like the gates.
         IssueV(0);
+        // The gate readiness event is a single ID: consume gate 0's
+        // publication before gate 1's IssueGateInputs sets it again, so the
+        // ID never sees back-to-back sets.
+        PrepareLoadedGate(0, true);
         if (loc_.chunks > 1) {
+            IssueGateInputs(1);
             IssueV(1);
         }
-        SetFlag<HardEvent::MTE2_V>(0);
-        PrepareLoadedGate(0, true);
         PrepareNextVb(0);
         PrepareNormalizedQK(0);
         ConvertInitialState();
@@ -351,13 +360,14 @@ private:
     __aicore__ inline void RunAivPrepare(int64_t chunk)
     {
         if (chunk + 1 < loc_.chunks) {
-            // Publish the already-loaded gate before issuing newer MTE2 work.
-            SetFlag<HardEvent::MTE2_V>(0);
+            // Consume this gate's publication before IssueGateInputs reuses
+            // the single event ID, keeping the ID in strict set/wait
+            // alternation. Gate chunk+2 still lands a full iteration early.
+            PrepareLoadedGate(chunk + 1);
             if (chunk + 2 < loc_.chunks) {
                 IssueGateInputs(chunk + 2);
                 IssueV(chunk + 2);
             }
-            PrepareLoadedGate(chunk + 1);
             PrepareNormalizedQKLoad(chunk + 1);
             ComputeNextVb(chunk + 1);
             ComputeNormalizedK(chunk + 1);
@@ -620,6 +630,8 @@ private:
         CopyGmToUb(ubBeta_[gateSlot], gmBeta_, OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
                                                          td_.valueHeads, td_.tokens),
                    static_cast<uint32_t>(window.rows));
+        // Publish exactly this chunk's gate/beta loads, nothing newer.
+        SetFlag<HardEvent::MTE2_V>(kConsGateEvent);
     }
 
     // V loads run one iteration ahead of their ComputeNextVb consumption:
@@ -635,7 +647,7 @@ private:
             : static_cast<uint32_t>(remaining < kHalfRows ? remaining : kHalfRows);
         if (chunk >= 2) {
             // The slot's previous reader is ComputeNextVb(chunk-2) on V.
-            WaitFlag<HardEvent::V_MTE2>(kConsVReleaseEvent);
+            WaitFlag<HardEvent::V_MTE2>(kConsVReleaseEventIds[slot]);
         }
         if (rows < kHalfRows) {
             Duplicate(ubV_[slot], static_cast<bfloat16_t>(0), kHalfRows * kDim);
@@ -653,8 +665,8 @@ private:
     {
         const uint32_t gateSlot = static_cast<uint32_t>(chunk % 3);
         // V is issued separately one iteration early; only this chunk's
-        // gate/beta loads (MTE2_V event 0) are consumed here.
-        WaitFlag<HardEvent::MTE2_V>(0);
+        // gate/beta loads are consumed here.
+        WaitFlag<HardEvent::MTE2_V>(kConsGateEvent);
         float aLog = 0.0f;
         float dtBias = 0.0f;
         if (td_.hasALog != 0) {
@@ -711,7 +723,7 @@ private:
         WaitUbRelease(ubUArmed_, 3);
         ScaleVbNzVF(ubV_[slot], ubU_, ubBeta_[gateSlot], firstRow);
         // Release the slot to the chunk+2 load issued next iteration.
-        SetFlag<HardEvent::V_MTE2>(kConsVReleaseEvent);
+        SetFlag<HardEvent::V_MTE2>(kConsVReleaseEventIds[slot]);
     }
 
     __aicore__ inline void UploadNextVb(int64_t chunk)
@@ -803,15 +815,16 @@ private:
                 SetFlag<HardEvent::MTE2_MTE1>(1);
             }
             // The APrime join and loads follow T: T never waits for APrime.
-            // The APrime loads reuse the same flag IDs (counting semantics);
-            // their wait sits at the O consumption point in RunCubeAfterWu,
+            // APrime uses dedicated flag IDs 2/3; reusing the T IDs would put
+            // two sets on one ID back-to-back, which is undefined behavior.
+            // Their wait sits at the O consumption point in RunCubeAfterWu,
             // so the transfers hide under U-WS and the v_new-decay work.
             PublishAPrimeAic<PIPE_MTE2>(chunk >> 1);
             LoadAPrime(chunk);
-            SetFlag<HardEvent::MTE2_MTE1>(0);
+            SetFlag<HardEvent::MTE2_MTE1>(2);
             if (chunk + 1 < loc_.chunks) {
                 LoadAPrime(chunk + 1);
-                SetFlag<HardEvent::MTE2_MTE1>(1);
+                SetFlag<HardEvent::MTE2_MTE1>(3);
             }
         }
         AicWaitBoth(kConsW);
@@ -902,10 +915,10 @@ private:
 
         // APrime uses independent l0A1. Once Right-C2 arrives, load its B and
         // queue D-C2 before consuming D-C1's release for the VNew prefetch.
-        // APrime was joined and loaded in RunCubePrepare behind the T loads;
-        // its flag shares the T load's ID and is only consumed here, after
-        // U-WS and the v_new-decay work covered the transfer.
-        WaitFlag<HardEvent::MTE2_MTE1>(slot);
+        // APrime was joined and loaded in RunCubePrepare behind the T loads on
+        // dedicated flag IDs 2/3, only consumed here after U-WS and the
+        // v_new-decay work covered the transfer.
+        WaitFlag<HardEvent::MTE2_MTE1>(2 + slot);
         LoadA(l0A1_, l1APrime_[slot], 64, 64, false);
         AicWaitBoth(kConsRight1);
         LoadB(l0B1_, dB[kHalfDim * kHalfDim], 64, 64, true);
