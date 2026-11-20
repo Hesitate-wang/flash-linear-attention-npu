@@ -22,6 +22,11 @@ constexpr uint16_t kSparseAPrimeBarrierFlagIds[2] = {13, 14};
 constexpr uint16_t kProdTPairDoneFlag = 2;
 constexpr uint16_t kProdAPairDoneFlag = 4;
 // AIV mode-0 normalized K/Q readiness channels, indexed by pair parity.
+// Credit protocol: the producer publishes pair p's data with a set, gated on
+// the drain of pair p-2. The consumer primes pairs 0/1 at chain start, then
+// each wait(pair) on its MTE2 load stream is followed by a same-pipe set
+// returning the pair+2 credit — producers therefore track the consumer's
+// load progress (up to 4 pairs ahead) instead of its compute progress.
 constexpr uint16_t kSparseNormalizedKFlagIds[2] = {10, 11};
 constexpr uint16_t kSparseNormalizedQFlagIds[2] = {14, 15};
 
@@ -52,13 +57,6 @@ __aicore__ inline void WaitMode0Flag(uint16_t flagId)
     CrossCoreWaitFlag<0x0, WaitPipe>(flagId);
 }
 
-template <pipe_t SetPipe, pipe_t WaitPipe>
-__aicore__ inline void PublishMode0Flag(uint16_t flagId)
-{
-    SetMode0Flag<SetPipe>(flagId);
-    WaitMode0Flag<WaitPipe>(flagId);
-}
-
 __aicore__ inline uint16_t IterationBarrierFlag(int64_t iteration)
 {
     return kSparseBarrierFlagIds[iteration & 1];
@@ -87,27 +85,45 @@ __aicore__ inline void WaitAPrimeAic(int64_t iteration)
     }
 }
 
-// Consumer publish: set and wait ride the same pipe. The set then stays
-// ordered behind the previous generation's wait on that pipe, and fires as
-// soon as the pipe's own prior work (the GM loads) retires instead of
-// draining an unrelated compute pipe.
+// Consumer credit join: wait for generation pair on this pipe, then return
+// the pair+2 credit on the same pipe (flag IDs alternate with period 2, so
+// pair+2 aliases pair's ID). The credit is strictly posterior to the
+// receipt; credits stop at the last global generation, leaving no orphans.
 template <pipe_t Pipe>
-__aicore__ inline void PublishAPrimeAic(int64_t iteration)
+__aicore__ inline void JoinAPrimeAicCredit(int64_t pair, int64_t globalPairs)
 {
-    if ASCEND_IS_AIC {
-        SetMode0Flag<Pipe>(IterationAPrimeFlag(iteration));
+    WaitAPrimeAic<Pipe>(pair);
+    if (pair + 2 < globalPairs) {
+        if ASCEND_IS_AIC {
+            SetMode0Flag<Pipe>(IterationAPrimeFlag(pair + 2));
+        }
     }
-    WaitAPrimeAic<Pipe>(iteration);
 }
 
-// T and APrime mode-0 generations are pair-granular: every AIC sets once per
-// pair, and the producer drains a pair generation two pairs after its set.
-// The producer joins on its idle MTE2 pipe so its issue stream never stalls.
-// The consumer also joins on MTE2: a generation only has to cover the GM
-// loads themselves — the T/APrime GM regions are per-chunk unique and the
-// l1T_ slot reuse is guarded locally by MTE1_MTE2 — so the barrier retires
-// with the loads instead of waiting for the consumer's mmad/fix backlog,
-// letting producers proceed without tracking cube-side compute.
+// T and APrime mode-0 generations are pair-granular, run as a credit
+// protocol: the producer publishes a generation after its AIVs' stores and
+// drains the generation from two pairs earlier before reusing the flag ID.
+// The consumer primes generations 0/1 at chain start, then each wait(pair)
+// is followed by a same-pipe set returning the pair+2 credit — the producer
+// therefore tracks the consumer's load progress (up to 4 pairs ahead)
+// instead of its compute progress. A generation only has to cover the GM
+// loads themselves: the T/APrime GM regions are per-chunk unique and the L1
+// slot reuse is guarded locally by MTE1_MTE2, so the barrier retires with
+// the loads, not with the consumer's mmad/fix backlog.
+// Consumer AIC primes generations 0/1 of both barriers. Round 1 exists only
+// when there is a second global pair; priming it otherwise orphans the set.
+__aicore__ inline void PrimeTAPrimeCreditsAic(int64_t globalPairs)
+{
+    if ASCEND_IS_AIC {
+        SetMode0Flag<PIPE_MTE2>(IterationBarrierFlag(0));
+        SetMode0Flag<PIPE_MTE2>(IterationAPrimeFlag(0));
+        if (globalPairs >= 2) {
+            SetMode0Flag<PIPE_MTE2>(IterationBarrierFlag(1));
+            SetMode0Flag<PIPE_MTE2>(IterationAPrimeFlag(1));
+        }
+    }
+}
+
 template <pipe_t SetPipe = PIPE_FIX>
 __aicore__ inline void SetIterationAic(int64_t iteration)
 {
@@ -124,14 +140,16 @@ __aicore__ inline void WaitIterationAic(int64_t iteration)
     }
 }
 
-// Consumer publish: set and wait ride the same pipe, chaining each
-// generation's set behind the previous generation's wait (drain-before-reset)
-// without holding the barrier hostage to the cube/fix backlog.
+// Consumer credit join: wait for generation pair on this pipe, then return
+// the pair+2 credit on the same pipe (IDs alternate with period 2, so pair+2
+// aliases pair's ID). Same contract as JoinAPrimeAicCredit above.
 template <pipe_t Pipe>
-__aicore__ inline void PublishIterationAic(int64_t iteration)
+__aicore__ inline void JoinIterationAicCredit(int64_t pair, int64_t globalPairs)
 {
-    SetIterationAic<Pipe>(iteration);
-    WaitIterationAic<Pipe>(iteration);
+    WaitIterationAic<Pipe>(pair);
+    if (pair + 2 < globalPairs) {
+        SetIterationAic<Pipe>(pair + 2);
+    }
 }
 
 __aicore__ inline void AivPublish(uint16_t id)

@@ -39,11 +39,15 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
         }
     }
     if ASCEND_IS_AIC {
+        const int64_t globalPairs = (td.maxChunks + 1) / 2;
+        // Prime T/APrime generations 0/1; every join below returns the
+        // pair+2 credit instead of publishing its own generation.
+        PrimeTAPrimeCreditsAic(globalPairs);
         for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
             // T and APrime mode-0 generations are pair-granular: join once per
             // pair, before the even chunk's GM->L1 T copy in RunCubePrepare.
             if ((iteration & 1) == 0) {
-                PublishIterationAic<PIPE_MTE2>(iteration >> 1);
+                JoinIterationAicCredit<PIPE_MTE2>(iteration >> 1, globalPairs);
             }
             if (iteration < chunks) {
                 role.RunPrepare(iteration);
@@ -52,11 +56,10 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
                 role.RunAfterWu(iteration);
             } else if ((iteration & 1) == 0) {
                 // Shorter and empty chains still join every global mode-0
-                // generation; active chains publish in RunCubePrepare behind
+                // generation; active chains join in RunCubePrepare behind
                 // the T loads. No MTE2 load follows an idle iteration, so
-                // block MTE3 to prevent a later Set from reusing this flag
-                // before the wait.
-                PublishAPrimeAic<PIPE_MTE3>(iteration >> 1);
+                // the wait and its credit set both ride MTE3.
+                JoinAPrimeAicCredit<PIPE_MTE3>(iteration >> 1, globalPairs);
             }
         }
         // Drain the local MTE1->MTE2 guards of the final l1T_ reads. An even

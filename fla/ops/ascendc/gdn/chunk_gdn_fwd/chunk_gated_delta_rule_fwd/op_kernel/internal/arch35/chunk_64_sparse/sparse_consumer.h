@@ -92,6 +92,18 @@ public:
             // consume these flags; later loads consume the prior L1 uploads.
             SetFlag<HardEvent::MTE3_MTE2>(1);
             SetFlag<HardEvent::MTE3_MTE2>(2);
+            // Prime this consumer's normalized K/Q credits for pairs 0/1 on
+            // both channels. Without them the first two rounds never gather
+            // all AIV sets. From then on each WaitNormalized* returns the
+            // pair+2 credit. Round 1 exists only when there is a second
+            // global pair; priming it otherwise would leave an orphan set.
+            const int64_t globalPairs = (td_.maxChunks + 1) / 2;
+            SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(0));
+            SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(0));
+            if (globalPairs >= 2) {
+                SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(1));
+                SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(1));
+            }
             if (loc_.chunks == 0) {
                 InitState();
             }
@@ -491,13 +503,26 @@ private:
     __aicore__ inline void WaitNormalizedK(int64_t chunk)
     {
         const int64_t pair = chunk >> 1;
-        PublishMode0Flag<PIPE_MTE3, PIPE_MTE2>(IterationNormalizedKFlag(pair));
+        // Credit protocol on a single pipe: receive generation pair, then
+        // return the pair+2 credit on the same flag ID (IDs alternate with
+        // period 2, so pair+2 aliases pair's ID). The MTE2 set stays behind
+        // the wait in the load stream, so the credit is strictly posterior
+        // to the receipt and the producer's drain tracks load progress.
+        // Pairs 0/1 are primed in BeginChain; rounds at or beyond the last
+        // global generation get no credit — nobody publishes them.
+        WaitMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(pair));
+        if (pair + 2 < (td_.maxChunks + 1) / 2) {
+            SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(pair + 2));
+        }
     }
 
     __aicore__ inline void WaitNormalizedQ(int64_t chunk)
     {
         const int64_t pair = chunk >> 1;
-        PublishMode0Flag<PIPE_MTE3, PIPE_MTE2>(IterationNormalizedQFlag(pair));
+        WaitMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(pair));
+        if (pair + 2 < (td_.maxChunks + 1) / 2) {
+            SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(pair + 2));
+        }
     }
 
     __aicore__ inline int64_t NormalizedQKChunkOffset(int64_t chunk) const
@@ -819,7 +844,7 @@ private:
             // two sets on one ID back-to-back, which is undefined behavior.
             // Their wait sits at the O consumption point in RunCubeAfterWu,
             // so the transfers hide under U-WS and the v_new-decay work.
-            PublishAPrimeAic<PIPE_MTE2>(chunk >> 1);
+            JoinAPrimeAicCredit<PIPE_MTE2>(chunk >> 1, (td_.maxChunks + 1) / 2);
             LoadAPrime(chunk);
             SetFlag<HardEvent::MTE2_MTE1>(2);
             if (chunk + 1 < loc_.chunks) {
