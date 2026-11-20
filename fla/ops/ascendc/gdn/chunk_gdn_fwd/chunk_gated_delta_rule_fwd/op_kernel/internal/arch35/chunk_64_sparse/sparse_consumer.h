@@ -376,11 +376,16 @@ private:
             // the single event ID, keeping the ID in strict set/wait
             // alternation. Gate chunk+2 still lands a full iteration early.
             PrepareLoadedGate(chunk + 1);
+            // Normalized Q/K feeds this iteration's Kbg computation, so its
+            // GM loads go ahead of the gate/V prefetch: MTE2 is in-order and
+            // ComputeNormalizedK's ready flag covers only up to the K copy.
+            // The mode-0 credit sets also fire earlier, unblocked by the
+            // prefetch transfers.
+            PrepareNormalizedQKLoad(chunk + 1);
             if (chunk + 2 < loc_.chunks) {
                 IssueGateInputs(chunk + 2);
                 IssueV(chunk + 2);
             }
-            PrepareNormalizedQKLoad(chunk + 1);
             ComputeNextVb(chunk + 1);
             ComputeNormalizedK(chunk + 1);
         }
