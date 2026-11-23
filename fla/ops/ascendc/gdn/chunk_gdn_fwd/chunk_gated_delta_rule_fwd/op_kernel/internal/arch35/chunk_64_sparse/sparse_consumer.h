@@ -40,6 +40,10 @@ constexpr int32_t kConsVReleaseEventIds[2] = {1, 2};
 // which preceded the QK loads; with the loads moved ahead of it the slot
 // needs its own release, one ID per parity for the same reason as V.
 constexpr int32_t kConsQReleaseEventIds[2] = {3, 4};
+// MTE1->MTE2 releases guarding l1APrime_ against the next pair's GM loads.
+// T uses IDs 0/1; APrime owns independent IDs because its LoadA is consumed
+// much later in RunCubeAfterWu.
+constexpr int32_t kConsAPrimeReleaseEventIds[2] = {2, 3};
 
 class ConsumerRole {
 public:
@@ -864,10 +868,19 @@ private:
             // two sets on one ID back-to-back, which is undefined behavior.
             // Their wait sits at the O consumption point in RunCubeAfterWu,
             // so the transfers hide under U-WS and the v_new-decay work.
+            // Before each parity slot's GM load, retire the previous pair's
+            // LoadA for that same slot. Waiting per slot avoids making the
+            // next even load trail the previous odd lane unnecessarily.
             JoinAPrimeAicCredit<PIPE_MTE2>(chunk >> 1, (td_.maxChunks + 1) / 2);
+            if (chunk >= 2) {
+                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[chunk & 1]);
+            }
             LoadAPrime(chunk);
             SetFlag<HardEvent::MTE2_MTE1>(2);
             if (chunk + 1 < loc_.chunks) {
+                if (chunk >= 2) {
+                    WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[(chunk + 1) & 1]);
+                }
                 LoadAPrime(chunk + 1);
                 SetFlag<HardEvent::MTE2_MTE1>(3);
             }
@@ -965,6 +978,7 @@ private:
         // v_new-decay work covered the transfer.
         WaitFlag<HardEvent::MTE2_MTE1>(2 + slot);
         LoadA(l0A1_, l1APrime_[slot], 64, 64, false);
+        SetFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[slot]);
         AicWaitBoth(kConsRight1);
         LoadB(l0B1_, dB[kHalfDim * kHalfDim], 64, 64, true);
         SetFlag<HardEvent::MTE1_M>(0);

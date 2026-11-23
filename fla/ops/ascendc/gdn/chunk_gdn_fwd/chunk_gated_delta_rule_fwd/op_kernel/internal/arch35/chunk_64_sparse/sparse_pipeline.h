@@ -62,16 +62,19 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
                 JoinAPrimeAicCredit<PIPE_MTE3>(iteration >> 1, globalPairs);
             }
         }
-        // Drain the local MTE1->MTE2 guards of the final l1T_ reads. An even
-        // chunk count leaves both parity flags pending, an odd one only the
-        // even slot's.
+        // Drain the local MTE1->MTE2 guards of the final l1T_/l1APrime_
+        // reads. An even chunk count leaves both parity flags pending, an odd
+        // one only the even slot's.
         if (chunks >= 2) {
             WaitFlag<HardEvent::MTE1_MTE2>(0);
+            WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
             if ((chunks & 1) == 0) {
                 WaitFlag<HardEvent::MTE1_MTE2>(1);
+                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
             }
         } else if (chunks == 1) {
             WaitFlag<HardEvent::MTE1_MTE2>(0);
+            WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
         }
     }
     role.EndChain();
