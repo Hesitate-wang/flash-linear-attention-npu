@@ -35,6 +35,11 @@ constexpr int32_t kConsGateEvent = 7;
 // wait is undefined behavior, and the chain tail's last two releases would
 // land back-to-back on a single shared ID.
 constexpr int32_t kConsVReleaseEventIds[2] = {1, 2};
+// V->MTE2 release guarding each normalized-Q UB slot (ubQHat_/ubQ_) against
+// the chunk+2 load. This used to ride IssueGateInputs' V_MTE2(0) self-drain,
+// which preceded the QK loads; with the loads moved ahead of it the slot
+// needs its own release, one ID per parity for the same reason as V.
+constexpr int32_t kConsQReleaseEventIds[2] = {3, 4};
 
 class ConsumerRole {
 public:
@@ -170,11 +175,14 @@ public:
             }
             // Drain the V slot releases of the last two ComputeNextVb calls;
             // their IssueV waits never came. Each release sits on its own
-            // parity slot's ID, so drain by parity.
-            const int64_t vReleaseDrainBegin = loc_.chunks >= 2 ? loc_.chunks - 2 : 0;
-            for (int64_t chunk = vReleaseDrainBegin; chunk < loc_.chunks; ++chunk) {
-                WaitFlag<HardEvent::V_MTE2>(
-                    kConsVReleaseEventIds[static_cast<uint32_t>(chunk & 1)]);
+            // parity slot's ID, so drain by parity. The same applies to the
+            // normalized-Q slot releases of the last two ConsumeNormalizedQ
+            // calls.
+            const int64_t releaseDrainBegin = loc_.chunks >= 2 ? loc_.chunks - 2 : 0;
+            for (int64_t chunk = releaseDrainBegin; chunk < loc_.chunks; ++chunk) {
+                const uint32_t parity = static_cast<uint32_t>(chunk & 1);
+                WaitFlag<HardEvent::V_MTE2>(kConsVReleaseEventIds[parity]);
+                WaitFlag<HardEvent::V_MTE2>(kConsQReleaseEventIds[parity]);
             }
             WaitUbRelease(ubOSBArmed_, 1);
             WaitUbRelease(ubWArmed_, 2);
@@ -567,6 +575,10 @@ private:
         if ((chunk & 1) == 0) {
             WaitNormalizedQ(chunk);
         }
+        if (chunk >= 2) {
+            // The slot's previous reader is QHatExpNzVF(chunk-2) on V.
+            WaitFlag<HardEvent::V_MTE2>(kConsQReleaseEventIds[slot]);
+        }
         CopyNormalizedGmToUb(qBuffer, gmNormQ_, offset, firstRow);
         // K and Q have independent Vector readiness events. Q uses 4/5;
         // initial-state loading uses 2 and V uses 3.
@@ -614,6 +626,9 @@ private:
         WaitFlag<HardEvent::MTE2_V>(4 + slot);
         WaitUbRelease(ubOSBArmed_, 1);
         QHatExpNzVF(qBuffer, ubOSB_, ubEnergy_[gateSlot], firstRow);
+        // Release the Q UB slot to the chunk+2 load; the load no longer trails
+        // IssueGateInputs' V drain, so this release is the only guard.
+        SetFlag<HardEvent::V_MTE2>(kConsQReleaseEventIds[slot]);
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QExp_[slot], ubOSB_, kHalfRows, kDim, kChunk, firstRow);
