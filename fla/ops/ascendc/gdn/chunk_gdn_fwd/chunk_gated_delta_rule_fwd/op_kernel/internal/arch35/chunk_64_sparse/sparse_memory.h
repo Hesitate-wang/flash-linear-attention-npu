@@ -35,8 +35,15 @@ constexpr uint32_t kPUbShift = kPUbGates + 3 * kPUbGateSlotBytes;
 constexpr uint32_t kPUbScratch = kPUbShift + 6 * 64 * sizeof(uint32_t);
 constexpr uint32_t kPUbEnd = kPUbShift + 2 * kKiB;
 constexpr uint32_t kPUbEye = kPUbEnd;
-constexpr uint32_t kPUbEndWithEye = kPUbEye + 16 * kKiB;
-static_assert(kPUbEndWithEye <= kUbBudget);
+// T and APrime own a private pair-parity region instead of borrowing the dead
+// halves of the normalized K slot. Splitting them off leaves the K/Q slots
+// guarded only by the same-generation input event, and moves the
+// out-generation drain into BuildInverse, two pairs after the stores were
+// issued. Each slot holds T in the first 8 KiB and APrime in the second.
+constexpr uint32_t kPUbOut = kPUbEye + 16 * kKiB;
+constexpr uint32_t kPUbOutSlotBytes = 16 * kKiB;
+constexpr uint32_t kPUbEndFinal = kPUbOut + 2 * kPUbOutSlotBytes;
+static_assert(kPUbEndFinal <= kUbBudget);
 
 // Six full-chunk K/Q L1 slots: each lane of a pair owns a private slot so the
 // odd AIV's upload never overwrites the even chunk still feeding KKT/QK. A

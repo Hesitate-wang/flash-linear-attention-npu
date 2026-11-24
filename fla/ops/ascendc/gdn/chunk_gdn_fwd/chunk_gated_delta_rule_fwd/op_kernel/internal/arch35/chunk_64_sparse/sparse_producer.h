@@ -22,8 +22,8 @@ constexpr int32_t kProdOutputMte3EventBase = 2;
 
 // Each pair lane owns a private L1 K/Q slot: the odd AIV's upload must never
 // overwrite the even chunk still feeding KKT/QK. A slot is reused three pairs
-// later; the pair-2 output-event wait in PrepareLoadedInputs retires the Cube
-// reads of that generation first.
+// later; the AivWait(kProdKkt/kProdQK) of that generation already blocked this
+// AIV until the Cube retired its L1 reads, so the upload needs no extra gate.
 __aicore__ inline uint32_t ProducerL1Slot(int64_t chunk)
 {
     return static_cast<uint32_t>((chunk >> 1) % 3) * 2 + static_cast<uint32_t>(chunk & 1);
@@ -101,7 +101,7 @@ public:
                 }
                 const uint32_t lastSlot = static_cast<uint32_t>((last >> 1) & 1);
                 // At most the last two output events remain unconsumed. Earlier
-                // events were consumed by their same-slot preprocess.
+                // events were consumed by their same-slot inverse.
                 WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + lastSlot);
             }
             // An odd chunk count leaves the last pair without an odd lane; the
@@ -191,16 +191,18 @@ private:
                     kPUbRatio + slot * kPUbRatioSlotBytes);
 
                 // Inverse and QKMask use the opposite slot from preprocess.
-                // L is dead after substitution, so its two 8 KiB halves hold
-                // the BF16 T and APrime outputs without additional UB storage.
+                // Normalized K/Q die once their L1 and GM copies are issued,
+                // so L and X reuse those slots inside the same generation.
                 ubL_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                     kPUbKHat + inputOffset);
                 ubX_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                     kPUbQHat + inputOffset);
+                // T and APrime have a private pair-parity region; its
+                // out-generation drain is waited in BuildInverse.
                 ubABf_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
-                    kPUbKHat + inputOffset);
+                    kPUbOut + slot * kPUbOutSlotBytes);
                 ubAPrime_[slot] = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(
-                    kPUbKHat + inputOffset + 8 * kKiB);
+                    kPUbOut + slot * kPUbOutSlotBytes + 8 * kKiB);
             }
             for (uint32_t gateSlot = 0; gateSlot < 3; ++gateSlot) {
                 ubG_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
@@ -281,13 +283,10 @@ private:
 
     __aicore__ inline void PrepareLoadedInputs(int64_t chunk)
     {
-        const int64_t pair = chunk >> 1;
-        const uint32_t slot = static_cast<uint32_t>(pair & 1);
-        if (pair >= 2) {
-            // Wait only for the output from pair-2 that owns this same slot.
-            // The opposite slot's preprocess/inverse remains independent.
-            WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
-        }
+        const uint32_t slot = static_cast<uint32_t>((chunk >> 1) & 1);
+        // T/APrime own a separate pair-parity region, so nothing here can
+        // collide with the previous generation's stores. The out-generation
+        // drain lives in BuildInverse, right before the Cast.
         PrepareK(chunk);
         PrepareGateBeta(chunk);
         PrepareQInputs(chunk);
@@ -439,6 +438,12 @@ private:
         // normalized K/Q UB as L/X. Do not drain the next pair's uploads.
         WaitFlag<HardEvent::MTE3_V>(kProdInputMte3EventBase + slot);
         Inverse64VF(ubKkt_, ubL_[slot], ubX_[slot], ubRatio_[slot], ubBeta_[gateSlot], ubEye_);
+        if (pair >= 2) {
+            // T/APrime have owned this slot since pair-2, whose stores were
+            // issued a full round pair ago. Waiting here instead of at the
+            // next preprocess keeps the drain off the round head.
+            WaitFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
+        }
         Cast(ubABf_[slot], ubX_[slot], RoundMode::CAST_RINT, kMatrixElems);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
@@ -459,7 +464,7 @@ private:
         const int64_t offset = OffsetMatrixTile(tile, loc_.hv, td_.valueHeads);
         DataCopy(gmAPrime_[offset], ubAPrime_[slot], kMatrixElems);
         // This MTE3 event covers both T and APrime in the slot. It is consumed
-        // by preprocess two pairs later, or by the chain-tail drain.
+        // by the inverse two pairs later, or by the chain-tail drain.
         SetFlag<HardEvent::MTE3_V>(kProdOutputMte3EventBase + slot);
         CrossCoreSetFlag<0x2, PIPE_MTE3>(kProdAPairDoneFlag);
     }
