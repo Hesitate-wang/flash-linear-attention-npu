@@ -274,13 +274,30 @@ private:
         if ASCEND_IS_AIC {
             l0A0_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank0);
             l0A1_ = buf.GetBuffer<BufferType::ASCEND_L0A, bfloat16_t>(kL0Bank1);
-            l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank0);
-            l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0Bank1);
+            // bank1 holds QExp first, APrime behind it; they never overlap.
+            l0APrime_ = l0A1_[kL0APrimeOffset];
+            l0B0_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0B0);
+            l0B1_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0B1);
+            l0B2_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0B2);
+            l0B3_ = buf.GetBuffer<BufferType::ASCEND_L0B, bfloat16_t>(kL0B3);
             l0C0_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C0);
             l0C1_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C1);
             l0C2_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C2);
-            l0C3_ = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0C3);
+            l0CQS_[0] = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0CQS0);
+            l0CQS_[1] = buf.GetBuffer<BufferType::ASCEND_L0C, float>(kL0CQS1);
         }
+    }
+
+    // QS/O accumulator and its release event are selected by chunk parity: the
+    // Fixpipe of chunk i's O therefore never gates chunk i+1's QS.
+    __aicore__ inline LocalTensor<float> QsAccumulator(int64_t chunk) const
+    {
+        return l0CQS_[static_cast<uint32_t>(chunk & 1)];
+    }
+
+    __aicore__ inline int32_t QsReleaseEvent(int64_t chunk) const
+    {
+        return kL0CReleaseEventIds[2 + 3 * static_cast<int32_t>(chunk & 1)];
     }
 
     __aicore__ inline int64_t StateOffset() const
@@ -823,27 +840,29 @@ private:
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
         const bool transposeB = td_.stateVFirst == 0;
+        LocalTensor<float> qs = QsAccumulator(chunk);
         AicWaitBoth(kConsQExp);
         AicWaitBoth(kConsS);
-        WaitFlag<HardEvent::M_MTE1>(0);
-        LoadA(l0A0_, l1QExp_[slot], 64, 128, false);
-        LoadB(l0B0_, l1H_[slot], 64, 128, transposeB);
+        // QExp goes to bank1 and H to its own B slots, so neither load waits for
+        // the T@Vb mmad still in flight. Both were retired by the chunk-head
+        // M_MTE1 drain, so no operand release wait is needed here either.
+        LoadA(l0A1_, l1QExp_[slot], 64, 128, false);
+        LoadB(l0B2_, l1H_[slot], 64, 128, transposeB);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        // Consume the previous O Fixpipe release before reinitializing l0C3.
-        WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[2]);
-        IssueMm(l0A0_, l0B0_, l0C3_, 64, 64, 128, true);
+        // Consume the same-parity O Fixpipe release (two chunks back) before
+        // reinitializing this parity's accumulator.
+        WaitFlag<HardEvent::FIX_M>(QsReleaseEvent(chunk));
+        IssueMm(l0A1_, l0B2_, qs, 64, 64, 128, true);
 
         AicWaitBoth(kConsS1);
         LocalTensor<bfloat16_t> hC2 = l1H_[slot][kStateElems / 2];
-        LoadB(l0B1_, hC2, 64, 128, transposeB);
+        LoadB(l0B3_, hC2, 64, 128, transposeB);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        IssueMm(l0A0_, l0B1_, l0C3_[kChunk * kHalfDim], 64, 64, 128, true);
-        // M orders C2 after C1, so one release covers both QS panels.
-        SetFlag<HardEvent::M_MTE1>(0);
-        SetFlag<HardEvent::M_FIX>(0);
-        WaitFlag<HardEvent::M_FIX>(0);
+        IssueMm(l0A1_, l0B3_, qs[kChunk * kHalfDim], 64, 64, 128, true);
+        // M orders C2 after C1 and the W@S mmads behind both, so QS needs no
+        // completion wait of its own; the O accumulation consumes the result.
     }
 
     __aicore__ inline void RunCubePrepare(int64_t chunk)
@@ -892,13 +911,12 @@ private:
         WaitFlag<HardEvent::MTE2_MTE1>(slot);
         LoadA(l0A0_, l1T_[slot], 64, 64, false);
         SetFlag<HardEvent::MTE1_MTE2>(slot);
-        LoadB(l0B1_, l1W_[slot], 128, 64, true);
+        LoadB(l0B0_, l1W_[slot], 128, 64, true);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[1]);
-        IssueMm(l0A0_, l0B1_, l0C2_, 64, 128, 64, true);
-        LoadB(l0B0_, l1U_[slot], 128, 64, true);
-        SetFlag<HardEvent::M_MTE1>(0);
+        IssueMm(l0A0_, l0B0_, l0C2_, 64, 128, 64, true);
+        LoadB(l0B1_, l1U_[slot], 128, 64, true);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
         FixB16L1Matrix(l1W_[slot], l0C2_, 64, 128, 64);
@@ -907,30 +925,33 @@ private:
         SetFlag<HardEvent::FIX_MTE1>(0);
 
         AicWaitBoth(kConsU);
-        WaitFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[0]);
-        IssueMm(l0A0_, l0B0_, l0C0_, 64, 128, 64, true);
+        IssueMm(l0A0_, l0B1_, l0C0_, 64, 128, 64, true);
+        // T@Vb keeps bank0's T and the l0C0 accumulator live until W@S
+        // accumulates onto them. Its completion is waited in RunCubeAfterWu, so
+        // the QS issue runs while this mmad is still in the queue.
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
-        WaitFlag<HardEvent::M_FIX>(0);
     }
 
     __aicore__ inline void RunCubeAfterWu(int64_t chunk)
     {
         const uint32_t slot = static_cast<uint32_t>(chunk & 1);
-        const bool transposeState = td_.stateVFirst == 0;
-        // U was initialized in RunCubePrepare. Only the state-dependent W@S
-        // accumulation remains in the serial path. This wait pairs with the
-        // W Fixpipe in RunCubePrepare, not with QS.
-        WaitFlag<HardEvent::FIX_MTE1>(0);
+        LocalTensor<float> qs = QsAccumulator(chunk);
+        // T@Vb held bank0's T and the l0C0 accumulator; its completion is only
+        // needed now, so QS was issued underneath it.
+        WaitFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_MTE1>(0);
+        // This wait pairs with the W Fixpipe in RunCubePrepare, not with QS.
+        WaitFlag<HardEvent::FIX_MTE1>(0);
         LoadA(l0A0_, l1W_[slot], 64, 128, false);
-        LoadB(l0B0_, l1H_[slot], 64, 128, transposeState);
+        // H's first half is still in its own B slot from RunCubeQs; W@S reuses
+        // it instead of reloading.
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        IssueMm(l0A0_, l0B0_, l0C0_, 64, 64, 128, false);
+        IssueMm(l0A0_, l0B2_, l0C0_, 64, 64, 128, false);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
@@ -942,7 +963,7 @@ private:
         WaitFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        IssueMm(l0A0_, l0B1_, l0C0_[kChunk * kHalfDim], 64, 64, 128, false);
+        IssueMm(l0A0_, l0B3_, l0C0_[kChunk * kHalfDim], 64, 64, 128, false);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
@@ -971,13 +992,14 @@ private:
         SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[3]);
         AicPublishToBoth(kConsD);
 
-        // APrime uses independent l0A1. Once Right-C2 arrives, load its B and
-        // queue D-C2 before consuming D-C1's release for the VNew prefetch.
+        // APrime sits behind QExp in bank1, so this load never invalidates the
+        // QS left operand. Once Right-C2 arrives, load its B and queue D-C2
+        // before consuming D-C1's release for the VNew prefetch.
         // APrime was joined and loaded in RunCubePrepare behind the T loads on
         // dedicated flag IDs 2/3, only consumed here after U-WS and the
         // v_new-decay work covered the transfer.
         WaitFlag<HardEvent::MTE2_MTE1>(2 + slot);
-        LoadA(l0A1_, l1APrime_[slot], 64, 64, false);
+        LoadA(l0APrime_, l1APrime_[slot], 64, 64, false);
         SetFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[slot]);
         AicWaitBoth(kConsRight1);
         LoadB(l0B1_, dB[kHalfDim * kHalfDim], 64, 64, true);
@@ -988,7 +1010,7 @@ private:
         WaitFlag<HardEvent::M_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(0);
         WaitFlag<HardEvent::FIX_MTE1>(1);
-        LoadB(l0B0_, l1VNew_, 128, 64, true);
+        LoadB(l0B3_, l1VNew_, 128, 64, true);
         SetFlag<HardEvent::M_MTE1>(1);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
@@ -999,12 +1021,12 @@ private:
         WaitFlag<HardEvent::M_MTE1>(1);
         SetFlag<HardEvent::MTE1_M>(0);
         WaitFlag<HardEvent::MTE1_M>(0);
-        IssueMm(l0A1_, l0B0_, l0C3_, 64, 128, 64, false);
+        IssueMm(l0APrime_, l0B3_, qs, 64, 128, 64, false);
         SetFlag<HardEvent::M_MTE1>(0);
         SetFlag<HardEvent::M_FIX>(0);
         WaitFlag<HardEvent::M_FIX>(0);
-        FixB16ScaledHalves(ubO_, l0C3_, 64, 128, td_.scale);
-        SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[2]);
+        FixB16ScaledHalves(ubO_, qs, 64, 128, td_.scale);
+        SetFlag<HardEvent::FIX_M>(QsReleaseEvent(chunk));
         AicPublishToBoth(kConsOL);
     }
 
@@ -1033,8 +1055,9 @@ private:
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];
     LocalTensor<bfloat16_t> l1VNew_, l1Right_, l1APrime_[2], l1T_[2];
-    LocalTensor<bfloat16_t> l0A0_, l0A1_, l0B0_, l0B1_;
-    LocalTensor<float> l0C0_, l0C1_, l0C2_, l0C3_;
+    LocalTensor<bfloat16_t> l0A0_, l0A1_, l0APrime_;
+    LocalTensor<bfloat16_t> l0B0_, l0B1_, l0B2_, l0B3_;
+    LocalTensor<float> l0C0_, l0C1_, l0C2_, l0CQS_[2];
 };
 
 } // namespace GdnChunk64Sparse

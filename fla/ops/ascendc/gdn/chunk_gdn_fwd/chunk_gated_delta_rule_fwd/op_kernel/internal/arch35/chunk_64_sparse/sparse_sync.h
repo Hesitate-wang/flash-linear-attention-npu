@@ -32,8 +32,10 @@ constexpr uint16_t kSparseNormalizedQFlagIds[2] = {14, 15};
 
 // Independent L0C accumulator release event IDs. Prime and drain every ID at
 // the pipeline boundary; each role waits only before reusing its own region.
-constexpr int32_t kL0CReleaseEventCount = 5;
-constexpr int32_t kL0CReleaseEventIds[kL0CReleaseEventCount] = {0, 1, 2, 3, 4};
+// Slots 2 and 5 are the two per-parity QS/O accumulators; every other slot
+// guards a single region.
+constexpr int32_t kL0CReleaseEventCount = 6;
+constexpr int32_t kL0CReleaseEventIds[kL0CReleaseEventCount] = {0, 1, 2, 3, 4, 5};
 
 __aicore__ inline uint16_t IterationNormalizedKFlag(int64_t pair)
 {

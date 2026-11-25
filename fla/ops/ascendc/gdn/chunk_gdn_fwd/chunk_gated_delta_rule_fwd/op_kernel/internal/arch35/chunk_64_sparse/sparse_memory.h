@@ -107,12 +107,35 @@ constexpr uint32_t kCL1TSlotBytes = 8 * kKiB;
 constexpr uint32_t kCL1End = kCL1T + 2 * kCL1TSlotBytes;
 static_assert(kCL1End <= 512 * kKiB);
 
+// L0A: two 32 KiB banks. Bank0 carries T, the corrected W (T@W result, also
+// the W@S left operand) and the D left operand; bank1 carries QExp in its first
+// 16 KiB and APrime in the second. QExp and APrime coexist, so the QS operand
+// load never waits for the T@Vb mmad and never invalidates APrime.
 constexpr uint32_t kL0Bank0 = 0;
 constexpr uint32_t kL0Bank1 = 32 * kKiB;
-constexpr uint32_t kL0C0 = 0;
-constexpr uint32_t kL0C1 = 64 * kKiB;
-constexpr uint32_t kL0C2 = 128 * kKiB;
-constexpr uint32_t kL0C3 = 192 * kKiB;
+constexpr uint32_t kL0APrimeOffset = static_cast<uint32_t>(kChunk * kDim); // elements inside bank1
+
+// L0B: four 16 KiB slots so the T@W / T@Vb operands (W, Vb), the two H halves
+// (consumed by both QS and W@S) and the D operands never share a slot. dB/dB2/
+// vNew reuse a slot only after its previous mmad retired.
+constexpr uint32_t kL0BSlotBytes = 16 * kKiB;
+constexpr uint32_t kL0B0 = 0;                  // W (T@W B), then dB (D-C1 B)
+constexpr uint32_t kL0B1 = kL0BSlotBytes;      // Vb (T@Vb B), then dB2 (D-C2 B)
+constexpr uint32_t kL0B2 = 2 * kL0BSlotBytes;  // H first half (QS C1, W@S C1)
+constexpr uint32_t kL0B3 = 3 * kL0BSlotBytes;  // H second half (QS C2, W@S C2), then vNew
+static_assert(kL0B3 + kL0BSlotBytes <= 64 * kKiB);
+
+// L0C: 256 KiB repacked. QS/O keep one 32 KiB accumulator per chunk parity so
+// QS never waits for the previous chunk's O Fixpipe. kL0C0/kL0C1 are also read
+// by the Producer role, which uses only 16 KiB of each; the new spacing keeps
+// its two regions disjoint (0-16 KiB and 32-48 KiB).
+constexpr uint32_t kL0C0 = 0;                // T@Vb + W@S accumulator (32 KiB)
+constexpr uint32_t kL0C1 = 32 * kKiB;        // D halves (2 x 32 KiB)
+constexpr uint32_t kL0C2 = 96 * kKiB;        // T@W scratch (32 KiB)
+constexpr uint32_t kL0CQS0 = 128 * kKiB;     // QS/O accumulator, even chunks
+constexpr uint32_t kL0CQS1 = 160 * kKiB;     // QS/O accumulator, odd chunks
+static_assert(kL0C2 - kL0C1 >= 64 * kKiB);   // D keeps two 128x64 panels
+static_assert(kL0CQS1 + 32 * kKiB <= 256 * kKiB);
 
 } // namespace GdnChunk64Sparse
 
