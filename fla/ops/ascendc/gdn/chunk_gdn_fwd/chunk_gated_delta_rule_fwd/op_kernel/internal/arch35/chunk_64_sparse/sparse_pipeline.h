@@ -28,12 +28,10 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
 {
     ConsumerRole role;
     role.Init(args, td);
-    GDN_SPARSE_TRACE(td, 10, chain, 0);
     role.BeginChain(args, chain);
     GDN_SPARSE_TRACE(td, 11, chain, static_cast<int64_t>(role.ChunkCount()));
     role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
-    GDN_SPARSE_TRACE(td, 12, chain, chunks);
     if ASCEND_IS_AIV {
         // An empty chain owns no chunk and stays out of the generation
         // exchange, so its join-only loop is skipped as well.

@@ -188,10 +188,13 @@ __aicore__ inline void EnergyVF(LocalTensor<float> &g,
 // normal FP32 range. NaN fails all comparisons and selects the safe path.
 // scratch only needs its first two floats and is reused by the following stage.
 __aicore__ inline bool GateRatioSafe(LocalTensor<float> &g, LocalTensor<float> &scratch,
-                                     uint32_t rows)
+                                     uint32_t rows, uint32_t trace = 0)
 {
     __ubuf__ float *gAddr = reinterpret_cast<__ubuf__ float *>(g.GetPhyAddr());
     __ubuf__ float *scratchAddr = reinterpret_cast<__ubuf__ float *>(scratch.GetPhyAddr());
+    if (trace != 0) {
+        PRINTF("[GDNSP] p=79\n");
+    }
     __VEC_SCOPE__
     {
         MaskReg mask = UpdateMask<float>(rows);
@@ -204,9 +207,18 @@ __aicore__ inline bool GateRatioSafe(LocalTensor<float> &g, LocalTensor<float> &
         StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(scratchAddr + 1, hi, scalar);
     }
     SetFlag<HardEvent::V_S>(0);
+    if (trace != 0) {
+        PRINTF("[GDNSP] p=80\n");
+    }
     WaitFlag<HardEvent::V_S>(0);
+    if (trace != 0) {
+        PRINTF("[GDNSP] p=81\n");
+    }
     const float lo = scratch.GetValue(0);
     const float hi = scratch.GetValue(1);
+    if (trace != 0) {
+        PRINTF("[GDNSP] p=82\n");
+    }
     return lo >= -kSparseExpSafeLimit && hi <= kSparseExpSafeLimit &&
            hi - lo <= kSparseExpSafeLimit;
 }
