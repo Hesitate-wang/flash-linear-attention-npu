@@ -83,10 +83,9 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     const int64_t hv = v->GetStorageShape().GetDim(1);
     const int64_t *chunkSize = attrs->GetAttrPointer<int64_t>(1);
     OP_CHECK_IF(batch <= 0 || hk <= 0 || hv <= 0 || tokens <= 0 || hk > hv || hv % hk != 0 ||
-                    hv / hk > kSparseMaxHvPerHk || qs.GetDim(3) != 128 ||
-                    chunkSize == nullptr || *chunkSize != 64,
+                    qs.GetDim(3) != 128 || chunkSize == nullptr || *chunkSize != 64,
                 OP_LOGE("ChunkGatedDeltaRuleFwd",
-                        "Sparse key64 requires B/Hk/Hv/T>0, Hv/Hk in [1,16], K=V=128, chunk=64."),
+                        "Sparse key64 requires B/Hk/Hv/T>0, Hv a multiple of Hk, K=V=128, chunk=64."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(!SparseShape(context->GetOptionalInputShape(1), {batch, hk, tokens, 128}) ||
                     !SparseShape(v, {batch, hv, tokens, 128}) ||

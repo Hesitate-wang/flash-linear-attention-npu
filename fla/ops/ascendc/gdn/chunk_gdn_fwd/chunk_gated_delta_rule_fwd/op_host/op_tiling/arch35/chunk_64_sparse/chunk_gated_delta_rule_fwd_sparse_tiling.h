@@ -10,10 +10,6 @@
 
 namespace optiling {
 
-// Mirrors the Ascend950 prepare-path contract (PREPARE_PATH_MAX_HV_PER_HK in
-// op_api): the GVA route is supported for Hv/Hk in [1, 16].
-constexpr uint64_t kSparseMaxHvPerHk = 16;
-
 struct ChunkGatedDeltaRuleFwdSparseTilingData {
     uint32_t batch = 0;
     uint32_t keyHeads = 0;
