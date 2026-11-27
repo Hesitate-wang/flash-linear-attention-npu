@@ -250,6 +250,7 @@ private:
 
     __aicore__ inline void PublishNormalizedKPair(int64_t pair)
     {
+        GDN_SPARSE_TRACE(td_, 70, 0, pair);
         if (pair >= 2) {
             WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(pair - 2));
         }
@@ -271,6 +272,7 @@ private:
         if (loc_.chunks == 0) {
             return;
         }
+        GDN_SPARSE_TRACE(td_, 71, 0, first);
         const int64_t globalPairs = (td_.maxChunks + 1) / 2;
         int64_t nextPair = 0;
         if (first < loc_.chunks) {
@@ -290,6 +292,7 @@ private:
             WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(globalPairs - 1));
             WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(globalPairs - 1));
         }
+        GDN_SPARSE_TRACE(td_, 72, 0, 0);
     }
 
     __aicore__ inline void PrepareLoadedInputs(int64_t chunk)
