@@ -190,7 +190,12 @@ inline bool BuildChunkGatedDeltaRuleFwdSparseWorkspace(
     ChunkGatedDeltaRuleFwdSparseWorkspace *workspace)
 {
     constexpr uint64_t kChunk = 64;
+    // Per-group scratch rows. The prepare plan keeps room for the legacy four
+    // head slots and grows with the actual query-group factor, so any
+    // Hv % Hk == 0 grouping (the same contract chunk32 accepts) is covered.
     constexpr uint64_t kRoundHeadSlots = 4;
+    const uint64_t hvPerHk = valueHeads / keyHeads;
+    const uint64_t headSlots = hvPerHk > kRoundHeadSlots ? hvPerHk : kRoundHeadSlots;
     constexpr uint64_t kPrepareBytesPerGroup = 64 * 1024;
     constexpr uint64_t kHReserveBytes = 16 * 1024 * 1024;
     constexpr uint64_t kOAprimeBytesPerGroup = 64 * 1024;
@@ -198,7 +203,7 @@ inline bool BuildChunkGatedDeltaRuleFwdSparseWorkspace(
         physicalBatch == 0 || tokens == 0 || totalChunks == 0 ||
         keyHeads == 0 || valueHeads == 0 ||
         headDim != 128 || valueHeads % keyHeads != 0 ||
-        valueHeads / keyHeads > 4 || inputElementBytes != 2 || alignment == 0) {
+        inputElementBytes != 2 || alignment == 0) {
         return false;
     }
 
@@ -241,11 +246,11 @@ inline bool BuildChunkGatedDeltaRuleFwdSparseWorkspace(
     // Reserve each nested phase from the same user-workspace base. H offsets
     // include the existing library and 16 MiB leading/trailing reservations.
     uint64_t hScratch = 0;
-    if (!CheckedMulU64(kRoundHeadSlots * kChunk * headDim, sizeof(float), &tmp) ||
+    if (!CheckedMulU64(headSlots * kChunk * headDim, sizeof(float), &tmp) ||
         !AlignSparseWorkspace(tmp, 512, &vScratchPerGroup) ||
-        !CheckedMulU64(kRoundHeadSlots * kChunk * headDim, inputElementBytes, &tmp) ||
+        !CheckedMulU64(headSlots * kChunk * headDim, inputElementBytes, &tmp) ||
         !AlignSparseWorkspace(tmp, 512, &updateScratchPerGroup) ||
-        !CheckedMulU64(kRoundHeadSlots * headDim * headDim, sizeof(float), &tmp) ||
+        !CheckedMulU64(headSlots * headDim * headDim, sizeof(float), &tmp) ||
         !AlignSparseWorkspace(tmp, 512, &matrixScratchPerGroup) ||
         !CheckedAddU64(vScratchPerGroup, updateScratchPerGroup, &hScratchPerGroup) ||
         !CheckedAddU64(hScratchPerGroup, matrixScratchPerGroup, &hScratchPerGroup) ||
