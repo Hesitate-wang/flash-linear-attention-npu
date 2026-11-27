@@ -62,8 +62,7 @@ public:
 
     __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain, bool idle = false)
     {
-        // An idle pair runs the zero-chunk path: it publishes and drains every
-        // generation without loading or storing anything.
+        // An idle pair runs the zero-chunk path: publish and drain only.
         loc_ = idle ? ChainLoc{} : ResolveChain(td_, args.cuSeqlens, chain);
     }
 
@@ -116,9 +115,8 @@ public:
             CompleteNormalizedQK(first);
         }
         if ASCEND_IS_AIC {
-            // Every chain publishes its generations, empty chains included:
-            // mode-0 is an all-AIC barrier, so a silent empty chain would keep
-            // the other cores' generations from ever retiring.
+            // Idle pairs publish every generation too: mode-0 is an all-AIC
+            // barrier, so a silent pair would stall every other core.
             const int64_t iterations = td_.maxChunks;
             const int64_t pairs = (iterations + 1) / 2;
             const int64_t localPairs = (loc_.chunks + 1) / 2;
@@ -147,7 +145,7 @@ public:
                     // and rides the AIC's otherwise idle MTE2 queue.
                     CrossCoreWaitFlag<0x2, PIPE_MTE2>(kProdTPairDoneFlag);
                 }
-                // Short and empty chains still join every global generation.
+                // Idle pairs still join every global generation.
                 SetIterationAic<PIPE_MTE2>(pair);
                 if (pair < localPairs) {
                     // Backpressure also releases the single KKT/QK UB slots.
@@ -249,7 +247,6 @@ private:
 
     __aicore__ inline void PublishNormalizedKPair(int64_t pair)
     {
-        GDN_SPARSE_TRACE(td_, 70, 0, pair);
         if (pair >= 2) {
             WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(pair - 2));
         }
@@ -266,9 +263,7 @@ private:
 
     __aicore__ inline void CompleteNormalizedQK(int64_t first)
     {
-        // An empty chain still publishes every generation: its siblings wait
-        // on the same all-AIV barrier, so it must post like everyone else.
-        GDN_SPARSE_TRACE(td_, 71, 0, first);
+        // Idle pairs still publish every generation: the barrier spans all AIVs.
         const int64_t globalPairs = (td_.maxChunks + 1) / 2;
         int64_t nextPair = 0;
         if (first < loc_.chunks) {
@@ -288,7 +283,6 @@ private:
             WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(globalPairs - 1));
             WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(globalPairs - 1));
         }
-        GDN_SPARSE_TRACE(td_, 72, 0, 0);
     }
 
     __aicore__ inline void PrepareLoadedInputs(int64_t chunk)

@@ -509,12 +509,21 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 logger.info("DUT output %s %s", tensor_name, json.dumps(output_stats[tensor_name]))
         summary["output_stats"] = output_stats
 
+        # Zero-length sequences own no chain, so the operator produces no
+        # final_state for them; compare only the live sequences.
+        live = None
+        if cu is not None:
+            live = [index for index, (begin, end) in enumerate(zip(cu, cu[1:])) if end > begin]
         metrics = {}
         if config["compare_cpu"]:
             for tensor_name, expected_tensor in expected.items():
                 if actual.get(tensor_name) is None:
                     raise RuntimeError(f"DUT output {tensor_name} is required but returned None")
-                metric = data_compare(actual[tensor_name], expected_tensor, config,
+                dut_tensor = actual[tensor_name]
+                if tensor_name == "final_state" and live is not None:
+                    dut_tensor = dut_tensor[live]
+                    expected_tensor = expected_tensor[live]
+                metric = data_compare(dut_tensor, expected_tensor, config,
                                       logger, label=f"cpu.{tensor_name}")
                 metrics[tensor_name] = metric
                 logger.info("compare %s %s", tensor_name, json.dumps(metric))
@@ -538,7 +547,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             for tensor_name, chain_tensor in chain_outputs.items():
                 if actual.get(tensor_name) is None:
                     raise RuntimeError(f"DUT output {tensor_name} is required for chain comparison")
-                metric = data_compare(actual[tensor_name], chain_tensor, config,
+                dut_tensor = actual[tensor_name]
+                if tensor_name == "final_state" and live is not None:
+                    dut_tensor = dut_tensor[live]
+                    chain_tensor = chain_tensor[live]
+                metric = data_compare(dut_tensor, chain_tensor, config,
                                       logger, label=f"chain.{tensor_name}")
                 chain_metrics[tensor_name] = metric
                 logger.info("compare_chain %s %s", tensor_name, json.dumps(metric))

@@ -15,12 +15,10 @@ namespace GdnChunk64Sparse {
 __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData &td,
                                    uint32_t chain, bool idle)
 {
-    GDN_SPARSE_TRACE(td, 1, chain, 0);
     ProducerRole role;
     role.Init(args, td);
     role.BeginChain(args, chain, idle);
     role.Run();
-    GDN_SPARSE_TRACE(td, 2, chain, 0);
 }
 
 __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData &td,
@@ -29,26 +27,20 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     ConsumerRole role;
     role.Init(args, td);
     role.BeginChain(args, chain, idle);
-    GDN_SPARSE_TRACE(td, 11, chain, static_cast<int64_t>(role.ChunkCount()));
     role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
     if ASCEND_IS_AIV {
-        // An empty chain joins the generation exchange without running a chunk:
-        // mode-0 flags are an all-AIV barrier, so it must post and wait exactly
-        // like its siblings even though it moves no data.
+        // An idle pair joins every generation without running a chunk.
         for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
             if (iteration < chunks) {
                 role.RunChunk(iteration);
-                GDN_SPARSE_TRACE(td, 42, chain, iteration);
             } else {
                 role.JoinNormalizedQKGeneration(iteration);
             }
         }
-        GDN_SPARSE_TRACE(td, 13, chain, 0);
     }
     if ASCEND_IS_AIC {
-        // Same contract on the cube side: an empty chain primes, joins and
-        // drains every generation without running a chunk.
+        // Same contract on the cube side: idle pairs prime, join and drain.
         const int64_t globalPairs = (td.maxChunks + 1) / 2;
         // Prime T/APrime generations 0/1; every join below returns the
         // pair+2 credit instead of publishing its own generation.
@@ -62,11 +54,9 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             }
             if (iteration < chunks) {
                 role.RunPrepare(iteration);
-                GDN_SPARSE_TRACE(td, 40, chain, iteration);
             }
             if (iteration < chunks) {
                 role.RunAfterWu(iteration);
-                GDN_SPARSE_TRACE(td, 41, chain, iteration);
             } else if ((iteration & 1) == 0) {
                 // Shorter chains still join every global mode-0 generation;
                 // active chains join in RunCubePrepare behind the T loads.
@@ -97,10 +87,8 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             WaitFlag<HardEvent::MTE1_MTE2>(0);
             WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
         }
-        GDN_SPARSE_TRACE(td, 14, chain, 0);
     }
     role.EndChain();
-    GDN_SPARSE_TRACE(td, 16, chain, 0);
 }
 
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
@@ -115,9 +103,8 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
     const uint32_t pairs = td.launchGroups > 1U ? (td.launchGroups >> 1) : 1U;
     for (uint32_t base = 0; base < td.chainCount; base += pairs) {
         const uint32_t chain = base + slot;
-        // A trailing pass can leave a pair without a chain. It still has to run
-        // the generation exchange, so it executes the empty-chain path: same
-        // posts and joins, no data movement.
+        // A trailing pass can leave a pair without a chain; it still runs the
+        // generation exchange, because mode-0 spans every AIC and every AIV.
         const bool idle = chain >= td.chainCount;
         if ASCEND_IS_AIC {
             SetHF32Mode(false);
@@ -126,7 +113,6 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
                 SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
             }
         }
-        GDN_SPARSE_TRACE(td, 20, chain, 0);
         if ((group & 1U) == 0U) {
             RunProducer(args, td, chain, idle);
         } else {

@@ -83,9 +83,10 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     const int64_t hv = v->GetStorageShape().GetDim(1);
     const int64_t *chunkSize = attrs->GetAttrPointer<int64_t>(1);
     OP_CHECK_IF(batch <= 0 || hk <= 0 || hv <= 0 || tokens <= 0 || hk > hv || hv % hk != 0 ||
-                    qs.GetDim(3) != 128 || chunkSize == nullptr || *chunkSize != 64,
+                    hv / hk > kSparseMaxHvPerHk || qs.GetDim(3) != 128 ||
+                    chunkSize == nullptr || *chunkSize != 64,
                 OP_LOGE("ChunkGatedDeltaRuleFwd",
-                        "Sparse key64 requires B/Hk/Hv/T>0, Hv a multiple of Hk, K=V=128, chunk=64."),
+                        "Sparse key64 requires B/Hk/Hv/T>0, Hv/Hk in [1,16], K=V=128, chunk=64."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(!SparseShape(context->GetOptionalInputShape(1), {batch, hk, tokens, 128}) ||
                     !SparseShape(v, {batch, hv, tokens, 128}) ||
@@ -189,17 +190,39 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid norm output shape."),
                 return ge::GRAPH_FAILED);
 
+    // Zero-length sequences are dropped on the host: they own no chunk, so they
+    // get no chain and no core pair, and nothing writes their final_state. A
+    // caller that needs that slice must pre-fill it.
+    const int64_t *cuData = nullptr;
+    int64_t activeSequences = sequenceCount;
+    if (varlen) {
+        const auto *cuTensor = context->GetOptionalInputTensor(8);
+        cuData = cuTensor == nullptr ? nullptr : cuTensor->GetData<int64_t>();
+        if (cuData != nullptr) {
+            int64_t active = 0;
+            for (int64_t seq = 0; seq < sequenceCount; ++seq) {
+                if (cuData[seq + 1] > cuData[seq]) {
+                    ++active;
+                }
+            }
+            if (active > 0) {
+                activeSequences = active;
+            }
+        }
+    }
+    const uint64_t chainSequences = static_cast<uint64_t>(varlen ? activeSequences : batch);
+
     ChunkGatedDeltaRuleFwdPipelinePlan plan{};
     const bool pipeline = BuildChunkGatedDeltaRuleFwdPipelinePlan(
         static_cast<uint64_t>(batch), static_cast<uint64_t>(hv),
-        static_cast<uint64_t>(tokens), static_cast<uint64_t>(sequenceCount),
+        static_cast<uint64_t>(tokens), static_cast<uint64_t>(activeSequences),
         chunkCount, varlen, static_cast<uint64_t>(groups), 512, &plan);
     OP_CHECK_IF(!pipeline,
                 OP_LOGE("ChunkGatedDeltaRuleFwd",
                         "Sparse key64 requires one producer and one consumer group per chain."),
                 return ge::GRAPH_FAILED);
     uint64_t totalChains = 0;
-    OP_CHECK_IF(!CheckedMulU64(static_cast<uint64_t>(varlen ? sequenceCount : batch),
+    OP_CHECK_IF(!CheckedMulU64(chainSequences,
                                static_cast<uint64_t>(hv), &totalChains) ||
                     totalChains == 0 || totalChains > std::numeric_limits<uint32_t>::max(),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid chain count."),
@@ -228,11 +251,10 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.varlen = varlen;
     td.hasALog = context->GetOptionalInputShape(10) != nullptr;
     td.hasDtBias = context->GetOptionalInputShape(11) != nullptr;
-    td.reserved = std::getenv("GDN_SPARSE_DEBUG_TRACE") != nullptr ? 5U
-                  : (std::getenv("GDN_SPARSE_DEBUG_APRIME") != nullptr ? 1U
+    td.reserved = std::getenv("GDN_SPARSE_DEBUG_APRIME") != nullptr ? 1U
                   : (std::getenv("GDN_SPARSE_DEBUG_OL") != nullptr ? 2U
                   : (std::getenv("GDN_SPARSE_DEBUG_OS") != nullptr ? 3U
-                  : (std::getenv("GDN_SPARSE_DEBUG_SCALARS") != nullptr ? 4U : 0U))));
+                  : (std::getenv("GDN_SPARSE_DEBUG_SCALARS") != nullptr ? 4U : 0U)));
     const double *scale = attrs->GetAttrPointer<double>(2);
     td.scale = scale == nullptr ? 1.0f : static_cast<float>(*scale);
     const auto *initialDesc = context->GetOptionalInputDesc(7);
@@ -242,19 +264,15 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
                 return ge::GRAPH_FAILED);
     td.stateFp32 = initialDesc == nullptr || initialDesc->GetDataType() == ge::DT_FLOAT;
 
-    if (varlen) {
-        const auto *cuTensor = context->GetOptionalInputTensor(8);
-        const int64_t *cuData = cuTensor == nullptr ? nullptr : cuTensor->GetData<int64_t>();
-        if (cuData != nullptr) {
-            uint32_t perChainMax = 0;
-            for (int64_t seq = 0; seq < sequenceCount; ++seq) {
-                const int64_t length = cuData[seq + 1] - cuData[seq];
-                const uint32_t chunks = length <= 0 ? 0U : static_cast<uint32_t>((length + 63) / 64);
-                perChainMax = chunks > perChainMax ? chunks : perChainMax;
-            }
-            if (perChainMax > 0 && perChainMax < td.maxChunks) {
-                td.maxChunks = perChainMax;
-            }
+    if (cuData != nullptr) {
+        uint32_t perChainMax = 0;
+        for (int64_t seq = 0; seq < sequenceCount; ++seq) {
+            const int64_t length = cuData[seq + 1] - cuData[seq];
+            const uint32_t chunks = length <= 0 ? 0U : static_cast<uint32_t>((length + 63) / 64);
+            perChainMax = chunks > perChainMax ? chunks : perChainMax;
+        }
+        if (perChainMax > 0 && perChainMax < td.maxChunks) {
+            td.maxChunks = perChainMax;
         }
     }
 

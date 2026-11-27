@@ -92,13 +92,13 @@ public:
 
     __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain, bool idle = false)
     {
-        // An idle pair (a trailing pass left it without a chain) runs this very
-        // path with a zero-chunk location: it posts and joins every generation
-        // like an empty chain, but never touches the data.
+        // An idle pair (a trailing pass left it without a chain) takes this
+        // path with a zero-chunk location: it posts and joins every
+        // generation, and touches no data.
         loc_ = idle ? ChainLoc{} : ResolveChain(td_, args.cuSeqlens, chain);
         idle_ = idle;
-        // Non-empty chains stage initial-state load/conversion inside the
-        // prologue so it overlaps Q/K/V. Empty chains have no such pipeline,
+        // A real chain stages initial-state load/conversion inside the
+        // prologue so it overlaps Q/K/V. Idle pairs have no such pipeline,
         // but EndChain still needs a valid initial/final state.
         if ASCEND_IS_AIV {
             // Prime both K UB slots before the chunk loop. The first loads
@@ -110,9 +110,9 @@ public:
             // all AIV sets. From then on each WaitNormalized* returns the
             // pair+2 credit. Round 1 exists only when there is a second
             // global pair; priming it otherwise would leave an orphan set.
-            // An empty chain primes too: mode-0 flags are an all-AIV barrier,
-            // so a core that stayed silent would keep every other core's
-            // WaitNormalized* from retiring. It only skips the data movement.
+            // Idle pairs prime too: mode-0 flags are an all-AIV barrier, so a
+            // core that stayed silent would keep every other core's
+            // WaitNormalized* from retiring.
             const int64_t globalPairs = (td_.maxChunks + 1) / 2;
             SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(0));
             SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(0));
@@ -124,7 +124,6 @@ public:
                 InitState();
             }
         }
-        GDN_SPARSE_TRACE(td_, 30, chain, static_cast<int64_t>(loc_.chunks));
     }
 
     __aicore__ inline int64_t ChunkCount() const
@@ -182,11 +181,9 @@ public:
     __aicore__ inline void EndChain()
     {
         if ASCEND_IS_AIV {
-            GDN_SPARSE_TRACE(td_, 33, 0, 0);
             for (uint32_t slot = 0; slot < 2; ++slot) {
                 WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
             }
-            GDN_SPARSE_TRACE(td_, 34, 0, loc_.chunks);
             // Drain the V slot releases of the last two ComputeNextVb calls;
             // their IssueV waits never came. Each release sits on its own
             // parity slot's ID, so drain by parity. The same applies to the
@@ -221,7 +218,6 @@ public:
             WaitFlag<HardEvent::MTE3_V>(0);
             SetFlag<HardEvent::MTE3_MTE2>(0);
             WaitFlag<HardEvent::MTE3_MTE2>(0);
-            GDN_SPARSE_TRACE(td_, 35, 0, 0);
         }
     }
 
@@ -332,7 +328,6 @@ private:
 
     __aicore__ inline void InitState()
     {
-        GDN_SPARSE_TRACE(td_, 31, 0, 0);
         if (hasInitial_) {
             if (td_.stateFp32 != 0) {
                 DataCopy(ubStateF_, gmInitF_[StateOffset()], kStateElems / 2);
@@ -351,7 +346,6 @@ private:
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        GDN_SPARSE_TRACE(td_, 32, 0, 0);
     }
 
     __aicore__ inline void LoadInitialState(int32_t eventId = 2)
@@ -385,19 +379,6 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
     }
 
-    // Debug-only: force the Vector queue to drain so a stall inside it becomes
-    // visible as a missing marker. Compiled out (a single scalar compare) when
-    // the trace channel is off.
-    __aicore__ inline void DrainVectorProbe(uint32_t code)
-    {
-        if (td_.reserved != kSparseDebugTrace) {
-            return;
-        }
-        SetFlag<HardEvent::V_S>(3);
-        WaitFlag<HardEvent::V_S>(3);
-        GDN_SPARSE_TRACE(td_, code, 0, 0);
-    }
-
     __aicore__ inline void RunAivPrologue()
     {
         // H preparation starts after the previous chain's EndChain drain.
@@ -410,25 +391,18 @@ private:
         // publication before gate 1's IssueGateInputs sets it again, so the
         // ID never sees back-to-back sets.
         PrepareLoadedGate(0, true);
-        DrainVectorProbe(90);
         if (loc_.chunks > 1) {
             IssueGateInputs(1);
             IssueV(1);
         }
         PrepareNextVb(0);
-        DrainVectorProbe(91);
         PrepareNormalizedQK(0);
-        DrainVectorProbe(92);
         ConvertInitialState();
-        DrainVectorProbe(93);
         PrepareCurrentState(0, false);
-        DrainVectorProbe(94);
         // chunkDecay_ is produced from the gate energy. H was already published,
         // so this decay cannot change the S used by QS/W@S.
         StateDecayVF(ubStateF_, chunkDecay_[0]);
-        DrainVectorProbe(95);
         PrepareRightDecay(0);
-        DrainVectorProbe(96);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)

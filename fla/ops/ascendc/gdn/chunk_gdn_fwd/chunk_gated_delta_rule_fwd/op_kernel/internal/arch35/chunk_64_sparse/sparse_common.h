@@ -23,26 +23,6 @@ constexpr float kSparseLn2 = 0.6931471805599453f;
 constexpr float kSparseRcpLn2 = 1.4426950408889634f;
 constexpr float kSparseExpSafeLimit = 80.0f;
 
-// Debug-only progress markers. The sparse tiling maps GDN_SPARSE_DEBUG_TRACE to
-// td.reserved == kSparseDebugTrace. They print to the host log, which is the
-// only channel that survives a device timeout: the workspace is released with
-// the process and the aclnn call is still blocked when the harness gives up.
-constexpr uint32_t kSparseDebugTrace = 5U;
-
-#if defined(__CCE_AICORE__)
-#define GDN_SPARSE_TRACE(td, point, chain, arg)                              \
-    do {                                                                     \
-        if ((td).reserved == kSparseDebugTrace) {                            \
-            PRINTF("[GDNSP] p=%d chain=%d arg=%d blk=%d\n",                  \
-                   static_cast<int32_t>(point), static_cast<int32_t>(chain), \
-                   static_cast<int32_t>(arg),                                \
-                   static_cast<int32_t>(GetBlockIdx()));                     \
-        }                                                                    \
-    } while (0)
-#else
-#define GDN_SPARSE_TRACE(td, point, chain, arg) ((void)0)
-#endif
-
 struct PhaseArgs {
     GM_ADDR q;
     GM_ADDR k;
@@ -126,7 +106,7 @@ __aicore__ inline ChainLoc ResolveChain(const FusedTilingData &td, GM_ADDR cuSeq
 {
     ChainLoc loc{};
     loc.hv = static_cast<int64_t>(chainIdx) % td.valueHeads;
-    const int64_t sequence = static_cast<int64_t>(chainIdx) / td.valueHeads;
+    int64_t sequence = static_cast<int64_t>(chainIdx) / td.valueHeads;
     loc.kh = loc.hv / (td.valueHeads / td.keyHeads);
     loc.batch = sequence;
     loc.seq = sequence;
@@ -134,6 +114,24 @@ __aicore__ inline ChainLoc ResolveChain(const FusedTilingData &td, GM_ADDR cuSeq
         GlobalTensor<int64_t> cu;
         cu.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(cuSeqlens));
         loc.batch = 0;
+        // Zero-length sequences are dropped from the chain list on the host, so
+        // a chain index counts only the non-empty ones. Map it back to the real
+        // sequence; both roles of a pair derive the same index.
+        if (td.chainCount < static_cast<uint32_t>(td.sequenceCount * td.valueHeads)) {
+            int64_t remaining = sequence;
+            int64_t mapped = td.sequenceCount > 0 ? td.sequenceCount - 1 : 0;
+            for (int64_t s = 0; s < td.sequenceCount; ++s) {
+                if (cu.GetValue(s + 1) > cu.GetValue(s)) {
+                    if (remaining == 0) {
+                        mapped = s;
+                        break;
+                    }
+                    --remaining;
+                }
+            }
+            sequence = mapped;
+        }
+        loc.seq = sequence;
         int64_t prefix = 0;
         for (int64_t s = 0; s < sequence; ++s) {
             const int64_t len = cu.GetValue(s + 1) - cu.GetValue(s);
