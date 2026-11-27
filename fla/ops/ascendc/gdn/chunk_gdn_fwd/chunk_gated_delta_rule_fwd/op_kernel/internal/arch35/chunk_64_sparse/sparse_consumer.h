@@ -407,6 +407,7 @@ private:
         // chunkDecay_ is produced from the gate energy. H was already published,
         // so this decay cannot change the S used by QS/W@S.
         StateDecayVF(ubStateF_, chunkDecay_[0]);
+        GDN_SPARSE_TRACE(td_, 64, 0, 0);
         PrepareRightDecay(0);
         GDN_SPARSE_TRACE(td_, 60, 0, 0);
     }
@@ -780,7 +781,9 @@ private:
         // Gate/energy V_S event 1 was consumed by PrepareCurrentStateHalf.
         // PrepareRightDecay runs before this gate slot is reused.
         gateRatioSafe_ = GateRatioSafe(ubG_[gateSlot], ubScratch_, static_cast<uint32_t>(window.rows));
+        GDN_SPARSE_TRACE(td_, 65, 0, chunk);
         const float gLast = ubG_[gateSlot].GetValue(window.rows - 1);
+        GDN_SPARSE_TRACE(td_, 66, 0, chunk);
         const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {
             DecayVF<true>(ubDecay_[slot], ubG_[gateSlot], ubEnergyRecip_[gateSlot], gLast, lastEnergy,
@@ -789,8 +792,10 @@ private:
             DecayVF<false>(ubDecay_[slot], ubG_[gateSlot], ubEnergyRecip_[gateSlot], gLast, lastEnergy,
                            gateRatioSafe_, firstRow);
         }
+        GDN_SPARSE_TRACE(td_, 67, 0, chunk);
         // Publish decay now rather than draining all Vector work at its use.
         SetFlag<HardEvent::V_S>(2);
+        GDN_SPARSE_TRACE(td_, 68, 0, chunk);
     }
 
     __aicore__ inline void ComputeNextVb(int64_t chunk)
