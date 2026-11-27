@@ -13,22 +13,22 @@
 namespace GdnChunk64Sparse {
 
 __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData &td,
-                                   uint32_t chain)
+                                   uint32_t chain, bool idle)
 {
     GDN_SPARSE_TRACE(td, 1, chain, 0);
     ProducerRole role;
     role.Init(args, td);
-    role.BeginChain(args, chain);
+    role.BeginChain(args, chain, idle);
     role.Run();
     GDN_SPARSE_TRACE(td, 2, chain, 0);
 }
 
 __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData &td,
-                                   uint32_t chain)
+                                   uint32_t chain, bool idle)
 {
     ConsumerRole role;
     role.Init(args, td);
-    role.BeginChain(args, chain);
+    role.BeginChain(args, chain, idle);
     GDN_SPARSE_TRACE(td, 11, chain, static_cast<int64_t>(role.ChunkCount()));
     role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
@@ -103,97 +103,6 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     GDN_SPARSE_TRACE(td, 16, chain, 0);
 }
 
-// A pair left without a chain in a trailing pass still posts and joins every
-// global mode-0 generation. Those flags are barriers over every AIC / every
-// AIV, so a silent pair would keep the active pairs' waits from ever retiring.
-// Only the data movement is skipped: the set/wait sequence below matches, step
-// for step, what a chain whose chunk count is zero executes.
-__aicore__ inline void RunIdlePair(const FusedTilingData &td, uint32_t group)
-{
-    const int64_t globalPairs = (td.maxChunks + 1) / 2;
-    const bool isProducer = (group & 1U) == 0U;
-    if ASCEND_IS_AIV {
-        if (isProducer) {
-            for (int64_t pair = 0; pair < globalPairs; ++pair) {
-                if (pair >= 2) {
-                    WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(pair - 2));
-                    WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(pair - 2));
-                }
-                SetMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(pair));
-                SetMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(pair));
-            }
-            if (globalPairs >= 2) {
-                WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(globalPairs - 2));
-                WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(globalPairs - 2));
-            }
-            if (globalPairs >= 1) {
-                WaitMode0Flag<PIPE_MTE3>(IterationNormalizedKFlag(globalPairs - 1));
-                WaitMode0Flag<PIPE_MTE3>(IterationNormalizedQFlag(globalPairs - 1));
-            }
-        } else {
-            SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(0));
-            SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(0));
-            if (globalPairs >= 2) {
-                SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(1));
-                SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(1));
-            }
-            for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-                if ((iteration & 1) != 0) {
-                    continue;
-                }
-                const int64_t pair = iteration >> 1;
-                WaitMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(pair));
-                if (pair + 2 < globalPairs) {
-                    SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(pair + 2));
-                }
-                WaitMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(pair));
-                if (pair + 2 < globalPairs) {
-                    SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(pair + 2));
-                }
-            }
-        }
-    }
-    if ASCEND_IS_AIC {
-        const int64_t pairs = (td.maxChunks + 1) / 2;
-        if (isProducer) {
-            for (int64_t pair = 0; pair < pairs; ++pair) {
-                if (pair >= 2) {
-                    WaitIterationAic<PIPE_MTE2>(pair);
-                    WaitAPrimeAic<PIPE_FIX>(pair);
-                }
-                SetIterationAic<PIPE_MTE2>(pair);
-                SetAPrimeAic(pair);
-            }
-            if (pairs >= 2) {
-                WaitIterationAic<PIPE_MTE2>(pairs - 2);
-                WaitAPrimeAic<PIPE_FIX>(pairs - 2);
-            }
-            if (pairs >= 1) {
-                WaitIterationAic<PIPE_MTE2>(pairs - 1);
-                WaitAPrimeAic<PIPE_FIX>(pairs - 1);
-            }
-        } else {
-            PrimeTAPrimeCreditsAic(globalPairs);
-            for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-                if ((iteration & 1) != 0) {
-                    continue;
-                }
-                JoinIterationAicCredit<PIPE_MTE2>(iteration >> 1, globalPairs);
-                JoinAPrimeAicCredit<PIPE_FIX>(iteration >> 1, globalPairs);
-            }
-            if (pairs >= 2) {
-                WaitIterationAic<PIPE_MTE2>(pairs - 2);
-                WaitAPrimeAic<PIPE_FIX>(pairs - 2);
-            }
-            if (pairs >= 1) {
-                WaitIterationAic<PIPE_MTE2>(pairs - 1);
-                WaitAPrimeAic<PIPE_FIX>(pairs - 1);
-            }
-        }
-    }
-    GDN_SPARSE_TRACE(td, 22, 0, 0);
-}
-
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
 {
     // Chain c is served by the neighbouring pair (2c, 2c+1) so its GM exchange
@@ -206,6 +115,10 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
     const uint32_t pairs = td.launchGroups > 1U ? (td.launchGroups >> 1) : 1U;
     for (uint32_t base = 0; base < td.chainCount; base += pairs) {
         const uint32_t chain = base + slot;
+        // A trailing pass can leave a pair without a chain. It still has to run
+        // the generation exchange, so it executes the empty-chain path: same
+        // posts and joins, no data movement.
+        const bool idle = chain >= td.chainCount;
         if ASCEND_IS_AIC {
             SetHF32Mode(false);
             SetFlag<HardEvent::M_MTE1>(0);
@@ -214,14 +127,10 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
             }
         }
         GDN_SPARSE_TRACE(td, 20, chain, 0);
-        if (chain >= td.chainCount) {
-            // A trailing pass leaves this pair without a chain. It still joins
-            // every global generation; only the data movement is skipped.
-            RunIdlePair(td, group);
-        } else if ((group & 1U) == 0U) {
-            RunProducer(args, td, chain);
+        if ((group & 1U) == 0U) {
+            RunProducer(args, td, chain, idle);
         } else {
-            RunConsumer(args, td, chain);
+            RunConsumer(args, td, chain, idle);
         }
         if ASCEND_IS_AIV {
             SetFlag<HardEvent::MTE3_V>(0);

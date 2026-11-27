@@ -60,9 +60,11 @@ public:
         }
     }
 
-    __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain)
+    __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain, bool idle = false)
     {
-        loc_ = ResolveChain(td_, args.cuSeqlens, chain);
+        // An idle pair runs the zero-chunk path: it publishes and drains every
+        // generation without loading or storing anything.
+        loc_ = idle ? ChainLoc{} : ResolveChain(td_, args.cuSeqlens, chain);
     }
 
     __aicore__ inline int64_t ChunkCount() const

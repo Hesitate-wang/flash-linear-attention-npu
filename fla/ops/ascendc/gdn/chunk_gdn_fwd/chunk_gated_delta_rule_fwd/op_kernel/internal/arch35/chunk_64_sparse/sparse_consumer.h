@@ -90,9 +90,13 @@ public:
         }
     }
 
-    __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain)
+    __aicore__ inline void BeginChain(const PhaseArgs &args, uint32_t chain, bool idle = false)
     {
-        loc_ = ResolveChain(td_, args.cuSeqlens, chain);
+        // An idle pair (a trailing pass left it without a chain) runs this very
+        // path with a zero-chunk location: it posts and joins every generation
+        // like an empty chain, but never touches the data.
+        loc_ = idle ? ChainLoc{} : ResolveChain(td_, args.cuSeqlens, chain);
+        idle_ = idle;
         // Non-empty chains stage initial-state load/conversion inside the
         // prologue so it overlaps Q/K/V. Empty chains have no such pipeline,
         // but EndChain still needs a valid initial/final state.
@@ -199,7 +203,7 @@ public:
             WaitUbRelease(ubUArmed_, 3);
             WaitUbRelease(ubRightArmed_, 4);
             WaitUbRelease(ubStateBArmed_, 5);
-            if (td_.storeFinalState != 0) {
+            if (!idle_ && td_.storeFinalState != 0) {
                 const int64_t offset = StateOffset();
                 if (td_.stateFp32 != 0) {
                     DataCopy(gmFinalF_[offset], ubStateF_, kStateElems / 2);
@@ -1063,6 +1067,7 @@ private:
     ChainLoc loc_{};
     uint32_t sub_{0};
     bool hasInitial_{false};
+    bool idle_{false};
     bool gateRatioSafe_{false};
     bool ubOSBArmed_{false};
     bool ubWArmed_{false};
