@@ -201,8 +201,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     uint64_t totalChains = 0;
     OP_CHECK_IF(!CheckedMulU64(static_cast<uint64_t>(varlen ? sequenceCount : batch),
                                static_cast<uint64_t>(hv), &totalChains) ||
-                    totalChains == 0 || totalChains > std::numeric_limits<uint32_t>::max() ||
-                    totalChains > groups / 2,
+                    totalChains == 0 || totalChains > std::numeric_limits<uint32_t>::max(),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid chain count."),
                 return ge::GRAPH_FAILED);
 
@@ -216,7 +215,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.chunksPerBatch = varlen ? 0 : (tokens + 63) / 64;
     td.chainCount = static_cast<uint32_t>(totalChains);
     td.maxChunks = plan.maxChunks;
-    td.launchGroups = 2U * td.chainCount;
+    td.launchGroups = plan.launchGroups;
     td.gateSoftplus = context->GetOptionalInputShape(10) != nullptr ||
                       context->GetOptionalInputShape(11) != nullptr;
     td.betaSigmoid = betaSigmoid;

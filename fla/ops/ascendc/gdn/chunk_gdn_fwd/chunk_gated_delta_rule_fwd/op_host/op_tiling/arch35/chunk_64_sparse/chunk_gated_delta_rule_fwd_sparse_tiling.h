@@ -56,6 +56,9 @@ struct ChunkGatedDeltaRuleFwdSparsePlan {
     uint64_t workspaceBytes;
 };
 
+// True when one launch can hold every chain (two groups per chain). This is an
+// efficiency observation, not an eligibility gate: a larger chain set runs in
+// several passes over the same producer/consumer pairs on the device.
 inline bool IsChunkGatedDeltaRuleFwdSparseLowParallelism(
     uint64_t batch, uint64_t valueHeads, uint64_t aicCores)
 {
@@ -104,12 +107,15 @@ inline bool PlaceSparseWorkspaceRegion(uint64_t size, uint64_t alignment,
     return CheckedAddU64(*offset, size, cursor);
 }
 
-// Producer/consumer plan for the low-parallelism path. One chain = one (b,hv)
-// pair; its chunks are produced by group c and consumed one iteration later by
-// group chainCount + c. Both counts are upper bounds; the device trims them.
+// Producer/consumer plan for the fused path. One chain = one (b,hv) pair; chain
+// c is served by the adjacent producer/consumer pair (2c, 2c+1), which keeps
+// its GM exchange inside one L2 neighbourhood. Chain sets larger than the
+// machine's pairs are processed in successive passes over the same pairs, so
+// the launch is capped at one pair per two AIC cores.
 struct ChunkGatedDeltaRuleFwdPipelinePlan {
     uint32_t chainCount;
     uint32_t maxChunks;
+    uint32_t launchGroups;   // blockDim: 2 * min(chains, aicCores / 2)
     uint32_t producerGroups;
     uint32_t consumerGroups;
     uint64_t workspaceOffset;
@@ -135,10 +141,16 @@ inline bool BuildChunkGatedDeltaRuleFwdPipelinePlan(
     const uint64_t chainsPerSequence = isVarlen ? sequenceCount : batch;
     uint64_t chains = 0;
     if (chainsPerSequence == 0 || !CheckedMulU64(chainsPerSequence, valueHeads, &chains) ||
-        chains > std::numeric_limits<uint32_t>::max() ||
-        !IsChunkGatedDeltaRuleFwdSparseLowParallelism(chainsPerSequence, valueHeads, aicCores)) {
+        chains > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
+    // A chain needs one producer and one consumer group. When chains outnumber
+    // the machine's pairs the launch is capped and the device iterates.
+    const uint64_t pairs = aicCores / 2;
+    if (pairs == 0) {
+        return false;
+    }
+    const uint64_t launchChains = chains < pairs ? chains : pairs;
     uint64_t maxChunks = chunkCount;
     if (!isVarlen) {
         if (tokens == 0) {
@@ -162,6 +174,7 @@ inline bool BuildChunkGatedDeltaRuleFwdPipelinePlan(
     }
     plan->chainCount = static_cast<uint32_t>(chains);
     plan->maxChunks = static_cast<uint32_t>(maxChunks);
+    plan->launchGroups = static_cast<uint32_t>(2 * launchChains);
     plan->producerGroups = static_cast<uint32_t>(chains);
     plan->consumerGroups = static_cast<uint32_t>(chains);
     plan->workspaceBytes = scratch;

@@ -62,14 +62,21 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
                 JoinAPrimeAicCredit<PIPE_MTE3>(iteration >> 1, globalPairs);
             }
         }
-        // Drain the local MTE1->MTE2 guards of the final l1T_/l1APrime_
-        // reads. An even chunk count leaves both parity flags pending, an odd
-        // one only the even slot's.
+        // Drain the local MTE1->MTE2 guards of the final l1T_/l1APrime_ reads.
+        // An even chunk count leaves both parity flags pending. An odd one
+        // leaves the even slot's pair plus the last odd chunk's APrime release:
+        // the following even chunk that would consume it does not exist, and
+        // the T-slot flag of that odd chunk was already consumed at the final
+        // even chunk's head.
         if (chunks >= 2) {
             WaitFlag<HardEvent::MTE1_MTE2>(0);
             WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
             if ((chunks & 1) == 0) {
                 WaitFlag<HardEvent::MTE1_MTE2>(1);
+                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
+            } else {
+                // Without this drain the flag survives chain exit and the next
+                // chain's first MTE1_MTE2(3) wait would see a stale set.
                 WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
             }
         } else if (chunks == 1) {
@@ -82,32 +89,42 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
 
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
 {
-    if ASCEND_IS_AIC {
-        SetHF32Mode(false);
-        SetFlag<HardEvent::M_MTE1>(0);
-        for (int32_t region = 0; region < kL0CReleaseEventCount; ++region) {
-            SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
-        }
-    }
+    // Chain c is served by the neighbouring pair (2c, 2c+1) so its GM exchange
+    // stays inside one L2 neighbourhood. A chain set larger than the launched
+    // pairs is covered by successive passes over the same pairs: pair s runs
+    // chain s, s+pairs, s+2*pairs, ... Every pass starts and ends with the
+    // pipeline flags balanced, so the next chain sees a clean machine.
     const uint32_t group = GroupIndex();
-    // Pair producer and consumer of one chain on adjacent cores (2g, 2g+1)
-    // instead of splitting all producers before all consumers: the pair's
-    // GM exchange (T, APrime, normalized Q/K) then stays within the same
-    // L2 die/bank neighborhood instead of crossing the device.
-    const uint32_t chain = group >> 1;
-    if ((group & 1U) == 0U) {
-        RunProducer(args, td, chain);
-    } else {
-        RunConsumer(args, td, chain);
-    }
-    if ASCEND_IS_AIV {
-        SetFlag<HardEvent::MTE3_V>(0);
-        WaitFlag<HardEvent::MTE3_V>(0);
-    }
-    if ASCEND_IS_AIC {
-        WaitFlag<HardEvent::M_MTE1>(0);
-        for (int32_t region = 0; region < kL0CReleaseEventCount; ++region) {
-            WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
+    const uint32_t slot = group >> 1;
+    const uint32_t pairs = td.launchGroups > 1U ? (td.launchGroups >> 1) : 1U;
+    for (uint32_t base = 0; base < td.chainCount; base += pairs) {
+        const uint32_t chain = base + slot;
+        if (chain >= td.chainCount) {
+            // Both roles of the pair take the same branch, so a trailing short
+            // pass leaves the idle pairs fully silent.
+            continue;
+        }
+        if ASCEND_IS_AIC {
+            SetHF32Mode(false);
+            SetFlag<HardEvent::M_MTE1>(0);
+            for (int32_t region = 0; region < kL0CReleaseEventCount; ++region) {
+                SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
+            }
+        }
+        if ((group & 1U) == 0U) {
+            RunProducer(args, td, chain);
+        } else {
+            RunConsumer(args, td, chain);
+        }
+        if ASCEND_IS_AIV {
+            SetFlag<HardEvent::MTE3_V>(0);
+            WaitFlag<HardEvent::MTE3_V>(0);
+        }
+        if ASCEND_IS_AIC {
+            WaitFlag<HardEvent::M_MTE1>(0);
+            for (int32_t region = 0; region < kL0CReleaseEventCount; ++region) {
+                WaitFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
+            }
         }
     }
 }

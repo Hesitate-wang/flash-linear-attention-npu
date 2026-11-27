@@ -14,7 +14,6 @@ int main()
     static_assert(std::is_trivially_copyable<GdnChunk64Sparse::FusedTilingData>::value);
     static_assert(sizeof(GdnChunk64Sparse::FusedTilingData) % sizeof(uint64_t) == 0);
     static_assert(offsetof(GdnChunk64Sparse::FusedTilingData, batch) == 0);
-    static_assert(GdnChunk64Sparse::kSparseInverseBytesPerTile == 4 * 32 * 32 * sizeof(float));
     assert(IsChunkGatedDeltaRuleFwdSparseLowParallelism(1, 8, 16));
     assert(!IsChunkGatedDeltaRuleFwdSparseLowParallelism(1, 9, 16));
     assert(!IsChunkGatedDeltaRuleFwdSparseLowParallelism(0, 1, 16));
@@ -55,16 +54,14 @@ int main()
     assert(!PlaceSparseWorkspaceRegion(8, 1, &cursor, &offset));
     assert(!AlignSparseWorkspace(1, 0, &offset));
 
-    static_assert(GdnChunk64Sparse::kSparseScheduleSerial !=
-                  GdnChunk64Sparse::kSparseSchedulePipeline);
-    // The role barrier must stay clear of the stage-local 0..6 ids and of the
-    // SyncAll window 11..14.
-    static_assert(GdnChunk64Sparse::kSparseBarrierFlagId == 7);
-    static_assert((GdnChunk64Sparse::kSparseDebugNdVnRight & 0xFFU) == 0);
+    // The kernel-side schedule constants (barrier ids, debug channels, inverse
+    // tile size) moved into the kernel headers, which pull in kernel_operator.h
+    // and are covered by the kernel build rather than by this host contract.
 
     ChunkGatedDeltaRuleFwdPipelinePlan pipe{};
     assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(2, 4, 130, 2, 6, false, 16, 512, &pipe));
     assert(pipe.chainCount == 8);
+    assert(pipe.launchGroups == 16);
     assert(pipe.producerGroups == 8);
     assert(pipe.consumerGroups == 8);
     assert(pipe.maxChunks == 3);
@@ -72,9 +69,30 @@ int main()
     assert(pipe.workspaceBytes == kChunkGatedDeltaRuleFwdPipelineMinWorkspace);
     assert(pipe.totalWorkspaceBytes == pipe.workspaceOffset + pipe.workspaceBytes);
 
-    // Chains above AIC/2 stay on the serial baseline.
+    // Fewer chains than pairs: the launch shrinks to two groups per chain.
+    ChunkGatedDeltaRuleFwdPipelinePlan narrow{};
+    assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(1, 4, 130, 1, 6, false, 16, 512, &narrow));
+    assert(narrow.chainCount == 4);
+    assert(narrow.launchGroups == 8);
+
+    // Chain sets above AIC/2 are tiled over the same pairs instead of being
+    // rejected; the launch stays capped at one pair per two AIC cores.
+    ChunkGatedDeltaRuleFwdPipelinePlan tiled{};
+    assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(3, 4, 130, 3, 6, false, 16, 512, &tiled));
+    assert(tiled.chainCount == 12);
+    assert(tiled.launchGroups == 16);
+    assert(tiled.producerGroups == 12);
+    assert(tiled.consumerGroups == 12);
+
+    // An odd AIC count rounds down to whole producer/consumer pairs.
+    ChunkGatedDeltaRuleFwdPipelinePlan oddCores{};
+    assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(3, 4, 130, 3, 6, false, 15, 512, &oddCores));
+    assert(oddCores.chainCount == 12);
+    assert(oddCores.launchGroups == 14);
+
     ChunkGatedDeltaRuleFwdPipelinePlan rejected{};
-    assert(!BuildChunkGatedDeltaRuleFwdPipelinePlan(3, 4, 130, 3, 6, false, 16, 512, &rejected));
+    // A single AIC cannot host a producer/consumer pair.
+    assert(!BuildChunkGatedDeltaRuleFwdPipelinePlan(3, 4, 130, 3, 6, false, 1, 512, &rejected));
     assert(!BuildChunkGatedDeltaRuleFwdPipelinePlan(2, 4, 130, 2, 6, false, 16, 0, &rejected));
     assert(!BuildChunkGatedDeltaRuleFwdPipelinePlan(2, 4, 130, 2, 6, false, 16, 512, nullptr));
     assert(!BuildChunkGatedDeltaRuleFwdPipelinePlan(0, 4, 130, 0, 6, false, 16, 512, &rejected));
@@ -85,6 +103,9 @@ int main()
     assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(1, 4, 0, 2, 5, true, 16, 512, &varlen));
     assert(varlen.chainCount == 8);
     assert(varlen.maxChunks == 5);
-    assert(!BuildChunkGatedDeltaRuleFwdPipelinePlan(1, 4, 0, 3, 5, true, 16, 512, &rejected));
+    ChunkGatedDeltaRuleFwdPipelinePlan varlenTiled{};
+    assert(BuildChunkGatedDeltaRuleFwdPipelinePlan(1, 4, 0, 3, 5, true, 16, 512, &varlenTiled));
+    assert(varlenTiled.chainCount == 12);
+    assert(varlenTiled.launchGroups == 16);
     return 0;
 }
