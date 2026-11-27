@@ -106,14 +106,18 @@ public:
             // all AIV sets. From then on each WaitNormalized* returns the
             // pair+2 credit. Round 1 exists only when there is a second
             // global pair; priming it otherwise would leave an orphan set.
-            const int64_t globalPairs = (td_.maxChunks + 1) / 2;
-            SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(0));
-            SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(0));
-            if (globalPairs >= 2) {
-                SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(1));
-                SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(1));
-            }
-            if (loc_.chunks == 0) {
+            // An empty chain runs no chunk at all, so it stays out of the
+            // generation exchange entirely: a prime here would strand a credit
+            // on the producer, which publishes nothing for this chain either.
+            if (loc_.chunks > 0) {
+                const int64_t globalPairs = (td_.maxChunks + 1) / 2;
+                SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(0));
+                SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(0));
+                if (globalPairs >= 2) {
+                    SetMode0Flag<PIPE_MTE2>(IterationNormalizedKFlag(1));
+                    SetMode0Flag<PIPE_MTE2>(IterationNormalizedQFlag(1));
+                }
+            } else {
                 InitState();
             }
         }

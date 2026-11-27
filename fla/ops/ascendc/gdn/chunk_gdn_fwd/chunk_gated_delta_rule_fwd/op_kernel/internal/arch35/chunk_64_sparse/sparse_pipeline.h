@@ -30,58 +30,67 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
     role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
     if ASCEND_IS_AIV {
-        for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-            if (iteration < chunks) {
-                role.RunChunk(iteration);
-            } else {
-                role.JoinNormalizedQKGeneration(iteration);
+        // An empty chain owns no chunk and stays out of the generation
+        // exchange, so its join-only loop is skipped as well.
+        if (chunks > 0) {
+            for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
+                if (iteration < chunks) {
+                    role.RunChunk(iteration);
+                } else {
+                    role.JoinNormalizedQKGeneration(iteration);
+                }
             }
         }
     }
     if ASCEND_IS_AIC {
-        const int64_t globalPairs = (td.maxChunks + 1) / 2;
-        // Prime T/APrime generations 0/1; every join below returns the
-        // pair+2 credit instead of publishing its own generation.
-        PrimeTAPrimeCreditsAic(globalPairs);
-        for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
-            // T and APrime mode-0 generations are pair-granular: join once per
-            // pair, before the even chunk's GM->L1 T copy in RunCubePrepare.
-            if ((iteration & 1) == 0) {
-                JoinIterationAicCredit<PIPE_MTE2>(iteration >> 1, globalPairs);
+        // Same contract on the cube side: an empty chain primes no generation,
+        // joins none and drains none.
+        if (chunks > 0) {
+            const int64_t globalPairs = (td.maxChunks + 1) / 2;
+            // Prime T/APrime generations 0/1; every join below returns the
+            // pair+2 credit instead of publishing its own generation.
+            PrimeTAPrimeCreditsAic(globalPairs);
+            for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
+                // T and APrime mode-0 generations are pair-granular: join once
+                // per pair, before the even chunk's GM->L1 T copy in
+                // RunCubePrepare.
+                if ((iteration & 1) == 0) {
+                    JoinIterationAicCredit<PIPE_MTE2>(iteration >> 1, globalPairs);
+                }
+                if (iteration < chunks) {
+                    role.RunPrepare(iteration);
+                }
+                if (iteration < chunks) {
+                    role.RunAfterWu(iteration);
+                } else if ((iteration & 1) == 0) {
+                    // Shorter chains still join every global mode-0 generation;
+                    // active chains join in RunCubePrepare behind the T loads.
+                    // No MTE2 load follows an idle iteration, so the wait and
+                    // its credit set both ride MTE3.
+                    JoinAPrimeAicCredit<PIPE_MTE3>(iteration >> 1, globalPairs);
+                }
             }
-            if (iteration < chunks) {
-                role.RunPrepare(iteration);
+            // Drain the local MTE1->MTE2 guards of the final l1T_/l1APrime_
+            // reads. An even chunk count leaves both parity flags pending. An
+            // odd one leaves the even slot's pair plus the last odd chunk's
+            // APrime release: the following even chunk that would consume it
+            // does not exist, and the T-slot flag of that odd chunk was
+            // already consumed at the final even chunk's head.
+            if (chunks >= 2) {
+                WaitFlag<HardEvent::MTE1_MTE2>(0);
+                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
+                if ((chunks & 1) == 0) {
+                    WaitFlag<HardEvent::MTE1_MTE2>(1);
+                    WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
+                } else {
+                    // Without this drain the flag survives chain exit and the
+                    // next chain's first MTE1_MTE2(3) wait would see a stale set.
+                    WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
+                }
+            } else if (chunks == 1) {
+                WaitFlag<HardEvent::MTE1_MTE2>(0);
+                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
             }
-            if (iteration < chunks) {
-                role.RunAfterWu(iteration);
-            } else if ((iteration & 1) == 0) {
-                // Shorter and empty chains still join every global mode-0
-                // generation; active chains join in RunCubePrepare behind
-                // the T loads. No MTE2 load follows an idle iteration, so
-                // the wait and its credit set both ride MTE3.
-                JoinAPrimeAicCredit<PIPE_MTE3>(iteration >> 1, globalPairs);
-            }
-        }
-        // Drain the local MTE1->MTE2 guards of the final l1T_/l1APrime_ reads.
-        // An even chunk count leaves both parity flags pending. An odd one
-        // leaves the even slot's pair plus the last odd chunk's APrime release:
-        // the following even chunk that would consume it does not exist, and
-        // the T-slot flag of that odd chunk was already consumed at the final
-        // even chunk's head.
-        if (chunks >= 2) {
-            WaitFlag<HardEvent::MTE1_MTE2>(0);
-            WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
-            if ((chunks & 1) == 0) {
-                WaitFlag<HardEvent::MTE1_MTE2>(1);
-                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
-            } else {
-                // Without this drain the flag survives chain exit and the next
-                // chain's first MTE1_MTE2(3) wait would see a stale set.
-                WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[1]);
-            }
-        } else if (chunks == 1) {
-            WaitFlag<HardEvent::MTE1_MTE2>(0);
-            WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
         }
     }
     role.EndChain();

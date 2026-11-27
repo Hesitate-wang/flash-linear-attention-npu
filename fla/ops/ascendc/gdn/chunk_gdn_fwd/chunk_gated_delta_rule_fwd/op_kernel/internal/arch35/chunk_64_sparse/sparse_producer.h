@@ -114,6 +114,12 @@ public:
             CompleteNormalizedQK(first);
         }
         if ASCEND_IS_AIC {
+            // An empty chain produces nothing and takes no part in the
+            // generation exchange: publishing a generation here would strand a
+            // flag on the consumer, which joins none for this chain.
+            if (loc_.chunks == 0) {
+                return;
+            }
             const int64_t iterations = td_.maxChunks;
             const int64_t pairs = (iterations + 1) / 2;
             const int64_t localPairs = (loc_.chunks + 1) / 2;
@@ -142,7 +148,7 @@ public:
                     // and rides the AIC's otherwise idle MTE2 queue.
                     CrossCoreWaitFlag<0x2, PIPE_MTE2>(kProdTPairDoneFlag);
                 }
-                // Short and empty chains still join every global generation.
+                // Short chains still join every global generation.
                 SetIterationAic<PIPE_MTE2>(pair);
                 if (pair < localPairs) {
                     // Backpressure also releases the single KKT/QK UB slots.
@@ -260,6 +266,11 @@ private:
 
     __aicore__ inline void CompleteNormalizedQK(int64_t first)
     {
+        // An empty chain has no consumer generation to satisfy and no credit to
+        // collect. Both roles stay silent so the pair ends with balanced flags.
+        if (loc_.chunks == 0) {
+            return;
+        }
         const int64_t globalPairs = (td_.maxChunks + 1) / 2;
         int64_t nextPair = 0;
         if (first < loc_.chunks) {
