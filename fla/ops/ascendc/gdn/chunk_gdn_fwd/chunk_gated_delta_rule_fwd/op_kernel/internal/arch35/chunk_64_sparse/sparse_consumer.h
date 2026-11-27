@@ -121,6 +121,7 @@ public:
                 InitState();
             }
         }
+        GDN_SPARSE_TRACE(td_, 30, chain, static_cast<int64_t>(loc_.chunks));
     }
 
     __aicore__ inline int64_t ChunkCount() const
@@ -178,9 +179,11 @@ public:
     __aicore__ inline void EndChain()
     {
         if ASCEND_IS_AIV {
+            GDN_SPARSE_TRACE(td_, 33, 0, 0);
             for (uint32_t slot = 0; slot < 2; ++slot) {
                 WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
             }
+            GDN_SPARSE_TRACE(td_, 34, 0, loc_.chunks);
             // Drain the V slot releases of the last two ComputeNextVb calls;
             // their IssueV waits never came. Each release sits on its own
             // parity slot's ID, so drain by parity. The same applies to the
@@ -215,6 +218,7 @@ public:
             WaitFlag<HardEvent::MTE3_V>(0);
             SetFlag<HardEvent::MTE3_MTE2>(0);
             WaitFlag<HardEvent::MTE3_MTE2>(0);
+            GDN_SPARSE_TRACE(td_, 35, 0, 0);
         }
     }
 
@@ -325,6 +329,7 @@ private:
 
     __aicore__ inline void InitState()
     {
+        GDN_SPARSE_TRACE(td_, 31, 0, 0);
         if (hasInitial_) {
             if (td_.stateFp32 != 0) {
                 DataCopy(ubStateF_, gmInitF_[StateOffset()], kStateElems / 2);
@@ -343,6 +348,7 @@ private:
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
+        GDN_SPARSE_TRACE(td_, 32, 0, 0);
     }
 
     __aicore__ inline void LoadInitialState(int32_t eventId = 2)

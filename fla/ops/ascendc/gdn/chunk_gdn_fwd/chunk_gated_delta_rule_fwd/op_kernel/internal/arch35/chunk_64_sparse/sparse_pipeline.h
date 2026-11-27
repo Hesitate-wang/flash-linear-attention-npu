@@ -15,10 +15,12 @@ namespace GdnChunk64Sparse {
 __aicore__ inline void RunProducer(const PhaseArgs &args, const FusedTilingData &td,
                                    uint32_t chain)
 {
+    GDN_SPARSE_TRACE(td, 1, chain, 0);
     ProducerRole role;
     role.Init(args, td);
     role.BeginChain(args, chain);
     role.Run();
+    GDN_SPARSE_TRACE(td, 2, chain, 0);
 }
 
 __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData &td,
@@ -26,9 +28,12 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
 {
     ConsumerRole role;
     role.Init(args, td);
+    GDN_SPARSE_TRACE(td, 10, chain, 0);
     role.BeginChain(args, chain);
+    GDN_SPARSE_TRACE(td, 11, chain, static_cast<int64_t>(role.ChunkCount()));
     role.RunPrologue();
     const int64_t chunks = role.ChunkCount();
+    GDN_SPARSE_TRACE(td, 12, chain, chunks);
     if ASCEND_IS_AIV {
         // An empty chain owns no chunk and stays out of the generation
         // exchange, so its join-only loop is skipped as well.
@@ -36,11 +41,13 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
             for (int64_t iteration = 0; iteration < td.maxChunks; ++iteration) {
                 if (iteration < chunks) {
                     role.RunChunk(iteration);
+                    GDN_SPARSE_TRACE(td, 42, chain, iteration);
                 } else {
                     role.JoinNormalizedQKGeneration(iteration);
                 }
             }
         }
+        GDN_SPARSE_TRACE(td, 13, chain, 0);
     }
     if ASCEND_IS_AIC {
         // Same contract on the cube side: an empty chain primes no generation,
@@ -59,15 +66,18 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
                 }
                 if (iteration < chunks) {
                     role.RunPrepare(iteration);
+                    GDN_SPARSE_TRACE(td, 40, chain, iteration);
                 }
                 if (iteration < chunks) {
                     role.RunAfterWu(iteration);
+                    GDN_SPARSE_TRACE(td, 41, chain, iteration);
                 } else if ((iteration & 1) == 0) {
                     // Shorter chains still join every global mode-0 generation;
                     // active chains join in RunCubePrepare behind the T loads.
                     // No MTE2 load follows an idle iteration, so the wait and
-                    // its credit set both ride MTE3.
-                    JoinAPrimeAicCredit<PIPE_MTE3>(iteration >> 1, globalPairs);
+                    // its credit set ride the Fixpipe queue: MTE3 does not
+                    // exist on the Cube, and a wait issued there never retires.
+                    JoinAPrimeAicCredit<PIPE_FIX>(iteration >> 1, globalPairs);
                 }
             }
             // Drain the local MTE1->MTE2 guards of the final l1T_/l1APrime_
@@ -92,8 +102,11 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
                 WaitFlag<HardEvent::MTE1_MTE2>(kConsAPrimeReleaseEventIds[0]);
             }
         }
+        GDN_SPARSE_TRACE(td, 14, chain, 0);
     }
+    GDN_SPARSE_TRACE(td, 15, chain, 0);
     role.EndChain();
+    GDN_SPARSE_TRACE(td, 16, chain, 0);
 }
 
 __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilingData &td)
@@ -120,11 +133,13 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
                 SetFlag<HardEvent::FIX_M>(kL0CReleaseEventIds[region]);
             }
         }
+        GDN_SPARSE_TRACE(td, 20, chain, 0);
         if ((group & 1U) == 0U) {
             RunProducer(args, td, chain);
         } else {
             RunConsumer(args, td, chain);
         }
+        GDN_SPARSE_TRACE(td, 21, chain, 0);
         if ASCEND_IS_AIV {
             SetFlag<HardEvent::MTE3_V>(0);
             WaitFlag<HardEvent::MTE3_V>(0);

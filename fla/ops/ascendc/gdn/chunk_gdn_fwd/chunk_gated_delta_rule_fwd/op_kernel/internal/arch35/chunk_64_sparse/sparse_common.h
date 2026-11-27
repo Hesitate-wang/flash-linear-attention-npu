@@ -12,8 +12,7 @@
 namespace GdnChunk64Sparse {
 using namespace AscendC;
 
-constexpr int64_t kChunk = 64;
-constexpr uint32_t kHalfRows = 32U;
+constexpr int64_t kChunk = 64;constexpr uint32_t kHalfRows = 32U;
 constexpr int64_t kDim = 128;
 constexpr int64_t kHalfDim = 64;
 constexpr int64_t kChunkElems = kChunk * kDim;
@@ -23,6 +22,26 @@ constexpr float kSparseEps = 1e-6f;
 constexpr float kSparseLn2 = 0.6931471805599453f;
 constexpr float kSparseRcpLn2 = 1.4426950408889634f;
 constexpr float kSparseExpSafeLimit = 80.0f;
+
+// Debug-only progress markers. The sparse tiling maps GDN_SPARSE_DEBUG_TRACE to
+// td.reserved == kSparseDebugTrace. They print to the host log, which is the
+// only channel that survives a device timeout: the workspace is released with
+// the process and the aclnn call is still blocked when the harness gives up.
+constexpr uint32_t kSparseDebugTrace = 5U;
+
+#if defined(__CCE_AICORE__)
+#define GDN_SPARSE_TRACE(td, point, chain, arg)                              \
+    do {                                                                     \
+        if ((td).reserved == kSparseDebugTrace) {                            \
+            PRINTF("[GDNSP] p=%d chain=%d arg=%d blk=%d\n",                  \
+                   static_cast<int32_t>(point), static_cast<int32_t>(chain), \
+                   static_cast<int32_t>(arg),                                \
+                   static_cast<int32_t>(GetBlockIdx()));                     \
+        }                                                                    \
+    } while (0)
+#else
+#define GDN_SPARSE_TRACE(td, point, chain, arg) ((void)0)
+#endif
 
 struct PhaseArgs {
     GM_ADDR q;
