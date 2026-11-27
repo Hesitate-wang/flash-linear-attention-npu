@@ -182,10 +182,16 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid h output shape."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(4), {batch, hk, tokens, 128}) ||
-                    !SparseShapeTolerant(context->GetOutputShape(5), {batch, hk, tokens, 128}) ||
-                    !SparseShapeTolerant(context->GetOutputShape(6), {batch, hk, tokens}) ||
-                    !SparseShapeTolerant(context->GetOutputShape(7), {batch, hk, tokens}),
+    // q_hat/k_hat/q_rstd/k_rstd are OPTIONAL outputs: they are shape-checked
+    // only when the caller asks for them, and absent ones are simply skipped.
+    const auto *qHatOut = context->GetOutputShape(4);
+    const auto *kHatOut = context->GetOutputShape(5);
+    const auto *qRstdOut = context->GetOutputShape(6);
+    const auto *kRstdOut = context->GetOutputShape(7);
+    OP_CHECK_IF((qHatOut != nullptr && !SparseShapeTolerant(qHatOut, {batch, hk, tokens, 128})) ||
+                    (kHatOut != nullptr && !SparseShapeTolerant(kHatOut, {batch, hk, tokens, 128})) ||
+                    (qRstdOut != nullptr && !SparseShapeTolerant(qRstdOut, {batch, hk, tokens})) ||
+                    (kRstdOut != nullptr && !SparseShapeTolerant(kRstdOut, {batch, hk, tokens})),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid norm output shape."),
                 return ge::GRAPH_FAILED);
 
