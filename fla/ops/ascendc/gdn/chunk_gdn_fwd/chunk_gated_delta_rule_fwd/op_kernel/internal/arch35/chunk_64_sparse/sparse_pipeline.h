@@ -139,7 +139,6 @@ __aicore__ inline void RunSparsePipeline(const PhaseArgs &args, const FusedTilin
         } else {
             RunConsumer(args, td, chain);
         }
-        GDN_SPARSE_TRACE(td, 21, chain, 0);
         if ASCEND_IS_AIV {
             SetFlag<HardEvent::MTE3_V>(0);
             WaitFlag<HardEvent::MTE3_V>(0);

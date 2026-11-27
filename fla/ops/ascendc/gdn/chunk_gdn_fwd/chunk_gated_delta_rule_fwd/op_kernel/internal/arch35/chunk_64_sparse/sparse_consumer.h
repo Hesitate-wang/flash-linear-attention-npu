@@ -384,32 +384,24 @@ private:
 
     __aicore__ inline void RunAivPrologue()
     {
-        GDN_SPARSE_TRACE(td_, 50, 0, 0);
         // H preparation starts after the previous chain's EndChain drain.
         // H is independent of Q/K/V preparation. Publish it first so QS can
         // start immediately after QExp is ready, then overlap QKT with Vb.
         IssueGateInputs(0);
-        GDN_SPARSE_TRACE(td_, 51, 0, 0);
         // V runs one iteration ahead of its Vb computation, like the gates.
         IssueV(0);
-        GDN_SPARSE_TRACE(td_, 52, 0, 0);
         // The gate readiness event is a single ID: consume gate 0's
         // publication before gate 1's IssueGateInputs sets it again, so the
         // ID never sees back-to-back sets.
         PrepareLoadedGate(0, true);
-        GDN_SPARSE_TRACE(td_, 53, 0, 0);
         if (loc_.chunks > 1) {
             IssueGateInputs(1);
-            GDN_SPARSE_TRACE(td_, 54, 0, 0);
             IssueV(1);
-            GDN_SPARSE_TRACE(td_, 55, 0, 0);
         }
         PrepareNextVb(0);
-        GDN_SPARSE_TRACE(td_, 56, 0, 0);
         PrepareNormalizedQK(0);
         GDN_SPARSE_TRACE(td_, 57, 0, 0);
         ConvertInitialState();
-        GDN_SPARSE_TRACE(td_, 58, 0, 0);
         PrepareCurrentState(0, false);
         GDN_SPARSE_TRACE(td_, 59, 0, 0);
         // chunkDecay_ is produced from the gate energy. H was already published,
@@ -606,19 +598,16 @@ private:
         // Wait for this slot's primed flag or previous K L1 upload before the
         // new GM load overwrites its UB. The other slot remains independent.
         WaitFlag<HardEvent::MTE3_MTE2>(1 + slot);
-        GDN_SPARSE_TRACE(td_, 61, 0, chunk);
         const int64_t offset = NormalizedQKChunkOffset(chunk);
         if ((chunk & 1) == 0) {
             // Join K and Q independently so the K GM read can overlap Q compute.
             WaitNormalizedK(chunk);
-            GDN_SPARSE_TRACE(td_, 62, 0, chunk);
         }
         CopyNormalizedGmToUb(kBuffer, gmNormK_, offset, firstRow);
         SetFlag<HardEvent::MTE2_MTE3>(slot);
         SetFlag<HardEvent::MTE2_V>(slot);
         if ((chunk & 1) == 0) {
             WaitNormalizedQ(chunk);
-            GDN_SPARSE_TRACE(td_, 63, 0, chunk);
         }
         if (chunk >= 2) {
             // The slot's previous reader is QHatExpNzVF(chunk-2) on V.
