@@ -382,6 +382,19 @@ private:
         WaitFlag<HardEvent::V_MTE3>(0);
     }
 
+    // Debug-only: force the Vector queue to drain so a stall inside it becomes
+    // visible as a missing marker. Compiled out (a single scalar compare) when
+    // the trace channel is off.
+    __aicore__ inline void DrainVectorProbe(uint32_t code)
+    {
+        if (td_.reserved != kSparseDebugTrace) {
+            return;
+        }
+        SetFlag<HardEvent::V_S>(3);
+        WaitFlag<HardEvent::V_S>(3);
+        GDN_SPARSE_TRACE(td_, code, 0, 0);
+    }
+
     __aicore__ inline void RunAivPrologue()
     {
         // H preparation starts after the previous chain's EndChain drain.
@@ -394,20 +407,25 @@ private:
         // publication before gate 1's IssueGateInputs sets it again, so the
         // ID never sees back-to-back sets.
         PrepareLoadedGate(0, true);
+        DrainVectorProbe(90);
         if (loc_.chunks > 1) {
             IssueGateInputs(1);
             IssueV(1);
         }
         PrepareNextVb(0);
+        DrainVectorProbe(91);
         PrepareNormalizedQK(0);
+        DrainVectorProbe(92);
         ConvertInitialState();
+        DrainVectorProbe(93);
         PrepareCurrentState(0, false);
-        GDN_SPARSE_TRACE(td_, 59, 0, 0);
+        DrainVectorProbe(94);
         // chunkDecay_ is produced from the gate energy. H was already published,
         // so this decay cannot change the S used by QS/W@S.
         StateDecayVF(ubStateF_, chunkDecay_[0]);
+        DrainVectorProbe(95);
         PrepareRightDecay(0);
-        GDN_SPARSE_TRACE(td_, 60, 0, 0);
+        DrainVectorProbe(96);
     }
 
     __aicore__ inline void RunAivPrepare(int64_t chunk)
@@ -778,8 +796,7 @@ private:
         const uint32_t firstRow = sub_ * kHalfRows;
         // Gate/energy V_S event 1 was consumed by PrepareCurrentStateHalf.
         // PrepareRightDecay runs before this gate slot is reused.
-        gateRatioSafe_ = GateRatioSafe(ubG_[gateSlot], ubScratch_, static_cast<uint32_t>(window.rows),
-                                       (td_.reserved == kSparseDebugTrace && chunk == 0) ? 1U : 0U);
+        gateRatioSafe_ = GateRatioSafe(ubG_[gateSlot], ubScratch_, static_cast<uint32_t>(window.rows));
         const float gLast = ubG_[gateSlot].GetValue(window.rows - 1);
         const float lastEnergy = chunkDecay_[slot];
         if (td_.useExp2 != 0) {

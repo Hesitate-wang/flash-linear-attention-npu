@@ -102,7 +102,6 @@ __aicore__ inline void RunConsumer(const PhaseArgs &args, const FusedTilingData 
         }
         GDN_SPARSE_TRACE(td, 14, chain, 0);
     }
-    GDN_SPARSE_TRACE(td, 15, chain, 0);
     role.EndChain();
     GDN_SPARSE_TRACE(td, 16, chain, 0);
 }
