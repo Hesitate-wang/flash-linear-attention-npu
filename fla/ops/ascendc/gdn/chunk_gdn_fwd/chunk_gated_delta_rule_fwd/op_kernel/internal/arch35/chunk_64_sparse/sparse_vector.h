@@ -902,7 +902,10 @@ __aicore__ inline void Bf16PanelsToNd64(LocalTensor<bfloat16_t> nd,
     __ubuf__ bfloat16_t *zAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nz.GetPhyAddr());
     __VEC_SCOPE__
     {
-        MaskReg m64 = UpdateMask<bfloat16_t>(64);
+        // UpdateMask rejects an int literal; keep the width in a uint32_t,
+        // matching every other call site in this file.
+        uint32_t n64 = 64;
+        MaskReg m64 = UpdateMask<bfloat16_t>(n64);
         for (uint16_t row = 0; row < 64; ++row) {
             RegTensor<bfloat16_t> value;
             LoadAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
