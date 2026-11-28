@@ -41,10 +41,11 @@ def run_npu_chain(ascendc, inputs: dict, config: dict,
 
     prepared = stage("chunk_gated_delta_rule_fwd_prepare", lambda: ascendc.chunk_gated_delta_rule_fwd_prepare(
         q, k, v, g, beta, chunk_size=64,
-        use_qk_l2norm_in_kernel=True, use_gate_in_kernel=False,
+        use_qk_l2norm_in_kernel=config.get("qk_l2norm", True), use_gate_in_kernel=False,
         use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
         allow_neg_eigval=config["allow_neg_eigval"], use_exp2=config["use_exp2"],
-        cu_seqlens=cu_list, chunk_indices=chunk_indices, output_a=False))
+        cu_seqlens=cu_list, chunk_indices=chunk_indices,
+        output_a=bool(config.get("disable_recompute", False))))
     q_hat, k_hat, q_rstd, k_rstd, beta_eff, g_cumsum, w, u, a = prepared
 
     h, v_new, final_state = stage("chunk_gated_delta_rule_fwd_h", lambda: ascendc.chunk_gated_delta_rule_fwd_h(

@@ -453,8 +453,13 @@ private:
             Bf16PanelsToNd64(ubHExport_, statePanel);
             SetFlag<HardEvent::V_MTE3>(4);
             WaitFlag<HardEvent::V_MTE3>(4);
+            // Public h layout is [B, Hv, NT, dk, dv]: head-major, chunk inside.
             const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
-            const int64_t base = (tile * td_.valueHeads + loc_.hv) * kStateElems +
+            const int64_t batchIdx = td_.varlen != 0 ? 0 : loc_.batch;
+            const int64_t chunkStride = td_.varlen != 0 ? td_.totalChunks : td_.chunksPerBatch;
+            const int64_t chunkIdx = td_.varlen != 0 ? tile : chunk;
+            const int64_t base = ((batchIdx * td_.valueHeads + loc_.hv) * chunkStride + chunkIdx) *
+                                     kStateElems +
                                  sub_ * (kStateElems / 2) + half * kHalfDim;
             DataCopyExtParams params{};
             params.blockCount = static_cast<uint16_t>(kHalfDim);

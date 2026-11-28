@@ -195,7 +195,7 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
         SparseShapeTolerant(context->GetOutputShape(2), {batch, hv, tokens});
     const int64_t hChunks = varlen ? static_cast<int64_t>(chunkCount)
                                    : static_cast<int64_t>(chunkCount) / batch;
-    OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
+    OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hv, hChunks, 128, 128}),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid h output shape."),
                 return ge::GRAPH_FAILED);
     // Zero-length sequences are dropped on the host: they own no chunk, so they

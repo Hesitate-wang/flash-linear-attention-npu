@@ -135,9 +135,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--performance cannot be combined with comparison modes")
     if args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars:
         parser.error("debug dump modes are disabled; only o/final_state are compared")
-    if args.compare_chain and (args.no_qk_l2norm or args.disable_recompute or
-                               args.return_intermediate_states or args.layout != "BNSD"):
-        parser.error("--compare-chain only supports the legacy BNSD/normalized/L0 export set")
     if args.chunk_size == 32:
         if args.no_qk_l2norm or args.disable_recompute or args.return_intermediate_states:
             parser.error("chunk_size=32 fixes l2norm on and does not export intermediates")
@@ -297,12 +294,14 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     g_cumsum = torch.zeros((b, t, hv), dtype=torch.float64)
     a_output = torch.zeros((b, hv, t, chunk), dtype=torch.float64)
     attention_output = torch.zeros((b, hv, t, chunk), dtype=torch.float64)
+    # Public h layout is [B, Hv, NT, dk, dv] (head-major, chunk inside).
     if cu is None:
         total_chunks = b * ((t + chunk - 1) // chunk)
-        h_output = torch.zeros((b, (t + chunk - 1) // chunk, hv, 128, 128), dtype=torch.bfloat16)
+        h_output = torch.zeros((b, hv, (t + chunk - 1) // chunk, 128, 128), dtype=torch.bfloat16)
     else:
         total_chunks = sum((end - begin + chunk - 1) // chunk for begin, end in zip(cu, cu[1:]))
-        h_output = torch.zeros((1, total_chunks, hv, 128, 128), dtype=torch.bfloat16)
+        h_output = torch.zeros((1, hv, total_chunks, 128, 128), dtype=torch.bfloat16)
+    h_post_output = torch.zeros_like(h_output)
     initial = inputs["initial_state"]
 
     for batch, sequence, begin, end in sequence_ranges(config, cu):
@@ -319,7 +318,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
             for local_chunk, chunk_begin in enumerate(range(begin, end, chunk)):
                 tile = local_chunk if cu is None else chunk_base + local_chunk
                 state_image = state.transpose(0, 1) if config["state_v_first"] else state
-                h_output[batch, tile, head] = state_image.to(torch.bfloat16)
+                h_output[batch, head, tile] = state_image.to(torch.bfloat16)
                 chunk_end = min(chunk_begin + chunk, end)
                 os_output[batch, head, chunk_begin:chunk_end] = (
                     q[batch, key_head, chunk_begin:chunk_end] @ state)
@@ -331,6 +330,8 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
                     vnew_output[batch, head, token] = delta
                     state = state + torch.outer(key, delta)
                     o[batch, head, token] = (q[batch, key_head, token] @ state) * config["scale"]
+                post_image = state.transpose(0, 1) if config["state_v_first"] else state
+                h_post_output[batch, head, tile] = post_image.to(torch.bfloat16)
             if config["state_v_first"]:
                 state = state.transpose(0, 1).contiguous()
             final[sequence, head] = state
@@ -360,6 +361,7 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
         "g_cumsum": g_cumsum.float(),
         "A": attention_output.to(torch.bfloat16) if config["dump_aprime"] else a_output.to(torch.bfloat16),
         "h": h_output,
+        "h_post": h_post_output,
     }
     if config["final_state"]:
         result["final_state"] = final.to(DTYPES[config["initial_dtype"]] if initial is not None else torch.float32)
@@ -369,6 +371,46 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
     if config.get("qk_l2norm", True):
         result.update({"q_rstd": effective["q_rstd"], "k_rstd": effective["k_rstd"]})
     return result
+
+
+
+def magnitude_buckets(actual: torch.Tensor, expected: torch.Tensor) -> dict:
+    """Relative error split by |expected| magnitude, relative to the tensor RMS.
+
+    A floating-point state has a large dynamic range; absolute accumulation
+    noise swamps the smallest entries and inflates element-wise relative
+    metrics. Bucketing shows whether a mismatch is real or only on entries
+    below the representation noise floor.
+    """
+    a = actual.detach().cpu().float().flatten()
+    e = expected.detach().cpu().float().flatten()
+    rms = float(e.square().mean().sqrt()) if e.numel() else 0.0
+    out = {"tensor_rms": rms, "buckets": {}}
+    if rms == 0.0:
+        return out
+    for ratio in (1e-1, 1e-2, 1e-3, 1e-4):
+        mask = e.abs() >= rms * ratio
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        diff = (a[mask] - e[mask]).abs()
+        rel = diff / e[mask].abs().clamp_min(1e-30)
+        out["buckets"]["ge_%.0e_rms" % ratio] = {
+            "count": count,
+            "mean_rel": float(rel.mean()),
+            "max_rel": float(rel.max()),
+            "mean_abs": float(diff.mean()),
+            "rmse": float(diff.square().mean().sqrt()),
+        }
+    mask = e.abs() < rms * 1e-4
+    if int(mask.sum()) and rms > 0.0:
+        diff = (a[mask] - e[mask]).abs()
+        out["buckets"]["lt_1e-4_rms"] = {
+            "count": int(mask.sum()),
+            "mean_abs": float(diff.mean()),
+            "rmse": float(diff.square().mean().sqrt()),
+        }
+    return out
 
 
 def tensor_stats(tensor: torch.Tensor) -> dict:
@@ -439,6 +481,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             logger.info("CPU golden started")
             golden_started = time.perf_counter()
             expected = golden(inputs, config, cu)
+            golden_full = dict(expected)
             summary["golden_seconds"] = time.perf_counter() - golden_started
             logger.info("CPU golden finished seconds=%.6f", summary["golden_seconds"])
             if config["chunk_size"] == 32:
@@ -458,6 +501,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                     keep.add("beta_eff")
                 if config.get("qk_l2norm", True):
                     keep.update(("q_hat", "k_hat", "q_rstd", "k_rstd"))
+            golden_full = expected
             expected = {name: tensor for name, tensor in expected.items() if name in keep}
         else:
             logger.info("CPU golden skipped (compare_cpu=false)")
@@ -468,7 +512,8 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 logger.info("golden output %s %s", tensor_name, json.dumps(stats))
             if config["save_tensors"]:
                 torch.save(inputs, run_dir / "inputs.pt")
-                torch.save(expected, run_dir / "golden_outputs.pt")
+                torch.save(golden_full if "golden_full" in locals() else expected,
+                           run_dir / "golden_outputs.pt")
             summary["status"] = "cpu-only"
             summary["total_seconds"] = time.perf_counter() - started
             with (run_dir / "summary.json").open("w", encoding="utf-8") as handle:
@@ -603,14 +648,34 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                     # Split the state report per chunk: h[0] must be the
                     # initial state, later slots the state entering each chunk.
                     per_chunk = {}
-                    for chunk_index in range(dut_tensor.shape[1]):
+                    for chunk_index in range(dut_tensor.shape[2]):
                         chunk_metric = data_compare(
-                            dut_tensor[:, chunk_index], expected_tensor[:, chunk_index],
+                            dut_tensor[:, :, chunk_index], expected_tensor[:, :, chunk_index],
                             config, logger, label=f"cpu.h[{chunk_index}]")
                         per_chunk[str(chunk_index)] = chunk_metric
                         logger.info("compare h[%d] %s", chunk_index,
                                     json.dumps(chunk_metric))
                     summary["h_chunk_metrics"] = per_chunk
+                    for chunk_index in range(dut_tensor.shape[2]):
+                        buckets = magnitude_buckets(dut_tensor[:, :, chunk_index],
+                                                    expected_tensor[:, :, chunk_index])
+                        summary.setdefault("h_magnitude_buckets", {})[str(chunk_index)] = buckets
+                        logger.info("h[%d] magnitude buckets %s", chunk_index,
+                                    json.dumps(buckets))
+                    variants = {
+                        "entry": expected_tensor,
+                        "entry_transposed": expected_tensor.transpose(-1, -2),
+                    }
+                    if "h_post" in golden_full:
+                        variants["post"] = golden_full["h_post"]
+                        variants["post_transposed"] = golden_full["h_post"].transpose(-1, -2)
+                    for variant_name, variant_tensor in variants.items():
+                        variant_metric = data_compare(
+                            dut_tensor, variant_tensor, config, logger,
+                            label=f"cpu.h_variant.{variant_name}")
+                        summary.setdefault("h_variant_metrics", {})[variant_name] = variant_metric
+                        logger.info("compare h variant %s %s", variant_name,
+                                    json.dumps(variant_metric))
         summary["metrics"] = metrics
 
         chain_metrics = {}
@@ -619,8 +684,19 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             from npu_chain_reference import run_npu_chain
             chain_outputs = run_npu_chain(ascendc, inputs, config, cu, chunk_indices, logger)
             chain_timings = chain_outputs.pop("_timings")
+            chain_keep = {"o"}
+            if config["final_state"]:
+                chain_keep.add("final_state")
+            if config["disable_recompute"]:
+                chain_keep.update(("g_cumsum", "A"))
+            if config["return_intermediate_states"]:
+                chain_keep.add("h")
+            if config["beta_sigmoid"]:
+                chain_keep.add("beta_eff")
+            if config.get("qk_l2norm", True):
+                chain_keep.update(("q_hat", "k_hat", "q_rstd", "k_rstd"))
             chain_outputs = {name: tensor for name, tensor in chain_outputs.items()
-                             if name == "o" or (name == "final_state" and config["final_state"])}
+                             if name in chain_keep and tensor is not None}
             summary["chain_timings"] = chain_timings
             chain_stats = {}
             for tensor_name, tensor in chain_outputs.items():
@@ -632,6 +708,11 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 if actual.get(tensor_name) is None:
                     raise RuntimeError(f"DUT output {tensor_name} is required for chain comparison")
                 dut_tensor = actual[tensor_name]
+                if tensor_name == "h" and chain_tensor.dim() == 5 and \
+                        tuple(chain_tensor.shape) != tuple(dut_tensor.shape):
+                    # The fwd_h operator stores [B, NT, Hv]; the public h is
+                    # [B, Hv, NT].
+                    chain_tensor = chain_tensor.transpose(1, 2).contiguous()
                 if tensor_name == "final_state" and live is not None:
                     dut_tensor = dut_tensor[live]
                     chain_tensor = chain_tensor[live]
@@ -647,7 +728,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             torch.save({key: (None if value is None else value.cpu()) for key, value in actual.items()},
                        run_dir / "dut_outputs.pt")
             if config["compare_cpu"]:
-                torch.save(expected, run_dir / "golden_outputs.pt")
+                torch.save(golden_full, run_dir / "golden_outputs.pt")
             if chain_outputs is not None:
                 torch.save({key: (None if value is None else value.cpu()) for key, value in chain_outputs.items()},
                            run_dir / "chain_outputs.pt")
