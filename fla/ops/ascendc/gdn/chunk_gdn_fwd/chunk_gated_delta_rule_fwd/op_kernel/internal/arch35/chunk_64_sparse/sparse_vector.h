@@ -165,6 +165,22 @@ __aicore__ inline void CumsumEnergyVF(LocalTensor<float> &g,
     }
 }
 
+// The exp2 scan keeps the in-kernel cumsum in log2 units. The public
+// g_cumsum is natural, so convert a copy before exporting it.
+__aicore__ inline void CumsumToNaturalVF(LocalTensor<float> &dst, LocalTensor<float> &src)
+{
+    __ubuf__ float *dAddr = reinterpret_cast<__ubuf__ float *>(dst.GetPhyAddr());
+    __ubuf__ float *sAddr = reinterpret_cast<__ubuf__ float *>(src.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg all = CreateMask<float, MaskPattern::ALL>();
+        RegTensor<float> value;
+        LoadAlign(value, sAddr);
+        Muls(value, value, kSparseLn2, all);
+        StoreAlign(dAddr, value, all);
+    }
+}
+
 template <bool UseExp2>
 __aicore__ inline void EnergyVF(LocalTensor<float> &g,
                                 LocalTensor<float> &energy)
@@ -259,9 +275,15 @@ __aicore__ inline void StoreNzEvenOdd64(__ubuf__ bfloat16_t *nz, uint32_t row,
     StoreAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(nz + row * 16, lo, kChunk, m128);
 }
 
+// normalize=false keeps the raw operands (use_qk_l2norm_in_kernel=false): the
+// NZ copy is produced unscaled and rstd is not meaningful. storeNd writes the
+// row back as ND in place so the Producer can export q_hat/k_hat without a
+// second conversion.
 __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
                                          LocalTensor<bfloat16_t> &nzOutput,
-                                         LocalTensor<float> &rstd)
+                                         LocalTensor<float> &rstd,
+                                         bool normalize = true,
+                                         bool storeNd = false)
 {
     __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(input.GetPhyAddr());
     __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(nzOutput.GetPhyAddr());
@@ -274,21 +296,34 @@ __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
         uint32_t n128 = 128;
         MaskReg m128 = UpdateMask<bfloat16_t>(n128);
         RegTensor<float> even, odd, sum0, sum1, one, scale;
+        RegTensor<bfloat16_t> lo, hi;
         Duplicate(one, 1.0f, all);
         for (uint16_t row = 0; row < kChunk; ++row) {
             GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
-            Mul(sum0, even, even, all);
-            Mul(sum1, odd, odd, all);
-            Add(sum0, sum0, sum1, all);
-            Reduce<Reg::ReduceType::SUM>(sum0, sum0, all);
-            Adds(sum0, sum0, kSparseEps, scalar);
-            Sqrt(sum0, sum0, scalar);
-            Div(sum0, one, sum0, scalar);
-            Duplicate(scale, sum0, all);
+            if (normalize) {
+                Mul(sum0, even, even, all);
+                Mul(sum1, odd, odd, all);
+                Add(sum0, sum0, sum1, all);
+                Reduce<Reg::ReduceType::SUM>(sum0, sum0, all);
+                Adds(sum0, sum0, kSparseEps, scalar);
+                Sqrt(sum0, sum0, scalar);
+                Div(sum0, one, sum0, scalar);
+                Duplicate(scale, sum0, all);
+                StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, sum0, scalar);
+            } else {
+                Duplicate(scale, 1.0f, all);
+                StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, one, scalar);
+            }
             Mul(even, even, scale, all);
             Mul(odd, odd, scale, all);
-            StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, sum0, scalar);
             StoreNzEvenOdd64(nz, row, even, odd, m16, m128);
+            if (storeNd) {
+                Cast<bfloat16_t, float, GdnFwd32::kCastB322B16>(lo, even, m16);
+                Cast<bfloat16_t, float, GdnFwd32::kCastB322B16Hi>(hi, odd, m16);
+                Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo,
+                   (RegTensor<uint16_t> &)hi, m16);
+                StoreAlign(src + static_cast<uint32_t>(row) * 128, lo, m128);
+            }
         }
     }
 }
@@ -855,6 +890,24 @@ __aicore__ inline void Bf16PanelsToNd(LocalTensor<bfloat16_t> nd,
             LoadAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
                 value, zAddr + static_cast<uint32_t>(row) * 16, 64, m128);
             StoreAlign(nAddr + static_cast<uint32_t>(row) * kDim, value, m128);
+        }
+    }
+}
+
+// 64x64 half-tile NZ -> ND for the public h staging buffer.
+__aicore__ inline void Bf16PanelsToNd64(LocalTensor<bfloat16_t> nd,
+                                        LocalTensor<bfloat16_t> nz)
+{
+    __ubuf__ bfloat16_t *nAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nd.GetPhyAddr());
+    __ubuf__ bfloat16_t *zAddr = reinterpret_cast<__ubuf__ bfloat16_t *>(nz.GetPhyAddr());
+    __VEC_SCOPE__
+    {
+        MaskReg m64 = UpdateMask<bfloat16_t>(64);
+        for (uint16_t row = 0; row < 64; ++row) {
+            RegTensor<bfloat16_t> value;
+            LoadAlign<bfloat16_t, DataCopyMode::DATA_BLOCK_COPY>(
+                value, zAddr + static_cast<uint32_t>(row) * 16, 64, m64);
+            StoreAlign(nAddr + static_cast<uint32_t>(row) * 64, value, m64);
         }
     }
 }

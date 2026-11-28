@@ -39,6 +39,13 @@ struct FusedTilingData {
     uint32_t hasDtBias;
     uint32_t reserved;
     uint32_t writeH;
+    // Kernel export switches. writeQHat covers q_hat/k_hat/q_rstd/k_rstd,
+    // writeGCumsum the public [B,Hv,T] chunk cumsum and writeBetaEff the
+    // sigmoid beta. useQkL2norm=0 keeps the raw Q/K operands.
+    uint32_t useQkL2norm;
+    uint32_t writeQHat;
+    uint32_t writeGCumsum;
+    uint32_t writeBetaEff;
     uint32_t alignmentPadding;
 };
 

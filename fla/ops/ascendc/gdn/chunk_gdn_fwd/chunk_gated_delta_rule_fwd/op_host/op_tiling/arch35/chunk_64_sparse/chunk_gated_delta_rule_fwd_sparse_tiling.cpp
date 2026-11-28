@@ -166,17 +166,31 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
 
     const bool betaSigmoid = SparseBool(attrs, 12);
     const bool writeH = SparseBool(attrs, 14);
-    for (size_t index : {size_t(9), size_t(10), size_t(11), size_t(12), size_t(13)}) {
-        OP_CHECK_IF(context->GetOutputShape(index) == nullptr,
-                    OP_LOGE("ChunkGatedDeltaRuleFwd", "Missing fused output %zu.", index),
-                    return ge::GRAPH_FAILED);
-    }
-    OP_CHECK_IF(!SparseShapeTolerant(context->GetOutputShape(10), {batch, hv, tokens, 128}) ||
-                    !SparseShapeTolerant(context->GetOutputShape(11), {batch, hv, tokens, 128}) ||
-                    !SparseShapeTolerant(context->GetOutputShape(13), {batch, hv, tokens}) ||
-                    (betaSigmoid && !SparseShapeTolerant(context->GetOutputShape(8), {batch, hv, tokens})),
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused intermediate output shape mismatch."),
+    const bool *useQkL2normAttr = attrs->GetAttrPointer<bool>(10);
+    // Historical fused calls always normalized Q/K; only an explicit false
+    // switches to raw operands.
+    const bool useQkL2norm = useQkL2normAttr == nullptr || *useQkL2normAttr;
+    OP_CHECK_IF(context->GetOutputShape(9) == nullptr,
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Missing fused h output."),
                 return ge::GRAPH_FAILED);
+    // Hats are allocated only when the caller asked for Q/K L2Norm output.
+    const bool writeQHat = context->GetOutputShape(10) != nullptr &&
+                           context->GetOutputShape(11) != nullptr &&
+                           context->GetOutputShape(12) != nullptr &&
+                           context->GetOutputShape(13) != nullptr;
+    OP_CHECK_IF(writeQHat &&
+                    (!SparseShapeTolerant(context->GetOutputShape(10), {batch, hk, tokens, 128}) ||
+                     !SparseShapeTolerant(context->GetOutputShape(11), {batch, hk, tokens, 128}) ||
+                     !SparseShapeTolerant(context->GetOutputShape(12), {batch, hk, tokens}) ||
+                     !SparseShapeTolerant(context->GetOutputShape(13), {batch, hk, tokens})),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused Q/K L2Norm output shape mismatch."),
+                return ge::GRAPH_FAILED);
+    const bool writeBetaEff = context->GetOutputShape(8) != nullptr;
+    OP_CHECK_IF(writeBetaEff &&
+                    !SparseShapeTolerant(context->GetOutputShape(8), {batch, hv, tokens}),
+                OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused beta_eff output shape mismatch."),
+                return ge::GRAPH_FAILED);
+    const bool writeGCumsum = context->GetOutputShape(2) != nullptr;
     const int64_t hChunks = varlen ? static_cast<int64_t>(chunkCount)
                                    : static_cast<int64_t>(chunkCount) / batch;
     OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
@@ -238,6 +252,10 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     td.useExp2 = SparseBool(attrs, 11);
     td.outputA = SparseBool(attrs, 13);
     td.writeH = writeH;
+    td.useQkL2norm = useQkL2norm ? 1U : 0U;
+    td.writeQHat = writeQHat ? 1U : 0U;
+    td.writeGCumsum = writeGCumsum ? 1U : 0U;
+    td.writeBetaEff = writeBetaEff ? 1U : 0U;
     td.storeFinalState = SparseBool(attrs, 0);
     td.stateVFirst = SparseBool(attrs, 7);
     td.varlen = varlen;

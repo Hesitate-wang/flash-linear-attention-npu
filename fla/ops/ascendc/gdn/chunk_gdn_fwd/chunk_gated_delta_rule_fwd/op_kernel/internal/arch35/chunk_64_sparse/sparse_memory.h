@@ -84,7 +84,12 @@ constexpr uint32_t kCUbV = 200 * kKiB;
 constexpr uint32_t kCUbVSlotBytes = 8 * kKiB;
 static_assert(kCUbShift + 6 * 64 * sizeof(uint32_t) <= kCUbV);
 constexpr uint32_t kCUbEnd = kCUbV + 2 * kCUbVSlotBytes;
-static_assert(kCUbEnd <= kUbBudget);
+// One 64x64 BF16 ND tile staging the public h export. Each AIV converts one
+// state half at a time, so 8 KiB is enough and the sparse UB still fits.
+constexpr uint32_t kCUbHExport = kCUbEnd;
+constexpr uint32_t kCUbHExportBytes = 8 * kKiB;
+constexpr uint32_t kCUbEndFinal = kCUbHExport + kCUbHExportBytes;
+static_assert(kCUbEndFinal <= kUbBudget);
 
 // Consumer L1 uses chunk-parity slots for values whose next-chunk upload can
 // overlap the current Cube consumer. H, vNew, right and T keep their existing

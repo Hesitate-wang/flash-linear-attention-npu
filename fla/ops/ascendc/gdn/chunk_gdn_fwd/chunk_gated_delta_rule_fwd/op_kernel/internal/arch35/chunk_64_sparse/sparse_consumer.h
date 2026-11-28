@@ -63,6 +63,15 @@ public:
         gmG_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.rawG));
         gmBeta_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.beta));
         gmO_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.o));
+        if (td.writeGCumsum != 0) {
+            gmGCumsum_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.gCumsum));
+        }
+        if (td.writeBetaEff != 0) {
+            gmBetaEff_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.betaEff));
+        }
+        if (td.writeH != 0) {
+            gmH_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.h));
+        }
         if (td.hasALog != 0) {
             gmALog_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.aLog));
         }
@@ -268,6 +277,7 @@ private:
             ubQHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbQHat);
             ubKHat_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbKHat);
             ubZeroBf_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbZero);
+            ubHExport_ = buf.GetBuffer<BufferType::ASCEND_UB, bfloat16_t>(kCUbHExport);
             for (uint32_t gateSlot = 0; gateSlot < 3; ++gateSlot) {
                 ubG_[gateSlot] = buf.GetBuffer<BufferType::ASCEND_UB, float>(
                     kCUbGates + gateSlot * kCUbGateSlotBytes);
@@ -436,6 +446,26 @@ private:
         LocalTensor<bfloat16_t> statePanel = ubStateB_[half * kHalfDim * kHalfDim];
         CopyNzToL1(hPanel, statePanel, kHalfDim, kHalfDim, kDim,
                    sub_ * static_cast<uint32_t>(kHalfDim));
+        if (td_.writeH != 0) {
+            // Export the chunk-entry state (this BF16 mirror) before the decay
+            // below touches the FP32 recurrence. Each AIV owns 64 rows of the
+            // [K,V]/[V,K] block and each half is a 64x64 column slice.
+            Bf16PanelsToNd64(ubHExport_, statePanel);
+            SetFlag<HardEvent::V_MTE3>(4);
+            WaitFlag<HardEvent::V_MTE3>(4);
+            const int64_t tile = TileIndex(loc_, chunk, td_.chunksPerBatch, td_.varlen != 0);
+            const int64_t base = (tile * td_.valueHeads + loc_.hv) * kStateElems +
+                                 sub_ * (kStateElems / 2) + half * kHalfDim;
+            DataCopyExtParams params{};
+            params.blockCount = static_cast<uint16_t>(kHalfDim);
+            params.blockLen = static_cast<uint32_t>(kHalfDim * sizeof(bfloat16_t));
+            params.srcStride = 0;
+            params.dstStride = static_cast<uint32_t>((kDim - kHalfDim) * sizeof(bfloat16_t));
+            params.rsv = 0;
+            DataCopyPad(gmH_[base], ubHExport_, params);
+            SetFlag<HardEvent::MTE3_V>(7);
+            WaitFlag<HardEvent::MTE3_V>(7);
+        }
         if (half != 0) {
             // MTE3 is ordered, so the second-half release covers both H panels.
             SetUbRelease(ubStateBArmed_, 5);
@@ -758,6 +788,35 @@ private:
         } else {
             CumsumEnergyVF<false>(ubG_[gateSlot], ubEnergy_[gateSlot], ubEnergyRecip_[gateSlot], ubShift_);
         }
+        if (sub_ == 0 && (td_.writeGCumsum != 0 || td_.writeBetaEff != 0)) {
+            // Both AIVs compute the same gates; one writer is enough.
+            // ubG_ now holds the chunk-local natural cumsum and ubBeta_ the
+            // (optionally sigmoid) beta. Publish them to the public BHT rows.
+            const ChunkWindow window = WindowOf(loc_, chunk);
+            const uint32_t rows = static_cast<uint32_t>(window.rows);
+            const int64_t offset = OffsetBht(loc_.batch, loc_.hv, window.tokenStart,
+                                             td_.valueHeads, td_.tokens);
+            if (td_.writeGCumsum != 0 && td_.useExp2 != 0) {
+                // Keep the natural-units public contract while the kernel's
+                // gate ratio path stays in log2 units.
+                CumsumToNaturalVF(ubScratch_, ubG_[gateSlot]);
+            }
+            SetFlag<HardEvent::V_MTE3>(3);
+            WaitFlag<HardEvent::V_MTE3>(3);
+            if (td_.writeGCumsum != 0) {
+                LocalTensor<float> cumsum = ubG_[gateSlot];
+                if (td_.useExp2 != 0) {
+                    cumsum = ubScratch_;
+                }
+                CopyUbToGm(gmGCumsum_, offset, cumsum, rows);
+            }
+            if (td_.writeBetaEff != 0) {
+                CopyUbToGm(gmBetaEff_, offset, ubBeta_[gateSlot], rows);
+            }
+            // The gate slot is reloaded on MTE2 two chunks later.
+            SetFlag<HardEvent::MTE3_MTE2>(6);
+            WaitFlag<HardEvent::MTE3_MTE2>(6);
+        }
 
         SetFlag<HardEvent::V_S>(1);
         if (includeInitial) {
@@ -1051,14 +1110,16 @@ private:
     float chunkDecay_[2]{};
 
     GlobalTensor<bfloat16_t> gmV_, gmT_, gmO_, gmAPrime_, gmNormQ_, gmNormK_;
-    GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_;
+    GlobalTensor<bfloat16_t> gmInitB_, gmFinalB_, gmH_;
     GlobalTensor<float> gmG_, gmBeta_, gmInitF_, gmFinalF_, gmALog_, gmDtBias_;
+    GlobalTensor<float> gmGCumsum_, gmBetaEff_;
 
     LocalTensor<float> ubStateF_, ubD_, ubP_, ubScratch_;
     LocalTensor<float> ubDecay_[2];
     LocalTensor<bfloat16_t> ubStateB_, ubU_, ubVNew_, ubRight_, ubW_, ubQ_, ubK_;
     LocalTensor<bfloat16_t> ubV_[2];
     LocalTensor<bfloat16_t> ubQHat_, ubKHat_, ubZeroBf_, ubO_, ubInitB_, ubOSB_;
+    LocalTensor<bfloat16_t> ubHExport_;
     LocalTensor<float> ubG_[3], ubEnergy_[3], ubBeta_[3], ubEnergyRecip_[3];
     LocalTensor<uint32_t> ubShift_;
     LocalTensor<bfloat16_t> l1W_[2], l1U_[2], l1QExp_[2], l1K_[2], l1H_[2];

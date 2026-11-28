@@ -53,6 +53,12 @@ public:
         if (td.hasDtBias != 0) {
             gmDtBias_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.dtBias));
         }
+        if (td.writeQHat != 0) {
+            gmQHat_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.qHat));
+            gmKHat_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(args.kHat));
+            gmQRstd_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.qRstd));
+            gmKRstd_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(args.kRstd));
+        }
         InitBuffers();
         if ASCEND_IS_AIV {
             GenerateScanIndices(ubShift_);
@@ -389,12 +395,26 @@ private:
         const uint32_t l1Slot = ProducerL1Slot(chunk);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
         WaitFlag<HardEvent::MTE2_V>(eventBase + 2);
-        NormalizeRowsNzVF(ubQ_[slot], ubQHat_[slot], ubKRstd_[gateSlot]);
+        NormalizeRowsNzVF(ubQ_[slot], ubQHat_[slot], ubKRstd_[gateSlot],
+                          td_.useQkL2norm != 0, td_.writeQHat != 0);
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], kChunk, kDim, kChunk, 0);
         AivPublish(kProdQ);
         DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], kChunkElems);
+        if (td_.writeQHat != 0) {
+            const ChunkWindow window = WindowOf(loc_, chunk);
+            const uint32_t rows = static_cast<uint32_t>(window.rows);
+            CopyUbToGm(gmQHat_, OffsetBhtd(loc_.batch, loc_.kh, window.tokenStart,
+                                           td_.keyHeads, td_.tokens),
+                       ubQ_[slot], rows * static_cast<uint32_t>(kDim));
+            CopyUbToGm(gmQRstd_, OffsetBht(loc_.batch, loc_.kh, window.tokenStart,
+                                           td_.keyHeads, td_.tokens),
+                       ubKRstd_[gateSlot], rows);
+            // The same raw-Q slot is reloaded on MTE2 two pairs later.
+            SetFlag<HardEvent::MTE3_MTE2>(7);
+            WaitFlag<HardEvent::MTE3_MTE2>(7);
+        }
         PublishNormalizedQPair(pair);
     }
 
@@ -406,12 +426,29 @@ private:
         const uint32_t l1Slot = ProducerL1Slot(chunk);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
         WaitFlag<HardEvent::MTE2_V>(eventBase);
-        NormalizeRowsNzVF(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot]);
+        NormalizeRowsNzVF(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot],
+                          td_.useQkL2norm != 0, td_.writeQHat != 0);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], kChunk, kDim, kChunk, 0);
         AivPublish(kProdK);
         DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], kChunkElems);
+        if (td_.writeQHat != 0) {
+            const ChunkWindow window = WindowOf(loc_, chunk);
+            const uint32_t rows = static_cast<uint32_t>(window.rows);
+            CopyUbToGm(gmKHat_, OffsetBhtd(loc_.batch, loc_.kh, window.tokenStart,
+                                           td_.keyHeads, td_.tokens),
+                       ubK_[slot], rows * static_cast<uint32_t>(kDim));
+            CopyUbToGm(gmKRstd_, OffsetBht(loc_.batch, loc_.kh, window.tokenStart,
+                                           td_.keyHeads, td_.tokens),
+                       ubKRstd_[gateSlot], rows);
+            // PrepareQInputs reuses the same rstd scratch on the Vector pipe,
+            // and the raw-K slot is reloaded on MTE2 two pairs later.
+            SetFlag<HardEvent::MTE3_V>(6);
+            WaitFlag<HardEvent::MTE3_V>(6);
+            SetFlag<HardEvent::MTE3_MTE2>(6);
+            WaitFlag<HardEvent::MTE3_MTE2>(6);
+        }
         PublishNormalizedKPair(pair);
     }
 
@@ -516,8 +553,9 @@ private:
     uint32_t sub_{0};
 
     GlobalTensor<bfloat16_t> gmK_, gmQ_, gmT_, gmAPrime_, gmNormQ_, gmNormK_;
+    GlobalTensor<bfloat16_t> gmQHat_, gmKHat_;
     GlobalTensor<float> gmG_, gmBeta_;
-    GlobalTensor<float> gmALog_, gmDtBias_;
+    GlobalTensor<float> gmALog_, gmDtBias_, gmQRstd_, gmKRstd_;
 
     LocalTensor<bfloat16_t> ubK_[2], ubKHat_[2];
     LocalTensor<bfloat16_t> ubQ_[2], ubQHat_[2];
