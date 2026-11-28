@@ -394,16 +394,19 @@ private:
         const uint32_t gateSlot = static_cast<uint32_t>(pair % 3);
         const uint32_t l1Slot = ProducerL1Slot(chunk);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
+        const ChunkWindow window = WindowOf(loc_, chunk);
         WaitFlag<HardEvent::MTE2_V>(eventBase + 2);
+        // Tail rows must be zeroed in the NZ copy: state/QK GEMMs reduce over
+        // the whole 64-row chunk axis.
         NormalizeRowsNzVF(ubQ_[slot], ubQHat_[slot], ubKRstd_[gateSlot],
-                          td_.useQkL2norm != 0, td_.writeQHat != 0);
+                          td_.useQkL2norm != 0, td_.writeQHat != 0,
+                          static_cast<uint32_t>(window.rows));
         SetFlag<HardEvent::V_MTE3>(1);
         WaitFlag<HardEvent::V_MTE3>(1);
         CopyNzToL1(l1QHat_[l1Slot], ubQHat_[slot], kChunk, kDim, kChunk, 0);
         AivPublish(kProdQ);
         DataCopy(gmNormQ_[NormalizedQKChunkOffset(chunk)], ubQHat_[slot], kChunkElems);
         if (td_.writeQHat != 0) {
-            const ChunkWindow window = WindowOf(loc_, chunk);
             const uint32_t rows = static_cast<uint32_t>(window.rows);
             CopyUbToGm(gmQHat_, OffsetBhtd(loc_.batch, loc_.kh, window.tokenStart,
                                            td_.keyHeads, td_.tokens),
@@ -425,16 +428,17 @@ private:
         const uint32_t gateSlot = static_cast<uint32_t>(pair % 3);
         const uint32_t l1Slot = ProducerL1Slot(chunk);
         const int32_t eventBase = static_cast<int32_t>(slot * 3);
+        const ChunkWindow window = WindowOf(loc_, chunk);
         WaitFlag<HardEvent::MTE2_V>(eventBase);
         NormalizeRowsNzVF(ubK_[slot], ubKHat_[slot], ubKRstd_[gateSlot],
-                          td_.useQkL2norm != 0, td_.writeQHat != 0);
+                          td_.useQkL2norm != 0, td_.writeQHat != 0,
+                          static_cast<uint32_t>(window.rows));
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         CopyNzToL1(l1K_[l1Slot], ubKHat_[slot], kChunk, kDim, kChunk, 0);
         AivPublish(kProdK);
         DataCopy(gmNormK_[NormalizedQKChunkOffset(chunk)], ubKHat_[slot], kChunkElems);
         if (td_.writeQHat != 0) {
-            const ChunkWindow window = WindowOf(loc_, chunk);
             const uint32_t rows = static_cast<uint32_t>(window.rows);
             CopyUbToGm(gmKHat_, OffsetBhtd(loc_.batch, loc_.kh, window.tokenStart,
                                            td_.keyHeads, td_.tokens),

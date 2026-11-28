@@ -278,12 +278,15 @@ __aicore__ inline void StoreNzEvenOdd64(__ubuf__ bfloat16_t *nz, uint32_t row,
 // normalize=false keeps the raw operands (use_qk_l2norm_in_kernel=false): the
 // NZ copy is produced unscaled and rstd is not meaningful. storeNd writes the
 // row back as ND in place so the Producer can export q_hat/k_hat without a
-// second conversion.
+// second conversion. Rows past validRows are tail padding: they must leave as
+// exact zeros because the down-stream K/W GEMMs reduce over the full 64-row
+// chunk axis, so stale residual rows would contaminate state updates.
 __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
                                          LocalTensor<bfloat16_t> &nzOutput,
                                          LocalTensor<float> &rstd,
                                          bool normalize = true,
-                                         bool storeNd = false)
+                                         bool storeNd = false,
+                                         uint32_t validRows = static_cast<uint32_t>(kChunk))
 {
     __ubuf__ bfloat16_t *src = reinterpret_cast<__ubuf__ bfloat16_t *>(input.GetPhyAddr());
     __ubuf__ bfloat16_t *nz = reinterpret_cast<__ubuf__ bfloat16_t *>(nzOutput.GetPhyAddr());
@@ -299,6 +302,20 @@ __aicore__ inline void NormalizeRowsNzVF(LocalTensor<bfloat16_t> &input,
         RegTensor<bfloat16_t> lo, hi;
         Duplicate(one, 1.0f, all);
         for (uint16_t row = 0; row < kChunk; ++row) {
+            if (row >= validRows) {
+                Duplicate(even, 0.0f, all);
+                Duplicate(odd, 0.0f, all);
+                StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(norm + row, one, scalar);
+                StoreNzEvenOdd64(nz, row, even, odd, m16, m128);
+                if (storeNd) {
+                    Cast<bfloat16_t, float, GdnFwd32::kCastB322B16>(lo, even, m16);
+                    Cast<bfloat16_t, float, GdnFwd32::kCastB322B16Hi>(hi, odd, m16);
+                    Or((RegTensor<uint16_t> &)lo, (RegTensor<uint16_t> &)lo,
+                       (RegTensor<uint16_t> &)hi, m16);
+                    StoreAlign(src + static_cast<uint32_t>(row) * 128, lo, m128);
+                }
+                continue;
+            }
             GdnFwd32::LoadEvenOdd(src + static_cast<uint32_t>(row) * 128, even, odd, m16);
             if (normalize) {
                 Mul(sum0, even, even, all);

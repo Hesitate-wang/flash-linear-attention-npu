@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <limits>
+#include <string>
 
 namespace optiling {
 namespace {
@@ -49,6 +50,22 @@ int64_t SparseNumel(std::initializer_list<int64_t> dims)
         numel *= dim;
     }
     return numel;
+}
+
+std::string SparseDims(const gert::StorageShape *shape)
+{
+    if (shape == nullptr) {
+        return "null";
+    }
+    const auto &storage = shape->GetStorageShape();
+    std::string text = "[";
+    for (size_t index = 0; index < storage.GetDimNum(); ++index) {
+        if (index != 0) {
+            text += ",";
+        }
+        text += std::to_string(storage.GetDim(index));
+    }
+    return text + "]";
 }
 
 bool SparseShapeTolerant(const gert::StorageShape *shape, std::initializer_list<int64_t> dims)
@@ -173,18 +190,28 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     OP_CHECK_IF(context->GetOutputShape(9) == nullptr,
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Missing fused h output."),
                 return ge::GRAPH_FAILED);
-    // The fused launcher fills every omitted optional output with a {1} dummy
-    // so the argument list stays fixed. Output presence therefore cannot mean
-    // "requested"; the export switches follow the attributes and the real
-    // (non-dummy) shapes.
+    // l0op OP_OUTPUT order: o, final_state, g_cumsum, A, q_hat, k_hat,
+    // q_rstd, k_rstd, beta_eff, h, w, u, v_new, g_cumsum_bht. Only the fused
+    // launcher reaches key64, and when it requests Q/K normalization it binds
+    // the real internal tensors to slots 4-7, so these shapes are a contract
+    // check rather than a request probe. Slots 10-12 (w/u/v_new) are workspace,
+    // with v_new a {1} placeholder.
     const bool hatsReal =
-        SparseShapeTolerant(context->GetOutputShape(10), {batch, hk, tokens, 128}) &&
-        SparseShapeTolerant(context->GetOutputShape(11), {batch, hk, tokens, 128}) &&
-        SparseShapeTolerant(context->GetOutputShape(12), {batch, hk, tokens}) &&
-        SparseShapeTolerant(context->GetOutputShape(13), {batch, hk, tokens});
-    OP_CHECK_IF(useQkL2norm && !hatsReal,
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused Q/K L2Norm output shape mismatch."),
-                return ge::GRAPH_FAILED);
+        SparseShapeTolerant(context->GetOutputShape(4), {batch, hk, tokens, 128}) &&
+        SparseShapeTolerant(context->GetOutputShape(5), {batch, hk, tokens, 128}) &&
+        SparseShapeTolerant(context->GetOutputShape(6), {batch, hk, tokens}) &&
+        SparseShapeTolerant(context->GetOutputShape(7), {batch, hk, tokens});
+    if (useQkL2norm && !hatsReal) {
+        OP_LOGE("ChunkGatedDeltaRuleFwd",
+                "Fused Q/K L2Norm output shape mismatch: q_hat=%s k_hat=%s q_rstd=%s "
+                "k_rstd=%s, expected q/k=[%ld,%ld,%ld,128] rstd=[%ld,%ld,%ld].",
+                SparseDims(context->GetOutputShape(4)).c_str(),
+                SparseDims(context->GetOutputShape(5)).c_str(),
+                SparseDims(context->GetOutputShape(6)).c_str(),
+                SparseDims(context->GetOutputShape(7)).c_str(),
+                batch, hk, tokens, batch, hk, tokens);
+        return ge::GRAPH_FAILED;
+    }
     const bool writeQHat = useQkL2norm;
     const bool writeBetaEff = betaSigmoid;
     OP_CHECK_IF(writeBetaEff &&
