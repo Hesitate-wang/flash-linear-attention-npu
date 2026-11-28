@@ -51,17 +51,6 @@ int64_t SparseNumel(std::initializer_list<int64_t> dims)
     return numel;
 }
 
-// An absent OPTIONAL output still arrives as a placeholder shape (rank 0 or
-// zero elements), so presence has to be judged by content, not by nullptr.
-bool SparseOutputRequested(const gert::StorageShape *shape)
-{
-    if (shape == nullptr) {
-        return false;
-    }
-    const gert::Shape &storage = shape->GetStorageShape();
-    return storage.GetDimNum() != 0 && storage.GetShapeSize() != 0;
-}
-
 bool SparseShapeTolerant(const gert::StorageShape *shape, std::initializer_list<int64_t> dims)
 {
     if (SparseShape(shape, dims)) {
@@ -193,19 +182,6 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid h output shape."),
                 return ge::GRAPH_FAILED);
-    // q_hat/k_hat/q_rstd/k_rstd are OPTIONAL outputs: they are shape-checked
-    // only when the caller asks for them, and absent ones are simply skipped.
-    const auto *qHatOut = context->GetOutputShape(4);
-    const auto *kHatOut = context->GetOutputShape(5);
-    const auto *qRstdOut = context->GetOutputShape(6);
-    const auto *kRstdOut = context->GetOutputShape(7);
-    OP_CHECK_IF((SparseOutputRequested(qHatOut) && !SparseShapeTolerant(qHatOut, {batch, hk, tokens, 128})) ||
-                    (SparseOutputRequested(kHatOut) && !SparseShapeTolerant(kHatOut, {batch, hk, tokens, 128})) ||
-                    (SparseOutputRequested(qRstdOut) && !SparseShapeTolerant(qRstdOut, {batch, hk, tokens})) ||
-                    (SparseOutputRequested(kRstdOut) && !SparseShapeTolerant(kRstdOut, {batch, hk, tokens})),
-                OP_LOGE("ChunkGatedDeltaRuleFwd", "Invalid norm output shape."),
-                return ge::GRAPH_FAILED);
-
     // Zero-length sequences are dropped on the host: they own no chunk, so they
     // get no chain and no core pair, and nothing writes their final_state. A
     // caller that needs that slice must pre-fill it.
