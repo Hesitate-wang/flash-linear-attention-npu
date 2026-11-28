@@ -173,24 +173,26 @@ ge::graphStatus TilingForChunkGatedDeltaRuleFwdSparse(gert::TilingContext *conte
     OP_CHECK_IF(context->GetOutputShape(9) == nullptr,
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Missing fused h output."),
                 return ge::GRAPH_FAILED);
-    // Hats are allocated only when the caller asked for Q/K L2Norm output.
-    const bool writeQHat = context->GetOutputShape(10) != nullptr &&
-                           context->GetOutputShape(11) != nullptr &&
-                           context->GetOutputShape(12) != nullptr &&
-                           context->GetOutputShape(13) != nullptr;
-    OP_CHECK_IF(writeQHat &&
-                    (!SparseShapeTolerant(context->GetOutputShape(10), {batch, hk, tokens, 128}) ||
-                     !SparseShapeTolerant(context->GetOutputShape(11), {batch, hk, tokens, 128}) ||
-                     !SparseShapeTolerant(context->GetOutputShape(12), {batch, hk, tokens}) ||
-                     !SparseShapeTolerant(context->GetOutputShape(13), {batch, hk, tokens})),
+    // The fused launcher fills every omitted optional output with a {1} dummy
+    // so the argument list stays fixed. Output presence therefore cannot mean
+    // "requested"; the export switches follow the attributes and the real
+    // (non-dummy) shapes.
+    const bool hatsReal =
+        SparseShapeTolerant(context->GetOutputShape(10), {batch, hk, tokens, 128}) &&
+        SparseShapeTolerant(context->GetOutputShape(11), {batch, hk, tokens, 128}) &&
+        SparseShapeTolerant(context->GetOutputShape(12), {batch, hk, tokens}) &&
+        SparseShapeTolerant(context->GetOutputShape(13), {batch, hk, tokens});
+    OP_CHECK_IF(useQkL2norm && !hatsReal,
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused Q/K L2Norm output shape mismatch."),
                 return ge::GRAPH_FAILED);
-    const bool writeBetaEff = context->GetOutputShape(8) != nullptr;
+    const bool writeQHat = useQkL2norm;
+    const bool writeBetaEff = betaSigmoid;
     OP_CHECK_IF(writeBetaEff &&
                     !SparseShapeTolerant(context->GetOutputShape(8), {batch, hv, tokens}),
                 OP_LOGE("ChunkGatedDeltaRuleFwd", "Fused beta_eff output shape mismatch."),
                 return ge::GRAPH_FAILED);
-    const bool writeGCumsum = context->GetOutputShape(2) != nullptr;
+    const bool writeGCumsum =
+        SparseShapeTolerant(context->GetOutputShape(2), {batch, hv, tokens});
     const int64_t hChunks = varlen ? static_cast<int64_t>(chunkCount)
                                    : static_cast<int64_t>(chunkCount) / batch;
     OP_CHECK_IF(writeH && !SparseShapeTolerant(context->GetOutputShape(9), {batch, hChunks, hv, 128, 128}),
