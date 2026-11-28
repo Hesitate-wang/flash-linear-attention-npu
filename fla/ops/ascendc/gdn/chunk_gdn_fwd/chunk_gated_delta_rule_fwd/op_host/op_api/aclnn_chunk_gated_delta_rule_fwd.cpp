@@ -625,8 +625,10 @@ static aclnnStatus CheckParams(const ChunkGatedDeltaRuleFwdParams &params)
     if (params.hOutOptional != nullptr) {
         const int64_t stateDim0 = params.stateVFirst ? info.vDim : info.kDim;
         const int64_t stateDim1 = params.stateVFirst ? info.kDim : info.vDim;
+        // Public h layout is [B, Hv, NT, dk, dv]; this check also covers the
+        // fused prepare path, which is the only route that accepts h.
         const bool valid = HasShape(params.hOutOptional,
-                                    {info.batch, chunks, info.hv, stateDim0, stateDim1});
+                                    {info.batch, info.hv, chunks, stateDim0, stateDim1});
         CHECK_COND(valid, ACLNN_ERR_PARAM_INVALID,
                    "hOutOptional shape must match stateVFirst.");
     }
