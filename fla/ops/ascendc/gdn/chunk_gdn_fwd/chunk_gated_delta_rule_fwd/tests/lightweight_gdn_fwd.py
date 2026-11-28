@@ -82,8 +82,37 @@ def parse_args() -> argparse.Namespace:
                         help="Debug: export energy/scale/g/lastEnergy in the first four outputs")
     parser.add_argument("--cpu-only", action="store_true",
                         help="Only validate input/golden/log generation; do not touch the NPU")
+    parser.add_argument("--layout", choices=("BNSD", "NTD"), default="BNSD",
+                        help="Input layout; both are head-major [B,H,T,D]")
+    parser.add_argument("--no-qk-l2norm", action="store_true",
+                        help="use_qk_l2norm_in_kernel=False: the kernel keeps raw q/k")
+    parser.add_argument("--disable-recompute", action="store_true",
+                        help="Request g_cumsum and A from the kernel")
+    parser.add_argument("--return-intermediate-states", action="store_true",
+                        help="Request the per-chunk state h from the kernel")
+    parser.add_argument("--input-mode", choices=("randn", "repro"), default="randn",
+                        help="randn: legacy generator; repro: ATK-like uniform ranges")
+    parser.add_argument("--repro-127", action="store_true",
+                        help="ATK repro preset: B=3 Hk=3 Hv=12 T=127 NTD raw q/k, "
+                             "beta sigmoid, g_cumsum/A and h requested")
     parser.add_argument("--log-dir", type=Path, default=TEST_DIR / "logs")
     args = parser.parse_args()
+    if args.repro_127:
+        args.batch = 3
+        args.key_heads = 3
+        args.value_heads = 12
+        if args.tokens is None:
+            args.tokens = 127
+        args.seed = 20260000
+        args.gate_scale = 100.0
+        args.input_mode = "repro"
+        args.layout = "NTD"
+        args.no_qk_l2norm = True
+        args.beta_sigmoid = True
+        args.disable_recompute = True
+        args.return_intermediate_states = True
+        args.no_initial_state = True
+        args.chunk_size = 64
     if args.batch <= 0 or args.key_heads <= 0 or args.value_heads <= 0:
         parser.error("batch/key-heads/value-heads must be positive")
     if args.value_heads % args.key_heads != 0:
@@ -106,7 +135,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--performance cannot be combined with comparison modes")
     if args.dump_aprime or args.dump_ol or args.dump_os or args.dump_scalars:
         parser.error("debug dump modes are disabled; only o/final_state are compared")
+    if args.compare_chain and (args.no_qk_l2norm or args.disable_recompute or
+                               args.return_intermediate_states or args.layout != "BNSD"):
+        parser.error("--compare-chain only supports the legacy BNSD/normalized/L0 export set")
     if args.chunk_size == 32:
+        if args.no_qk_l2norm or args.disable_recompute or args.return_intermediate_states:
+            parser.error("chunk_size=32 fixes l2norm on and does not export intermediates")
         if args.compare_chain:
             parser.error("chunk_size=32 does not support the Prepare reference chain")
         if args.use_exp2:
@@ -149,6 +183,14 @@ def case_config(args: argparse.Namespace, name: str) -> dict:
         config["compare_chain"] = args.compare_chain
     if config["chunk_size"] == 32:
         config["beta_sigmoid"] = True
+    config["qk_l2norm"] = not args.no_qk_l2norm
+    config["disable_recompute"] = bool(args.disable_recompute)
+    config["return_intermediate_states"] = bool(args.return_intermediate_states)
+    if config["chunk_size"] == 32:
+        config["qk_l2norm"] = True
+        config["disable_recompute"] = False
+        config["return_intermediate_states"] = False
+        config["layout"] = "BNSD"
     config["initial_state"] = not args.no_initial_state
     config["final_state"] = not args.no_final_state
     return config
@@ -188,11 +230,19 @@ def sequence_ranges(config: dict, cu: tuple[int, ...] | None):
 def make_inputs(config: dict, cu: tuple[int, ...] | None) -> dict:
     generator = torch.Generator().manual_seed(config["seed"])
     b, hk, hv, t = config["batch"], config["key_heads"], config["value_heads"], config["tokens"]
-    q = (0.125 * torch.randn((b, hk, t, 128), generator=generator)).to(torch.bfloat16).contiguous()
-    k = (0.125 * torch.randn((b, hk, t, 128), generator=generator)).to(torch.bfloat16).contiguous()
-    v = (0.125 * torch.randn((b, hv, t, 128), generator=generator)).to(torch.bfloat16).contiguous()
-    g = (-config["gate_scale"] * torch.rand((b, t, hv), generator=generator)).float().contiguous()
-    beta = torch.rand((b, t, hv), generator=generator).to(torch.bfloat16).contiguous()
+    if config.get("input_mode") == "repro":
+        # ATK case ranges: q/k U[-5,5], v U[-1024,1024], beta U[-5,5], g U[-100,0].
+        q = (torch.rand((b, hk, t, 128), generator=generator) * 10.0 - 5.0).to(torch.bfloat16).contiguous()
+        k = (torch.rand((b, hk, t, 128), generator=generator) * 10.0 - 5.0).to(torch.bfloat16).contiguous()
+        v = (torch.rand((b, hv, t, 128), generator=generator) * 2048.0 - 1024.0).to(torch.bfloat16).contiguous()
+        g = (-config["gate_scale"] * torch.rand((b, t, hv), generator=generator)).float().contiguous()
+        beta = (torch.rand((b, t, hv), generator=generator) * 10.0 - 5.0).to(torch.bfloat16).contiguous()
+    else:
+        q = (0.125 * torch.randn((b, hk, t, 128), generator=generator)).to(torch.bfloat16).contiguous()
+        k = (0.125 * torch.randn((b, hk, t, 128), generator=generator)).to(torch.bfloat16).contiguous()
+        v = (0.125 * torch.randn((b, hv, t, 128), generator=generator)).to(torch.bfloat16).contiguous()
+        g = (-config["gate_scale"] * torch.rand((b, t, hv), generator=generator)).float().contiguous()
+        beta = torch.rand((b, t, hv), generator=generator).to(torch.bfloat16).contiguous()
     sequence_count = len(cu) - 1 if cu is not None else b
     initial = None
     if config["initial_state"]:
@@ -204,10 +254,18 @@ def make_inputs(config: dict, cu: tuple[int, ...] | None) -> dict:
 
 def effective_inputs(inputs: dict, config: dict) -> dict:
     q, k = inputs["q"], inputs["k"]
-    q_rstd = torch.rsqrt(q.float().square().sum(dim=-1) + 1e-6)
-    k_rstd = torch.rsqrt(k.float().square().sum(dim=-1) + 1e-6)
-    q_hat = (q.float() * q_rstd.unsqueeze(-1)).to(torch.bfloat16)
-    k_hat = (k.float() * k_rstd.unsqueeze(-1)).to(torch.bfloat16)
+    if config.get("qk_l2norm", True):
+        q_rstd = torch.rsqrt(q.float().square().sum(dim=-1) + 1e-6)
+        k_rstd = torch.rsqrt(k.float().square().sum(dim=-1) + 1e-6)
+        q_hat = (q.float() * q_rstd.unsqueeze(-1)).to(torch.bfloat16)
+        k_hat = (k.float() * k_rstd.unsqueeze(-1)).to(torch.bfloat16)
+    else:
+        # use_qk_l2norm_in_kernel=False: the kernel and the reference both use
+        # the raw operators; the public hats are the caller's own q/k.
+        q_rstd = None
+        k_rstd = None
+        q_hat = q
+        k_hat = k
     beta = inputs["beta"].float()
     if config["beta_sigmoid"]:
         beta = torch.sigmoid(beta)
@@ -307,8 +365,9 @@ def golden(inputs: dict, config: dict, cu: tuple[int, ...] | None) -> dict:
         result["final_state"] = final.to(DTYPES[config["initial_dtype"]] if initial is not None else torch.float32)
     if config["beta_sigmoid"]:
         result["beta_eff"] = effective["beta"].float()
-    result.update({"q_hat": effective["q"], "k_hat": effective["k"],
-                   "q_rstd": effective["q_rstd"], "k_rstd": effective["k_rstd"]})
+    result.update({"q_hat": effective["q"], "k_hat": effective["k"]})
+    if config.get("qk_l2norm", True):
+        result.update({"q_rstd": effective["q_rstd"], "k_rstd": effective["k_rstd"]})
     return result
 
 
@@ -383,10 +442,23 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             summary["golden_seconds"] = time.perf_counter() - golden_started
             logger.info("CPU golden finished seconds=%.6f", summary["golden_seconds"])
             if config["chunk_size"] == 32:
-                for name in ("g_cumsum", "A", "h"):
-                    expected.pop(name, None)
-            expected = {name: tensor for name, tensor in expected.items()
-                        if name == "o" or (name == "final_state" and config["final_state"])}
+                # The legacy chunk32 path exports only o/final_state here.
+                keep = {"o"}
+                if config["final_state"]:
+                    keep.add("final_state")
+            else:
+                keep = {"o"}
+                if config["final_state"]:
+                    keep.add("final_state")
+                if config["disable_recompute"]:
+                    keep.update(("g_cumsum", "A"))
+                if config["return_intermediate_states"]:
+                    keep.add("h")
+                if config["beta_sigmoid"]:
+                    keep.add("beta_eff")
+                if config.get("qk_l2norm", True):
+                    keep.update(("q_hat", "k_hat", "q_rstd", "k_rstd"))
+            expected = {name: tensor for name, tensor in expected.items() if name in keep}
         else:
             logger.info("CPU golden skipped (compare_cpu=false)")
         if config["cpu_only"]:
@@ -452,8 +524,8 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 scale=config["scale"],
                 allow_neg_eigval=config["allow_neg_eigval"],
                 state_v_first=config["state_v_first"],
-                return_intermediate_states=False,
-                layout="BNSD",
+                return_intermediate_states=config["return_intermediate_states"],
+                layout=config["layout"],
             )
             if config["chunk_size"] == 32:
                 from fla_npu.ops.ascendc import _aclnn_ctypes
@@ -468,9 +540,9 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                 npu_inputs["q"], npu_inputs["k"], npu_inputs["v"],
                 npu_inputs["g"], npu_inputs["beta"],
                 chunk_size=64, use_exp2=config["use_exp2"],
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=config["qk_l2norm"],
                 use_beta_sigmoid_in_kernel=config["beta_sigmoid"],
-                disable_recompute=False, **common)
+                disable_recompute=config["disable_recompute"], **common)
 
         for index in range(config["warmup"]):
             logger.info("warmup %d started", index)
@@ -504,7 +576,7 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
             logger.info("scalar debug actual=%s expected=%s", scalar_values, expected_scalars)
         output_stats = {}
         for tensor_name, tensor in actual.items():
-            if tensor is not None and (tensor_name == "o" or tensor_name == "final_state"):
+            if tensor is not None:
                 output_stats[tensor_name] = tensor_stats(tensor)
                 logger.info("DUT output %s %s", tensor_name, json.dumps(output_stats[tensor_name]))
         summary["output_stats"] = output_stats
@@ -527,6 +599,18 @@ def run_one(base_args: argparse.Namespace, name: str) -> bool:
                                       logger, label=f"cpu.{tensor_name}")
                 metrics[tensor_name] = metric
                 logger.info("compare %s %s", tensor_name, json.dumps(metric))
+                if tensor_name == "h" and dut_tensor.dim() == 5:
+                    # Split the state report per chunk: h[0] must be the
+                    # initial state, later slots the state entering each chunk.
+                    per_chunk = {}
+                    for chunk_index in range(dut_tensor.shape[1]):
+                        chunk_metric = data_compare(
+                            dut_tensor[:, chunk_index], expected_tensor[:, chunk_index],
+                            config, logger, label=f"cpu.h[{chunk_index}]")
+                        per_chunk[str(chunk_index)] = chunk_metric
+                        logger.info("compare h[%d] %s", chunk_index,
+                                    json.dumps(chunk_metric))
+                    summary["h_chunk_metrics"] = per_chunk
         summary["metrics"] = metrics
 
         chain_metrics = {}
