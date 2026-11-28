@@ -485,16 +485,8 @@ private:
 
     __aicore__ inline void PrepareCurrentState(int64_t chunk, bool applyDecay = true)
     {
-        const ChunkWindow window = WindowOf(loc_, chunk);
-        const uint32_t firstRow = sub_ * kHalfRows;
-        if (window.rows < kChunk) {
-            // LoadT reads only valid rows. Clear the padded L1 rows before the
-            // kConsS publication, which precedes this chunk's mode-0/LoadT.
-            Duplicate(ubZeroBf_, static_cast<bfloat16_t>(0), kHalfRows * kChunk);
-            SetFlag<HardEvent::V_MTE3>(0);
-            WaitFlag<HardEvent::V_MTE3>(0);
-            CopyNzToL1(l1T_[0], ubZeroBf_, kHalfRows, kChunk, kChunk, firstRow);
-        }
+        // Tail padding of the T tile is cleared inside LoadT, on the AIC and
+        // right before the copy, so no AIV-side slot-0 clear is needed here.
         PrepareCurrentStateHalf(chunk, 0, applyDecay);
         PrepareCurrentStateHalf(chunk, 1, applyDecay);
     }
@@ -878,6 +870,18 @@ private:
     __aicore__ inline void LoadT(int64_t chunk)
     {
         const ChunkWindow window = WindowOf(loc_, chunk);
+        LocalTensor<bfloat16_t> dst = l1T_[chunk & 1];
+        if (window.rows < kChunk) {
+            // Nd2Nz leaves rows beyond nValue untouched. Clear the whole tile
+            // on the same pipe before the copy so padded rows are zero for
+            // every chunk parity; the AIV-side clear could only reach slot 0
+            // and raced with this load.
+            InitConstValueParams<bfloat16_t> clear(
+                1, static_cast<uint16_t>(kMatrixElems * sizeof(bfloat16_t) / 32), 0,
+                static_cast<bfloat16_t>(0));
+            InitConstValue(dst, clear);
+            PipeBarrier<PIPE_MTE2>();
+        }
         Nd2NzParams params{};
         params.ndNum = 1;
         params.nValue = static_cast<uint32_t>(window.rows);
@@ -889,7 +893,7 @@ private:
         params.dstNzMatrixStride = 0;
         const int64_t offset = OffsetBhtd(loc_.batch, loc_.hv, window.tokenStart,
                                           td_.valueHeads, td_.tokens, kChunk);
-        DataCopy(l1T_[chunk & 1], gmT_[offset], params);
+        DataCopy(dst, gmT_[offset], params);
     }
 
     __aicore__ inline void LoadAPrime(int64_t chunk)
